@@ -1,0 +1,12 @@
+{
+  "name": "@aerobeat/web-gameplay-testbed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "echo \"Add a repo-local Vite or static demo command when gameplay scenes need serving.\"",
+    "serve": "echo \"Define host, port, cache busting, QR/link output, served roots, and secure-context handling before mobile validation.\"",
+    "test": "echo \"Add deterministic gameplay clock, session, Flow, and Boxing fixture tests in Task 6.\"",
+    "test:browser": "echo \"Add Playwright tests for component-composed gameplay scenes in Task 6.\""
+  }
+}

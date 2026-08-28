@@ -1,0 +1,7 @@
+{
+  "schema": "aero.gameplay.scaffold-fixture",
+  "version": 1,
+  "mode": "flow",
+  "clockMs": 0,
+  "events": []
+}
