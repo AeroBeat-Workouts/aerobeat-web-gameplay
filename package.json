@@ -3,6 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE.md",
+    "docs/decisions/"
+  ],
   "exports": {
     ".": "./src/index.js"
   },
