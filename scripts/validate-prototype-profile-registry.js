@@ -58,10 +58,12 @@ function rejectAtomically(candidate, predicate) {
 const hostile = structuredClone(fixture);
 hostile.profiles[0].contentHash = "0".repeat(64);
 rejectAtomically(hostile, (error) => error?.code === "profile_hash_mismatch");
+// Preserve the original exported bundleHash exactly: permissive normalization used to
+// reconstruct omitted metadata and make this stale hash validate against normalized data.
 for (const missingField of ["schema", "version", "contentHash", "experimental", "label", "settings"]) {
   const missing = structuredClone(fixture);
   delete missing.profiles[0][missingField];
-  rejectAtomically(rehashBundle(missing), (error) => error?.code === "prototype_profile_fields_missing");
+  rejectAtomically(missing, (error) => error?.code === "prototype_profile_fields_missing");
 }
 const extra = structuredClone(fixture);
 extra.profiles[0].winner = true;
