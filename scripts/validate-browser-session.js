@@ -17,9 +17,9 @@ const server = createServer(async (request, response) => {
         import { createAeroGameplaySessionCoordinator } from "/gameplay/src/index.js";
         const HASH = "a".repeat(64);
         const runtime = createAeroGameplaySessionCoordinator({ sessionId: "browser" });
-        const variant = { variantId: "browser-variant", chartId: "browser-chart", mode: "boxing", rulesetId: "boxing_semantic_track_v1", recipeId: "row_family_balanced_height_v1", modifierIds: [], ranked: false, mapHash: { value: HASH }, scoreIdentityHash: { value: HASH }, provenance: { kind: "authored" } };
+        const variant = { variantId: "browser-variant", chartId: "browser-chart", mode: "boxing", rulesetId: "boxing_semantic_track_v1", recipeId: "row_family_balanced_height_v1", modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { kind: "authored" } };
         const clock = (positionMs, playing) => ({ contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, playing });
-        const input = (calibrationId, paused = false, fresh = false) => ({ calibration: { calibrationId, readiness: fresh ? "calibration_required" : "ready" }, tracking: { gameplayPaused: paused, freshCalibrationRequired: fresh }, countdownFrozen: paused, latestEvidence: null, straightQualifications: [] });
+        const input = (calibrationId, paused = false, fresh = false) => ({ calibration: { calibrationId, readiness: fresh ? "calibration_required" : "countdown" }, tracking: { gameplayPaused: paused, freshCalibrationRequired: fresh }, countdownFrozen: paused, latestEvidence: null, straightQualifications: [] });
         const states = [runtime.getSnapshot().session.state];
         runtime.configureContent({ packageId: "browser-package", selectedVariant: variant, resolvedEvents: [] });
         states.push(runtime.getSnapshot().session.state);

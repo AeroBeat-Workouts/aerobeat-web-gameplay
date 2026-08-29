@@ -79,6 +79,31 @@ export function isPlainRecord(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+/**
+ * Read only an exact set of top-level own data fields without traversing values.
+ * This is used for transport envelopes whose documented optional values may be undefined.
+ *
+ * @param {unknown} value
+ * @param {string} code
+ * @param {readonly string[]} allowedKeys
+ * @returns {DataRecord}
+ */
+export function requireDataRecordFields(value, code, allowedKeys) {
+  if (!isPlainRecord(value)) throw gameplayError(code, "Expected a plain record");
+  const allowed = new Set(allowedKeys);
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== "string" || !allowed.has(key))) throw gameplayError(code, "Record contains unknown or symbolic fields");
+  /** @type {Record<string, unknown>} */
+  const result = {};
+  for (const keyValue of keys) {
+    const key = /** @type {string} */ (keyValue);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw gameplayError(code, "Record cannot contain accessors or hidden fields");
+    result[key] = descriptor.value;
+  }
+  return Object.freeze(result);
+}
+
 /** @param {unknown} value @param {string} code @param {number} [maximumItems] @returns {DataRecord} */
 export function requireRecord(value, code, maximumItems) {
   if (!isPlainRecord(value)) throw gameplayError(code, "Expected a plain record");

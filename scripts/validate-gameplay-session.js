@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot } from "@aerobeat/web-contracts";
+import { createPlaybackClock } from "../../aerobeat-web-audio/src/index.js";
 import {
   aeroGameplaySessionCapabilities,
   createAeroGameplaySessionCoordinator
@@ -10,7 +11,7 @@ import {
 const HASH = "a".repeat(64);
 
 function variant(rulesetId = "boxing_semantic_track_v1", recipeId = "row_family_balanced_height_v1", id = "variant") {
-  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_grid_v1" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_grid_v1" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { value: HASH }, scoreIdentityHash: { value: HASH }, provenance: { baseVariantId: id } };
+  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_grid_v1" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_grid_v1" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { baseVariantId: id } };
 }
 
 function event(eventId, centerTimestampMs, type, extra = {}) {
@@ -29,7 +30,7 @@ function evidence(frameId, measured, actions, overrides = {}) {
 }
 
 function input(measured, latestEvidence, options = {}) {
-  return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: options.ready === false ? "calibration_required" : "ready" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] };
+  return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: options.ready === false ? "calibration_required" : "countdown" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] };
 }
 
 function config(events, selected = variant(), shadowVariants = []) {
@@ -111,6 +112,19 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getJudgements()[0].result, "hit");
   assert.equal(coordinator.getJudgements()[0].timingOffsetMs, -180);
   assert.equal(isGameplayJudgement(coordinator.getJudgements()[0]), true);
+  const partition = coordinator.getScorePartitions()[0];
+  assert.equal(partition.localOnly, true);
+  assert.equal(partition.ranked, false);
+  assert.equal(partition.rulesetId, "boxing_semantic_track_v1");
+  assert.equal(partition.recipeId, "row_family_balanced_height_v1");
+  assert.equal(partition.mapHash.value, HASH);
+  assert.equal(partition.scoreIdentityHash.value, HASH);
+  assert.equal(partition.profileId, "profile");
+  assert.equal(partition.profileVersion, "1");
+  assert.equal(partition.profileHash, HASH);
+  assert.equal(partition.profileClass, "between_run_ruleset");
+  assert.equal(partition.regenerationRequired, false);
+  assert.match(partition.partitionId, new RegExp(`${HASH}\\|${HASH}\\|profile\\|1\\|${HASH}\\|between_run_ruleset\\|live$`, "u"));
 }
 
 // Inclusive +180ms boundary and 150ms freshness fail closed beyond the limit.
@@ -257,11 +271,23 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-past", 4000, ["hook_left"])) });
   coordinator.setActiveEventIds(["active"]);
   coordinator.pause(4100);
-  coordinator.applyFutureContent(config([{ ...event("replacement", 3000, "weave_left"), variantId: "variant-next", chartId: "chart-variant-next" }], variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "variant-next")));
+  const nextConfiguration = config([{ ...event("replacement", 3000, "weave_left"), variantId: "variant-next", chartId: "chart-variant-next" }], variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "variant-next"));
+  nextConfiguration.profileIdentity = { ...nextConfiguration.profileIdentity, profileVersion: "2", contentHash: "b".repeat(64) };
+  coordinator.applyFutureContent(nextConfiguration);
   const snapshot = coordinator.getSnapshot();
   assert.deepEqual(snapshot.judgedEventIds, ["past"]);
   assert.deepEqual(snapshot.activeEventIds, ["active"]);
   assert.equal(snapshot.selectedVariant.variantId, "variant-next");
+  coordinator.resume(4100);
+  coordinator.advance({ timestampMs: 5100, clock: clock(1000, false) });
+  coordinator.advance({ timestampMs: 6100, clock: clock(1000, false) });
+  coordinator.advance({ timestampMs: 7100, clock: clock(1000, false) });
+  coordinator.advance({ timestampMs: 8000, clock: clock(2000, true), input: input(8000, evidence("active-old-frame", 8000, ["hook_right"])) });
+  const activeJudgement = coordinator.getJudgements().find((entry) => entry.eventId === "active");
+  assert.equal(activeJudgement?.variantId, "variant");
+  assert.equal(activeJudgement?.recipeId, "row_family_balanced_height_v1");
+  assert.equal(activeJudgement?.profileVersion, "1");
+  assert.equal(coordinator.getScorePartitions().some((entry) => entry.variantId === "variant" && entry.profileVersion === "1"), true);
 }
 
 // Shadow diagnostics never consume live evidence or change score partitions.
@@ -312,6 +338,84 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(right.getSnapshot().session.pauseReason, "media_lease_unavailable");
 }
 
+// Actual public audio clock shape, including optional undefined duration, is accepted.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "public-audio-clock" });
+  coordinator.configureContent(config([]));
+  const publicClock = createPlaybackClock().snapshot(0);
+  coordinator.advance({ timestampMs: 0, clock: publicClock, input: input(0, null) });
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+  assert.equal(coordinator.getSnapshot().safety.ready, true);
+}
+
+// Unsafe clocks and tracking loss preserve the last safe audio timeline.
+{
+  const stopped = createAeroGameplaySessionCoordinator({ sessionId: "stopped-clock-freeze" });
+  readyPlaying(stopped, [event("future-stopped", 5000, "hook_left")]);
+  stopped.advance({ timestampMs: 3100, clock: clock(500, false) });
+  assert.equal(stopped.getSnapshot().session.timelinePositionMs, 0);
+  assert.equal(stopped.getSnapshot().session.pauseReason, "audio_clock_not_playing");
+
+  const lost = createAeroGameplaySessionCoordinator({ sessionId: "tracking-clock-freeze" });
+  readyPlaying(lost, [event("future-lost", 5000, "hook_left")]);
+  lost.advance({ timestampMs: 3100, clock: clock(500, true), input: input(3100, null, { paused: true, fresh: true }) });
+  assert.equal(lost.getSnapshot().session.timelinePositionMs, 0);
+  assert.equal(lost.getSnapshot().session.state, "paused_tracking");
+}
+
+// Failed configuration and frame validation are transactional and publish no hidden state.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "transactional" });
+  coordinator.configureContent(config([], variant(), []));
+  const configured = coordinator.getSnapshot();
+  assert.throws(() => coordinator.configureContent({ ...config([], variant()), packageId: "replacement", selectedVariant: { ...variant(), rulesetId: "invalid" } }), /unsupported/u);
+  assert.equal(coordinator.getSnapshot(), configured);
+  coordinator.applyFutureContent(config([], variant()));
+  readyPlaying(coordinator, [event("transaction-future", 5000, "hook_left")]);
+  const beforeInvalidFrame = coordinator.getSnapshot();
+  assert.throws(() => coordinator.advance({ timestampMs: 4000, clock: clock(500, true), input: input(4000, { invalid: true }) }), /public contract/u);
+  assert.equal(coordinator.getSnapshot(), beforeInvalidFrame);
+  coordinator.pause(3500);
+  const beforeInvalidSwap = coordinator.getSnapshot();
+  assert.throws(() => coordinator.applyFutureContent({ ...config([], variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "transaction-next")), profileIdentity: { invalid: true } }), /tuning contract/u);
+  assert.equal(coordinator.getSnapshot(), beforeInvalidSwap);
+}
+
+// Duplicate lineage/actions/active IDs and malformed qualification starts fail closed.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "identity-bounds" });
+  assert.throws(() => coordinator.configureContent(config([event("lineage-a", 1000, "hook_left", { sourceEventIds: ["source-shared"] }), event("lineage-b", 2000, "hook_right", { sourceEventIds: ["source-shared"] })])), /one event owner/u);
+  coordinator.configureContent(config([event("future-identity", 5000, "hook_left")]));
+  assert.throws(() => coordinator.setActiveEventIds(["same", "same"]), /unique/u);
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
+  const duplicateActions = evidence("duplicate-action-frame", 4000, ["hook_left", "hook_left"]);
+  assert.throws(() => coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, duplicateActions) }), /action IDs must be unique/u);
+  const forgedQualification = [{ hand: "left", semanticStartTimestampMs: -100, semanticDurationMs: 100, semanticQualified: true, spatialStartTimestampMs: null, spatialDurationMs: 0, spatialQualified: false, acceptedSubcellColumns: [] }];
+  assert.throws(() => coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("forged-straight", 4000, ["straight_left"]), { qualifications: forgedQualification }) }), /non-negative/u);
+}
+
+// A configured lease gates start immediately rather than waiting for a later frame.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "lease-gate", instanceId: "game-a" });
+  coordinator.configureContent(config([]));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-b", generation: 1, state: "owned", resources: ["camera", "audio"] });
+  assert.deepEqual(coordinator.requestStart(0), { accepted: false, reason: "media_lease_unavailable" });
+}
+
+// Lifecycle commands reject invalid state re-entry and unknown active identities.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "lifecycle" });
+  readyPlaying(coordinator, [event("known-active", 5000, "hook_left")]);
+  assert.throws(() => coordinator.requestStart(3000), /calibrating state/u);
+  assert.throws(() => coordinator.resume(3000), /paused session/u);
+  assert.throws(() => coordinator.setActiveEventIds(["unknown-active"]), /current content/u);
+  coordinator.pause(3000);
+  assert.equal(coordinator.resume(3000).accepted, true);
+}
+
 // Descriptor-safe boundaries, listener isolation, rollback, destroy, and no bytes/media leakage.
 {
   let getterCalled = false;
@@ -320,6 +424,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "security", onListenerError() {} });
   assert.throws(() => coordinator.configureContent(malicious), /accessors/u);
   assert.equal(getterCalled, false);
+  coordinator.configureContent(config([]));
   let arrayGetterCalled = false;
   const maliciousIds = [];
   Object.defineProperty(maliciousIds, "0", { enumerable: true, get() { arrayGetterCalled = true; return "event"; } });
