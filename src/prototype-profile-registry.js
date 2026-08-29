@@ -30,9 +30,8 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
   const safeOptions = requireDataRecordFields(options, "profile_registry_options_invalid", ["defaults", "bundleVersion", "onListenerError"]);
   const listenerError = safeOptions.onListenerError;
   if (listenerError !== undefined && typeof listenerError !== "function") throw gameplayError("profile_registry_options_invalid", "Listener error handler must be a function");
-  const initialBundleVersion = safeOptions.bundleVersion === undefined ? "1.0.0" : requireString(safeOptions.bundleVersion, "profile_bundle_version_invalid");
-  let bundleVersion = initialBundleVersion;
-  const defaults = normalizeProfileList(safeOptions.defaults ?? DEFAULT_DEFINITIONS, "profile_defaults_invalid");
+  const bundleVersion = safeOptions.bundleVersion === undefined ? "1.0.0" : requireString(safeOptions.bundleVersion, "profile_bundle_version_invalid");
+  const defaults = materializeDefaultProfileList(safeOptions.defaults ?? DEFAULT_DEFINITIONS, "profile_defaults_invalid");
   assertRequiredDefaults(defaults);
   let profiles = mapProfiles(defaults);
   let activeIds = Object.freeze({ ...DEFAULT_IDS });
@@ -83,6 +82,7 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
     assertOpen();
     const safeContext = requireDataRecordFields(context, "profile_import_context_invalid", ["sessionState"]);
     const normalized = normalizeBundle(bundle);
+    if (normalized.bundleVersion !== bundleVersion) throw gameplayError("profile_bundle_version_incompatible", "Imported profile bundle version must match the registry bundle version");
     const nextProfiles = mapProfiles(normalized.profiles);
     assertRequiredDefaults(nextProfiles.values());
     for (const activeId of Object.values(activeIds)) if (!nextProfiles.has(activeId)) throw gameplayError("profile_bundle_active_missing", "Imported bundle must contain every active profile");
@@ -93,7 +93,6 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
       if (!SCORING_SAFE_STATES.includes(sessionState)) throw gameplayError("profile_change_requires_pause", "An imported active scoring profile changes only while idle, paused, or between runs");
     }
     profiles = nextProfiles;
-    bundleVersion = normalized.bundleVersion;
     generation += 1; publish();
     return snapshot;
   }
@@ -108,7 +107,6 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
   function reset() {
     assertOpen();
     profiles = mapProfiles(defaults);
-    bundleVersion = initialBundleVersion;
     activeIds = Object.freeze({ ...DEFAULT_IDS });
     appliedConverterHash = String(profiles.get(DEFAULT_IDS.converter_regeneration)?.contentHash ?? "");
     generation += 1; publish();
@@ -148,28 +146,39 @@ function mapProfiles(entries) { const result = new Map(); for (const profile of 
 function assertRequiredDefaults(entries) { const profiles = [...entries]; const byClass = new Set(profiles.map((entry) => entry.class)); for (const profileClass of PROFILE_CLASSES) if (!byClass.has(profileClass)) throw gameplayError("profile_default_missing", `Profile class ${profileClass} requires at least one profile`); for (const id of Object.values(DEFAULT_IDS)) if (!profiles.some((entry) => entry.profileId === id)) throw gameplayError("profile_default_missing", `Required default profile ${id} is missing`); }
 
 /** @param {unknown} value @param {string} code @returns {readonly DataRecord[]} */
-function normalizeProfileList(value, code) {
+function materializeDefaultProfileList(value, code) { return normalizeProfileList(value, code, materializeDefaultProfile); }
+/** @param {unknown} value @param {string} code @returns {readonly DataRecord[]} */
+function normalizeImportedProfileList(value, code) { return normalizeProfileList(value, code, normalizeImportedProfile); }
+/** @param {unknown} value @param {string} code @param {(entry:unknown)=>DataRecord} normalizeEntry @returns {readonly DataRecord[]} */
+function normalizeProfileList(value, code, normalizeEntry) {
   const cloned = cloneGameplayData(value, code, 4096);
   if (!Array.isArray(cloned) || cloned.length < 3 || cloned.length > 64) throw gameplayError(code, "Profile list must contain 3..64 profiles");
   const ids = new Set();
-  const profiles = cloned.map((entry) => normalizeProfile(entry));
+  const profiles = cloned.map(normalizeEntry);
   for (const profile of profiles) { if (ids.has(profile.profileId)) throw gameplayError("profile_id_duplicate", "Profile IDs must be unique"); ids.add(profile.profileId); }
   return Object.freeze(profiles.sort(profileOrder));
 }
-
 /** @param {unknown} value @returns {DataRecord} */
-function normalizeProfile(value) {
-  const record = requireDataRecordFields(value, "prototype_profile_invalid", ["schema", "version", "profileId", "profileVersion", "class", "label", "experimental", "settings", "contentHash"]);
-  if (record.schema !== undefined && record.schema !== PROFILE_SCHEMA || record.version !== undefined && record.version !== 1) throw gameplayError("prototype_profile_invalid", "Prototype profile schema/version is invalid");
+function materializeDefaultProfile(value) { return normalizeProfile(value, false); }
+/** @param {unknown} value @returns {DataRecord} */
+function normalizeImportedProfile(value) { return normalizeProfile(value, true); }
+/** @param {unknown} value @param {boolean} strictImport @returns {DataRecord} */
+function normalizeProfile(value, strictImport) {
+  const fields = ["schema", "version", "profileId", "profileVersion", "class", "label", "experimental", "settings", "contentHash"];
+  const record = requireDataRecordFields(value, "prototype_profile_invalid", fields);
+  if (strictImport && Reflect.ownKeys(record).length !== fields.length) throw gameplayError("prototype_profile_fields_missing", "Imported prototype profiles require every exact field");
+  if (((strictImport || record.schema !== undefined) && record.schema !== PROFILE_SCHEMA) || ((strictImport || record.version !== undefined) && record.version !== 1)) throw gameplayError("prototype_profile_invalid", "Prototype profile schema/version is invalid");
   const profileId = requireString(record.profileId, "profile_id_invalid");
   const profileVersion = requireString(record.profileVersion, "profile_version_invalid");
   const profileClass = requireProfileClass(record.class);
   const label = requireString(record.label, "profile_label_invalid");
-  if (record.experimental !== undefined && record.experimental !== true) throw gameplayError("profile_not_experimental", "Prototype profiles must remain experimental");
+  if ((strictImport || record.experimental !== undefined) && record.experimental !== true) throw gameplayError("profile_not_experimental", "Prototype profiles must remain experimental");
   const settings = normalizeSettings(profileClass, record.settings);
   const hashBody = Object.freeze({ schema: PROFILE_SCHEMA, version: 1, profileId, profileVersion, class: profileClass, settings });
   const contentHash = sha256Hex(canonicalJson(hashBody));
-  if (record.contentHash !== undefined && requireHash(record.contentHash, "profile_hash_invalid") !== contentHash) throw gameplayError("profile_hash_mismatch", "Profile content hash does not match canonical settings");
+  if (strictImport || record.contentHash !== undefined) {
+    if (requireHash(record.contentHash, "profile_hash_invalid") !== contentHash) throw gameplayError("profile_hash_mismatch", "Profile content hash does not match canonical settings");
+  }
   return Object.freeze({ ...hashBody, label, experimental: true, contentHash });
 }
 
@@ -178,7 +187,7 @@ function normalizeBundle(value) {
   const record = requireDataRecordFields(value, "profile_bundle_invalid", ["schema", "version", "bundleVersion", "profiles", "bundleHash"]);
   if (record.schema !== BUNDLE_SCHEMA || record.version !== 1) throw gameplayError("profile_bundle_invalid", "Profile bundle schema/version is invalid");
   const bundleVersion = requireString(record.bundleVersion, "profile_bundle_version_invalid");
-  const profiles = normalizeProfileList(record.profiles, "profile_bundle_profiles_invalid");
+  const profiles = normalizeImportedProfileList(record.profiles, "profile_bundle_profiles_invalid");
   const body = Object.freeze({ schema: BUNDLE_SCHEMA, version: 1, bundleVersion, profiles });
   const expected = `sha256:${sha256Hex(canonicalJson(body))}`;
   if (record.bundleHash !== expected) throw gameplayError("profile_bundle_hash_mismatch", "Profile bundle hash does not match canonical content");

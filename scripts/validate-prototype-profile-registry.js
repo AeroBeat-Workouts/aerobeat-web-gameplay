@@ -41,22 +41,61 @@ const versioned = structuredClone(fixture);
 versioned.bundleVersion = "2.0.0";
 delete versioned.bundleHash;
 versioned.bundleHash = `sha256:${sha256PrototypeProfileHex(canonicalPrototypeProfileJson(versioned))}`;
-registry.importProfiles(versioned);
-assert.equal(registry.getSnapshot().bundleVersion, "2.0.0");
-assert.deepEqual(registry.exportProfiles(), versioned, "imports atomically adopt the validated bundle version");
+const beforeVersionMismatch = registry.getSnapshot();
+assert.throws(() => registry.importProfiles(versioned), (error) => error?.code === "profile_bundle_version_incompatible");
+assert.equal(registry.getSnapshot(), beforeVersionMismatch, "incompatible bundle versions reject atomically");
+assert.deepEqual(registry.exportProfiles(), fixture);
+function rejectAtomically(candidate, predicate) {
+  const before = registry.getSnapshot();
+  assert.throws(() => registry.importProfiles(candidate), predicate);
+  assert.equal(registry.getSnapshot(), before, "failed imports are atomic");
+}
 const hostile = structuredClone(fixture);
 hostile.profiles[0].contentHash = "0".repeat(64);
-const before = registry.getSnapshot();
-assert.throws(() => registry.importProfiles(hostile), (error) => error?.code === "profile_hash_mismatch");
-assert.equal(registry.getSnapshot(), before, "failed imports are atomic");
+rejectAtomically(hostile, (error) => error?.code === "profile_hash_mismatch");
+for (const missingField of ["schema", "version", "contentHash", "experimental", "label", "settings"]) {
+  const missing = structuredClone(fixture);
+  delete missing.profiles[0][missingField];
+  rejectAtomically(missing, (error) => error?.code === "prototype_profile_fields_missing");
+}
+const extra = structuredClone(fixture);
+extra.profiles[0].winner = true;
+rejectAtomically(extra);
+for (const missingBundleField of ["schema", "version", "bundleVersion", "profiles", "bundleHash"]) {
+  const missingBundle = structuredClone(fixture);
+  delete missingBundle[missingBundleField];
+  rejectAtomically(missingBundle);
+}
+const extraBundle = structuredClone(fixture);
+extraBundle.winner = true;
+rejectAtomically(extraBundle);
 let getterCalled = false;
 const accessor = structuredClone(fixture);
 Object.defineProperty(accessor, "profiles", { enumerable: true, get() { getterCalled = true; return []; } });
-assert.throws(() => registry.importProfiles(accessor));
+rejectAtomically(accessor);
 assert.equal(getterCalled, false);
+const nestedAccessor = structuredClone(fixture);
+Object.defineProperty(nestedAccessor.profiles[0], "label", { enumerable: true, get() { getterCalled = true; return "unsafe"; } });
+rejectAtomically(nestedAccessor);
+assert.equal(getterCalled, false);
+const deep = structuredClone(fixture);
+let nested = { value: 1 };
+for (let index = 0; index < 14; index += 1) nested = { value: nested };
+deep.profiles[0].settings.motionIntensity = nested;
+rejectAtomically(deep);
+const excessiveCount = structuredClone(fixture);
+excessiveCount.profiles = Array.from({ length: 65 }, () => structuredClone(fixture.profiles[0]));
+rejectAtomically(excessiveCount);
+const excessiveString = structuredClone(fixture);
+excessiveString.profiles[0].label = "x".repeat(9000);
+rejectAtomically(excessiveString);
+const classSettings = structuredClone(fixture);
+class ClassSettings { constructor() { this.motionIntensity = 1; this.roleScale = 1; } }
+classSettings.profiles[4].settings = new ClassSettings();
+rejectAtomically(classSettings);
 const byteSettings = structuredClone(fixture);
 byteSettings.profiles[0].settings = new Uint8Array([1]);
-assert.throws(() => registry.importProfiles(byteSettings));
+rejectAtomically(byteSettings);
 
 registry.reset();
 assert.deepEqual(registry.exportProfiles(), fixture);
@@ -70,6 +109,7 @@ assert.throws(() => registry.list(), (error) => error?.code === "profile_registr
 const vectors = Object.freeze([
   Object.freeze({ text: "", hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }),
   Object.freeze({ text: "abc", hash: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" }),
+  Object.freeze({ text: "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", hash: "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" }),
   Object.freeze({ text: "AeroBeat 🥊 café", hash: createHash("sha256").update("AeroBeat 🥊 café", "utf8").digest("hex") })
 ]);
 for (const vector of vectors) {
