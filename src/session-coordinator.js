@@ -92,12 +92,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let latestEvidenceTimelineMs = 0;
   let lastEvidenceFrameId = null;
   let leaseSnapshot = /** @type {DataRecord | null} */ (null);
-  const judgedIds = new Set();
-  let activeIds = new Set();
+  const judgedInstanceKeys = new Set();
+  let activeInstanceKeys = new Set();
   const judgements = /** @type {AeroGameplayJudgement[]} */ ([]);
   const shadowJudgements = /** @type {AeroGameplayJudgement[]} */ ([]);
   const shadowConsumed = new Set();
-  const consumedActions = new Set();
+  const consumedActionOwners = new Map();
   const consumedGuardPunchWindows = new Map();
   const partitions = new Map();
   let snapshot = makeSnapshot(null);
@@ -238,7 +238,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         captureEvidenceForTimeline();
         judgeLiveEvents();
         judgeShadowEvents();
-        if (events.length > 0 && judgedIds.size >= events.length) {
+        if (events.length > 0 && judgedInstanceKeys.size >= events.length) {
           state = "completed";
           pauseReason = null;
         }
@@ -282,15 +282,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextProfileIdentity = source.profileIdentity === undefined ? profileIdentity : normalizeProfile(source.profileIdentity);
     const nextScoringSettings = source.scoringSettings === undefined ? scoringSettings : normalizeScoringSettings(source.scoringSettings);
     const nextShadowVariants = source.shadowVariants === undefined ? shadowVariants : normalizeShadowVariants(source.shadowVariants);
-    const preserve = new Map(events.filter((event) => shouldPreserveEvent(event)).map((event) => [String(event.eventId), event]));
-    const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
-    const merged = [...preserve.values()];
+    const preservedEvents = events.filter((event) => shouldPreserveEvent(event));
+    const preservedIds = new Set(preservedEvents.map((event) => String(event.eventId)));
+    const preservedLineage = new Set(preservedEvents.flatMap((event) => lineageIds(event)));
+    const merged = [...preservedEvents];
     const acceptedNextEvents = [];
     for (const event of nextEvents) {
-      if (preserve.has(String(event.eventId))) continue;
       if (Number(event.centerTimestampMs) <= timelinePositionMs) continue;
+      const exactIdCollision = preservedIds.has(String(event.eventId));
       const eventLineage = lineageIds(event);
-      if (eventLineage.some((id) => lineage.has(id))) continue;
+      if (!exactIdCollision && eventLineage.some((id) => preservedLineage.has(id))) continue;
       merged.push(event);
       acceptedNextEvents.push(event);
     }
@@ -298,12 +299,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     merged.sort(eventOrder);
     const nextContentGeneration = contentGeneration + 1;
     const nextEventTruth = new WeakMap();
-    for (const event of preserve.values()) {
+    for (const event of preservedEvents) {
       const truth = eventTruth.get(event);
       if (!truth) throw gameplayError("event_truth_missing", "Preserved events require immutable content-generation truth");
       nextEventTruth.set(event, truth);
     }
-    for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings));
+    acceptedNextEvents.forEach((event, index) => nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, index, event, nextVariant, nextProfileIdentity, nextScoringSettings)));
     events = Object.freeze(merged);
     variant = nextVariant;
     contentGeneration = nextContentGeneration;
@@ -323,7 +324,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (new Set(normalizedIds).size !== normalizedIds.length) throw gameplayError("active_event_ids_invalid", "Active event IDs must be unique");
     const knownIds = new Set(events.map((event) => String(event.eventId)));
     if (normalizedIds.some((id) => !knownIds.has(id))) throw gameplayError("active_event_ids_invalid", "Active event IDs must belong to current content");
-    activeIds = new Set(normalizedIds);
+    const requestedIds = new Set(normalizedIds);
+    activeInstanceKeys = new Set(events.filter((event) => requestedIds.has(String(event.eventId))).map((event) => eventInstanceKey(event)));
     publish(null);
     return snapshot;
   }
@@ -510,8 +512,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function judgeLiveEvents() {
     for (const event of events) {
-      const eventId = String(event.eventId);
-      if (judgedIds.has(eventId)) continue;
+      if (judgedInstanceKeys.has(eventInstanceKey(event))) continue;
       const center = Number(event.centerTimestampMs);
       const eventVariant = variantForEvent(event);
       if (eventVariant.mode === "flow" && event.type !== "note") {
@@ -561,7 +562,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!match.hit) return false;
     const action = expectedAction(event);
     const actionKey = `${latestEvidence.measuredSourceFrameId}|${action}`;
-    if (consumedActions.has(actionKey)) {
+    if (consumedActionOwners.has(actionKey)) {
       recordJudgement(event, "miss", Object.freeze(["action_consumed"]), latestEvidence, shadow);
       return true;
     }
@@ -573,7 +574,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       recordJudgement(event, "miss", Object.freeze(["blocked_overlap"]), latestEvidence, shadow);
       return true;
     }
-    consumedActions.add(actionKey);
+    consumedActionOwners.set(actionKey, eventInstanceKey(event));
     if (category === "guard" || category === "punch") consumedGuardPunchWindows.set(frameId, Object.freeze([...consumedWindows, Object.freeze({ category, centerTimestampMs: center })]));
     recordJudgement(event, "hit", match.diagnostics, latestEvidence, shadow);
     return true;
@@ -587,7 +588,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (shadow) shadowJudgements.push(judgement);
     else {
       judgements.push(judgement);
-      judgedIds.add(String(event.eventId));
+      judgedInstanceKeys.add(eventInstanceKey(event));
       updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event));
     }
   }
@@ -631,24 +632,26 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       session: Object.freeze({ schema: "aerobeat/gameplay_session_snapshot", version: 1, sessionId, state, timestampMs, timelinePositionMs, packageId, chartId: variant?.chartId ?? null, calibrationId, rulesetId: variant?.rulesetId ?? null, recipeId: variant?.recipeId ?? null, ranked: variant?.ranked === true, pauseReason }),
       countdown, safety: Object.freeze({ ready: safetyReady, freshCalibrationRequired }), lease: leaseSnapshot,
       selectedVariant: variant ? publicVariant(variant) : null, profileIdentity, scoringSettings,
-      activeEventIds: Object.freeze([...activeIds].sort(compareCodePoints)), judgedEventIds: Object.freeze([...judgedIds].sort(compareCodePoints)),
+      activeEventIds: Object.freeze([...new Set(events.filter((event) => activeInstanceKeys.has(eventInstanceKey(event))).map((event) => String(event.eventId)))].sort(compareCodePoints)), judgedEventIds: Object.freeze([...new Set(judgements.map((entry) => String(entry.eventId)))].sort(compareCodePoints)),
       judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
     });
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedInstanceKeys.clear(); activeInstanceKeys.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActionOwners.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
-  function shouldPreserveEvent(event) { return Number(event.centerTimestampMs) <= timelinePositionMs || judgedIds.has(String(event.eventId)) || activeIds.has(String(event.eventId)); }
+  function shouldPreserveEvent(event) { const instanceKey = eventInstanceKey(event); return Number(event.centerTimestampMs) <= timelinePositionMs || judgedInstanceKeys.has(instanceKey) || activeInstanceKeys.has(instanceKey); }
   /** @param {DataRecord} event @returns {DataRecord} */
   function truthForEvent(event) {
     const truth = eventTruth.get(event);
     if (!truth) throw gameplayError("event_truth_missing", "Gameplay events require immutable content-generation truth");
     return /** @type {DataRecord} */ (truth);
   }
+  /** @param {DataRecord} event @returns {string} */
+  function eventInstanceKey(event) { return String(truthForEvent(event).eventInstanceKey); }
   /** @param {DataRecord} event @returns {DataRecord} */
   function variantForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).variant); }
   /** @param {DataRecord} event @returns {DataRecord} */
@@ -664,12 +667,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 /** @param {readonly DataRecord[]} sourceEvents @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings */
 function bindEventTruth(sourceEvents, contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings) {
   const result = new WeakMap();
-  const truth = makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings);
-  for (const event of sourceEvents) result.set(event, truth);
+  sourceEvents.forEach((event, index) => result.set(event, makeEventTruth(contentPackageId, generation, index, event, sourceVariant, sourceProfile, sourceScoringSettings)));
   return result;
 }
-/** @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings */
-function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings }); }
+/** @param {string} contentPackageId @param {number} generation @param {number} generationIndex @param {DataRecord} sourceEvent @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings */
+function makeEventTruth(contentPackageId, generation, generationIndex, sourceEvent, sourceVariant, sourceProfile, sourceScoringSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, eventInstanceKey: `g${generation}:e${generationIndex}`, publicEventId: sourceEvent.eventId, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings }); }
 
 /** @param {GameplayCoordinatorOptions} options */
 function normalizeOptions(options) {

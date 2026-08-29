@@ -14,7 +14,7 @@ Rules consume positive evidence only after the whole rule matches. Evidence is k
 
 Scores are local partitions keyed by variant score identity plus the complete tuning profile identity. Boxing composites are unranked and no leaderboard surface exists.
 
-Paused content swaps bind package/content-generation, chart, variant, profile, and scoring settings to each accepted event object. Past, judged, and active objects retain that truth even when a replacement reuses the same variant ID. Preserved exact event IDs own collisions deterministically; duplicate preserved lineage and stale replacement events are skipped; only bounded future events receive new-generation truth.
+Paused content swaps bind package/content-generation, chart, variant, profile, and scoring settings to each accepted event object. Past, judged, and active objects retain that truth even when a replacement reuses the same variant ID. An internal immutable instance key qualifies active and judged ownership, so preserved and replacement generations may share a public event ID and lineage and still judge once each under separate truth. Public ID telemetry stays deduplicated; unrelated duplicate preserved lineage and stale replacement events are skipped; only bounded future events receive new-generation truth.
 
 ## Consequences
 

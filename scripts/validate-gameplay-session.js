@@ -307,7 +307,6 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const revisedVariant = { ...variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "variant"), chartId: "chart-variant-revised", mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: "b".repeat(64) }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: "c".repeat(64) } };
   const revised = config([
     { ...event("same-active", 3000, "weave_left"), chartId: revisedVariant.chartId },
-    { ...event("same-replacement", 3000, "weave_left"), chartId: revisedVariant.chartId },
     { ...event("same-stale", 900, "hook_right"), chartId: revisedVariant.chartId },
     { ...event("same-future", 3500, "weave_right"), chartId: revisedVariant.chartId }
   ], revisedVariant);
@@ -334,9 +333,11 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(newPartition?.profileHash, "b".repeat(64));
   assert.equal(newPartition?.scoringSettings.hitPoints, 1);
   assert.equal(newPartition?.score, 2, "new replacement and same-ID future event use locked scoring");
-  assert.equal(coordinator.getJudgements().filter((entry) => entry.eventId === "same-active").length, 1, "preserved active event owns exact ID collision");
+  const sameIdJudgements = coordinator.getJudgements().filter((entry) => entry.eventId === "same-active");
+  assert.equal(sameIdJudgements.length, 2, "old and replacement instances with the same public ID judge exactly once each");
+  assert.deepEqual(sameIdJudgements.map((entry) => entry.chartId).sort(), ["chart-variant", "chart-variant-revised"]);
+  assert.equal(coordinator.getSnapshot().judgedEventIds.filter((id) => id === "same-active").length, 1, "public telemetry remains deduplicated by public ID");
   assert.equal(coordinator.getJudgements().some((entry) => entry.eventId === "same-stale"), false, "stale replacement events are not admitted");
-  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-active")?.chartId, "chart-variant");
   assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-future")?.chartId, "chart-variant-revised");
 }
 
