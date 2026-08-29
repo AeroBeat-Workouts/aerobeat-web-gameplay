@@ -20,8 +20,8 @@ function anchor(name, measured, overrides = {}) { const defaults = { nose: [1,2]
 function evidence(frameId, measured, actions, entries = []) { return { schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: actions, anchors: ["nose","left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist"].map((name) => anchor(name, measured)), entries }; }
 function input(measured, latestEvidence, options = {}) { return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] }; }
 function clock(positionMs, playing) { return { contextTimeSeconds: positionMs / 1000, durationSeconds: undefined, positionSeconds: positionMs / 1000, playing }; }
-function profile() { const registry = createAeroPrototypeProfileRegistry(); registry.select("aero.scoring.prototype-wide", { sessionState: "idle" }); return registry.getActive("between_run_ruleset"); }
-function config(candidate, events, extras = {}) { const scoring = profile(); return { packageId: "task11-package", selectedVariant: variant(candidate, extras.modifierIds ?? []), resolvedEvents: events, profileIdentity: scoring.identity, scoringSettings: scoring.settings, shadowVariants: extras.shadowVariants ?? [] }; }
+function profile(profileId = "aero.scoring.prototype-wide") { const registry = createAeroPrototypeProfileRegistry(); registry.select(profileId, { sessionState: "idle" }); return registry.getActive("between_run_ruleset"); }
+function config(candidate, events, extras = {}) { const scoring = profile(extras.scoringProfileId); return { packageId: "task11-package", selectedVariant: variant(candidate, extras.modifierIds ?? []), resolvedEvents: events, profileIdentity: scoring.identity, scoringSettings: scoring.settings, shadowVariants: extras.shadowVariants ?? [] }; }
 function ready(coordinator, configuration) { coordinator.configureContent(configuration); coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) }); assert.equal(coordinator.requestStart(0).accepted, true); coordinator.advance({ timestampMs: 1000, clock: clock(0, false) }); coordinator.advance({ timestampMs: 2000, clock: clock(0, false) }); coordinator.advance({ timestampMs: 3000, clock: clock(0, false) }); assert.equal(coordinator.getSnapshot().session.state, "playing"); }
 
 // Exact Flow plus four Boxing candidate identities all execute through public envelopes.
@@ -87,6 +87,8 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   coordinator.advance({ timestampMs:4350,clock:clock(1180,true),input:input(4200,evidence("fresh-frame",4200,["hook_left"])) });
   assert.equal(coordinator.getJudgements()[1].result,"hit");
   assert.equal(coordinator.getScorePartitions()[0].score,2.55);
+  assert.equal(Number.isFinite(coordinator.getScorePartitions()[0].score),true);
+  assert.equal(JSON.parse(JSON.stringify(coordinator.getScorePartitions()[0])).score,2.55);
   assert.equal(coordinator.getScorePartitions()[0].profileHash,"9480db443e563c53e8277405ad8949138669cdb3ed97f773fd7fad39432b7345");
 }
 
@@ -115,11 +117,22 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   assert.equal(coordinator.getSnapshot().shadowJudgements[0].result,"hit");
   assert.equal(coordinator.getScorePartitions().reduce((sum,item)=>sum+item.hits,0),0);
   coordinator.advance({ timestampMs:4200,clock:clock(1200,true) });
+  coordinator.setActiveEventIds(["old-future"]);
   coordinator.pause(4300);
   const next = {...candidate,id:"semantic-cut",recipeId:"cut_family_source_height_v1"};
-  coordinator.applyFutureContent(config(next,[event(next,"replacement",3000,"weave_left",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})]));
+  coordinator.applyFutureContent(config(next,[event(next,"replacement",3000,"weave_left",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { scoringProfileId:"aero.scoring.locked" }));
   assert.equal(coordinator.getSnapshot().judgedEventIds.includes("past"),true);
   assert.equal(coordinator.getSnapshot().selectedVariant.recipeId,"cut_family_source_height_v1");
+  coordinator.resume(4400);
+  coordinator.advance({timestampMs:5400,clock:clock(1200,false)}); coordinator.advance({timestampMs:6400,clock:clock(1200,false)}); coordinator.advance({timestampMs:7400,clock:clock(1200,false)});
+  coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_left"]))});
+  const oldPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide");
+  const newPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked");
+  assert.equal(oldPartition.scoringSettings.hitPoints,1.25);
+  assert.equal(oldPartition.score,1.25,"preserved old events retain old fractional scoring settings");
+  assert.equal(newPartition.scoringSettings.hitPoints,1);
+  assert.equal(newPartition.score,1);
+  assert.notEqual(oldPartition.partitionId,newPartition.partitionId);
 }
 
 console.log("Task 11 five-variant prototype replay validation passed.");

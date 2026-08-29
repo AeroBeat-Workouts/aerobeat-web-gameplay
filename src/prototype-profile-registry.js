@@ -30,7 +30,8 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
   const safeOptions = requireDataRecordFields(options, "profile_registry_options_invalid", ["defaults", "bundleVersion", "onListenerError"]);
   const listenerError = safeOptions.onListenerError;
   if (listenerError !== undefined && typeof listenerError !== "function") throw gameplayError("profile_registry_options_invalid", "Listener error handler must be a function");
-  const bundleVersion = safeOptions.bundleVersion === undefined ? "1.0.0" : requireString(safeOptions.bundleVersion, "profile_bundle_version_invalid");
+  const initialBundleVersion = safeOptions.bundleVersion === undefined ? "1.0.0" : requireString(safeOptions.bundleVersion, "profile_bundle_version_invalid");
+  let bundleVersion = initialBundleVersion;
   const defaults = normalizeProfileList(safeOptions.defaults ?? DEFAULT_DEFINITIONS, "profile_defaults_invalid");
   assertRequiredDefaults(defaults);
   let profiles = mapProfiles(defaults);
@@ -92,6 +93,7 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
       if (!SCORING_SAFE_STATES.includes(sessionState)) throw gameplayError("profile_change_requires_pause", "An imported active scoring profile changes only while idle, paused, or between runs");
     }
     profiles = nextProfiles;
+    bundleVersion = normalized.bundleVersion;
     generation += 1; publish();
     return snapshot;
   }
@@ -106,6 +108,7 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
   function reset() {
     assertOpen();
     profiles = mapProfiles(defaults);
+    bundleVersion = initialBundleVersion;
     activeIds = Object.freeze({ ...DEFAULT_IDS });
     appliedConverterHash = String(profiles.get(DEFAULT_IDS.converter_regeneration)?.contentHash ?? "");
     generation += 1; publish();
@@ -135,7 +138,7 @@ export function createAeroPrototypeProfileRegistry(options = {}) {
     const profile = profiles.get(activeIds[profileClass]);
     if (!profile) throw gameplayError("profile_active_missing", "Active profile is not registered");
     const regenerationRequired = profileClass === "converter_regeneration" && profile.contentHash !== appliedConverterHash;
-    return Object.freeze({ profile, identity: tuningIdentity(profile), settings: profile.settings, regenerationRequired, appliedContentHash: profileClass === "converter_regeneration" ? appliedConverterHash : profile.contentHash });
+    return Object.freeze({ profile, identity: tuningIdentity(profile, regenerationRequired), settings: profile.settings, regenerationRequired, appliedContentHash: profileClass === "converter_regeneration" ? appliedConverterHash : profile.contentHash });
   }
 }
 
@@ -198,8 +201,8 @@ function boundedNumber(value, minimum, maximum) { if (typeof value !== "number" 
 function boundedInteger(value, minimum, maximum) { const result = boundedNumber(value, minimum, maximum); if (!Number.isInteger(result)) throw gameplayError("profile_setting_invalid", "Profile integer setting is invalid"); return result; }
 /** @param {unknown} value @param {string} code */
 function requireHash(value, code) { if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) throw gameplayError(code, "Expected a lowercase SHA-256 hex value"); return value; }
-/** @param {DataRecord} profile */
-function tuningIdentity(profile) { return Object.freeze({ schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: profile.profileId, profileVersion: profile.profileVersion, contentHash: profile.contentHash, class: profile.class, regenerationRequired: profile.class === "converter_regeneration" }); }
+/** @param {DataRecord} profile @param {boolean} regenerationRequired */
+function tuningIdentity(profile, regenerationRequired) { return Object.freeze({ schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: profile.profileId, profileVersion: profile.profileVersion, contentHash: profile.contentHash, class: profile.class, regenerationRequired }); }
 /** @param {DataRecord} left @param {DataRecord} right */
 function profileOrder(left, right) { return compareUnicodeCodePoints(String(left.profileId), String(right.profileId)); }
 

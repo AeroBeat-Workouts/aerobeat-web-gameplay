@@ -13,11 +13,11 @@ Gameplay exports one per-game `AeroPrototypeProfileRegistry`. Every profile is e
 
 - `live_visual` applies immediately;
 - `between_run_ruleset` applies only with an explicit idle, paused, or between-run gameplay state;
-- `converter_regeneration` changes selection only and remains pending until regenerated package provenance explicitly supplies the selected profile hash.
+- `converter_regeneration` changes selection only and remains pending until regenerated package provenance explicitly supplies the selected profile hash; its active identity and outer telemetry share that single derived regeneration value.
 
-Profiles are bounded plain-data records. Their bare lowercase `contentHash` is SHA-256 over canonical `{schema,version,profileId,profileVersion,class,settings}`. Canonical JSON sorts record keys by code-point order, normalizes negative zero, and rejects accessors, hidden/symbol keys, sparse or extended arrays, classes, cycles, bytes, media objects, undefined, and non-finite numbers. Bundle exports have the exact `aerobeat/prototype_profile_bundle` v1 shape and a `sha256:`-prefixed canonical bundle hash. Imports validate completely before committing.
+Profiles are bounded plain-data records. Their bare lowercase `contentHash` is SHA-256 over canonical `{schema,version,profileId,profileVersion,class,settings}`. Canonical JSON sorts record keys by code-point order, normalizes negative zero, and rejects accessors, hidden/symbol keys, sparse or extended arrays, classes, cycles, bytes, media objects, undefined, and non-finite numbers. Bundle exports have the exact `aerobeat/prototype_profile_bundle` v1 shape and a `sha256:`-prefixed canonical bundle hash. Imports validate completely, then atomically adopt both the profile set and imported bundle version; reset restores constructor defaults.
 
-The coordinator accepts exact bounded scoring settings with the active `between_run_ruleset` identity. It retains profile and settings catalogs per variant, so paused future swaps cannot reinterpret preserved events. Score partitions expose the complete profile identity and immutable scoring settings and remain local-only. Shadows continue to be diagnostic-only.
+The coordinator accepts exact bounded scoring settings with the active `between_run_ruleset` identity. It retains profile and settings catalogs per variant, so paused future swaps cannot reinterpret preserved events. Score partitions expose the complete profile identity, immutable scoring settings, and deterministic settings identity and remain local-only. Fractional prototype scores are finite, non-negative, and JSON-safe. Shadows continue to be diagnostic-only.
 
 ## Consequences
 

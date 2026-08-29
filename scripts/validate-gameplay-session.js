@@ -124,7 +124,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(partition.profileHash, HASH);
   assert.equal(partition.profileClass, "between_run_ruleset");
   assert.equal(partition.regenerationRequired, false);
-  assert.match(partition.partitionId, new RegExp(`${HASH}\\|${HASH}\\|profile\\|1\\|${HASH}\\|between_run_ruleset\\|live$`, "u"));
+  assert.deepEqual(partition.scoringSettings, { comboBonusPerHit: 0, hitPoints: 1, missPenalty: 0 });
+  assert.equal(partition.scoringSettingsIdentity, "scoring-v1:1,0,0");
+  assert.match(partition.partitionId, new RegExp(`${HASH}\\|${HASH}\\|profile\\|1\\|${HASH}\\|between_run_ruleset\\|live\\|scoring-v1:1,0,0$`, "u"));
 }
 
 // Inclusive +180ms boundary and 150ms freshness fail closed beyond the limit.
