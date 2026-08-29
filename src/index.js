@@ -3,6 +3,7 @@
 import { serviceIds } from "@aerobeat/web-contracts";
 
 export { createAeroGameplaySessionCoordinator } from "./session-coordinator.js";
+export { canonicalPrototypeProfileJson, createAeroPrototypeProfileRegistry, sha256PrototypeProfileHex } from "./prototype-profile-registry.js";
 
 /** @type {"aero.gameplay"} */
 export const aeroGameplayPackageId = "aero.gameplay";
@@ -24,6 +25,8 @@ export const aeroGameplaySessionCapabilities = Object.freeze({
   spatialGridBoxing: true,
   futureVariantSwap: true,
   diagnosticShadows: true,
+  prototypeProfileRegistry: true,
+  deterministicProfileBundles: true,
   localPrototypeScoresOnly: true,
   publicLeaderboards: false
 });

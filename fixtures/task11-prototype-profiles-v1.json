@@ -1,0 +1,14 @@
+{
+  "schema": "aerobeat/prototype_profile_bundle",
+  "version": 1,
+  "bundleVersion": "1.0.0",
+  "profiles": [
+    {"schema":"aerobeat/prototype_profile","version":1,"profileId":"aero.converter.canonical","profileVersion":"1.0.0","class":"converter_regeneration","settings":{"guardRelocationRadius":1,"reachAllowanceSubcells":0},"label":"Canonical Converter (Experimental)","experimental":true,"contentHash":"a43b53a39c13c9e9efe59854aee0fa16efdcd3c6a29bc09f678d94b3fd8f0202"},
+    {"schema":"aerobeat/prototype_profile","version":1,"profileId":"aero.converter.prototype-reach","profileVersion":"1.0.0","class":"converter_regeneration","settings":{"guardRelocationRadius":2,"reachAllowanceSubcells":1},"label":"Prototype Reach Converter (Experimental)","experimental":true,"contentHash":"e37f8b527ed5ce86738ce22007fc963f83bccd737893fb4728d3b83eaa044eea"},
+    {"schema":"aerobeat/prototype_profile","version":1,"profileId":"aero.scoring.locked","profileVersion":"1.0.0","class":"between_run_ruleset","settings":{"comboBonusPerHit":0,"hitPoints":1,"missPenalty":0},"label":"Locked Scoring (Experimental)","experimental":true,"contentHash":"0df07b0502381012cc6f46da3c99edd4a5f4999731e54a440a2785f830c5bda5"},
+    {"schema":"aerobeat/prototype_profile","version":1,"profileId":"aero.scoring.prototype-wide","profileVersion":"1.0.0","class":"between_run_ruleset","settings":{"comboBonusPerHit":0.05,"hitPoints":1.25,"missPenalty":0},"label":"Prototype Wide Scoring (Experimental)","experimental":true,"contentHash":"9480db443e563c53e8277405ad8949138669cdb3ed97f773fd7fad39432b7345"},
+    {"schema":"aerobeat/prototype_profile","version":1,"profileId":"aero.visual.compact","profileVersion":"1.0.0","class":"live_visual","settings":{"motionIntensity":0.8,"roleScale":0.86},"label":"Compact Visual (Experimental)","experimental":true,"contentHash":"e65d53dfaafe8a859c08837acb3d447b10b03508bd5ae64677d273c93657d603"},
+    {"schema":"aerobeat/prototype_profile","version":1,"profileId":"aero.visual.default","profileVersion":"1.0.0","class":"live_visual","settings":{"motionIntensity":1,"roleScale":1},"label":"Default Visual (Experimental)","experimental":true,"contentHash":"fdcf478c91e21ef88970299e29fcc35d574bfe69e0d7d00d9f823ee9507f39a3"}
+  ],
+  "bundleHash": "sha256:81df0fa01910c08bac660c036be23a1ac1bf3f0e8f62ad3355b9e8362b20ae37"
+}

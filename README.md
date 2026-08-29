@@ -36,6 +36,8 @@ gameplay.advance({
 Exports:
 
 - `createAeroGameplaySessionCoordinator(options)`
+- `createAeroPrototypeProfileRegistry(options)`
+- `canonicalPrototypeProfileJson(value)` / `sha256PrototypeProfileHex(text)`
 - `aeroGameplaySessionCapabilities`
 - `aeroGameplayPackageId`
 - `aeroGameplaySessionServiceId`
@@ -51,6 +53,20 @@ Coordinator operations:
 - `setActiveEventIds(ids)` / `setLeaseSnapshot(snapshot)`
 - `stop(timestampMs)` / `reset(timestampMs?)` / `destroy()`
 - `getSnapshot()` / `getJudgements()` / `getScorePartitions()` / `subscribe(listener)`
+
+## Prototype profiles
+
+`createAeroPrototypeProfileRegistry()` owns bounded, deterministic experimental profiles without selecting a production winner. Its API is `list`, `getActive`, `select`, `importProfiles`, `exportProfiles`, `reset`, `getSnapshot`, `subscribe`, and `destroy`.
+
+Profiles use exactly three ownership classes:
+
+- `live_visual`: applies live and is consumed by renderer adapters;
+- `between_run_ruleset`: selection requires an explicit idle/paused/between-run session state and supplies immutable scoring settings plus its full tuning identity to score partitions;
+- `converter_regeneration`: selecting a profile never mutates current chart truth. The registry reports a pending hash and `regenerationRequired` until `select` receives an explicitly matching `regeneratedPackageProfileHash` from newly generated package provenance.
+
+Exports are exact `aerobeat/prototype_profile_bundle` v1 records. Profile `contentHash` is bare lowercase SHA-256 over canonical schema/version/ID/version/class/settings; `bundleHash` is `sha256:`-prefixed over the canonical bundle body. Imports are atomic and reject accessors, classes, bytes, malformed settings, duplicate IDs, and hash mismatches. Defaults include visual default/compact, scoring locked/prototype-wide, and converter canonical/prototype-reach; all are labeled experimental.
+
+`configureContent` and `applyFutureContent` accept optional exact `{comboBonusPerHit, hitPoints, missPenalty}` scoring settings. Locked defaults preserve one point per hit and zero miss penalty. Paused swaps retain each preserved event's original profile and settings; replacements use the selected profile.
 
 ## Lifecycle and Safety
 
@@ -98,4 +114,4 @@ npm pack --dry-run --json
 git diff --check
 ```
 
-Deterministic replay coverage includes all four Boxing candidates, real content-runtime envelopes, Flow direction/cell matching and ignored source events, inclusive timing/freshness/qualification boundaries, standard/crossed guards, overlap-aware guard/punch exclusivity, disjoint checkpoint concurrency, positive-only evidence, one-action consumption, latched tracking recalibration, countdown/unsafe-clock timeline freeze, clock rollback, immediate lease gates, transactional rejection, strict identity/hash bounds, future swaps, exact local score partitions, current-only shadows, listener isolation, record/array descriptor attacks, destroy, and multi-instance isolation. A public-boundary integration test instantiates the actual current audio clock, content runtime, and input body-grid service. Chromium drives `idle -> calibrating -> countdown -> playing -> paused_tracking -> countdown` through the public package with immutable serializable snapshots and zero warning/error noise.
+The content-hashed `fixtures/task11-prototype-profiles-v1.json` and `fixtures/task11-prototype-replay-v1.json` are validated in Node and the registry is smoke-tested in Chromium. Deterministic replay coverage includes Flow and all four Boxing candidates, real content-runtime envelopes, Flow direction/cell matching and ignored source events, inclusive timing/freshness/qualification boundaries, standard/crossed guards, overlap-aware guard/punch exclusivity, disjoint checkpoint concurrency, positive-only evidence, one-action consumption, latched tracking recalibration, countdown/unsafe-clock timeline freeze, clock rollback, immediate lease gates, transactional rejection, strict identity/hash bounds, future swaps, exact local score partitions, current-only shadows, listener isolation, record/array descriptor attacks, destroy, and multi-instance isolation. A public-boundary integration test instantiates the actual current audio clock, content runtime, and input body-grid service. Chromium drives `idle -> calibrating -> countdown -> playing -> paused_tracking -> countdown` through the public package with immutable serializable snapshots and zero warning/error noise.

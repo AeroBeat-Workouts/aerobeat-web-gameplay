@@ -7,7 +7,9 @@
     "src/",
     "README.md",
     "LICENSE.md",
-    "docs/decisions/"
+    "docs/decisions/",
+    "fixtures/task11-prototype-profiles-v1.json",
+    "fixtures/task11-prototype-replay-v1.json"
   ],
   "exports": {
     ".": "./src/index.js"
@@ -19,7 +21,7 @@
     "check:components": "node scripts/validate-component-rules.js",
     "check:console": "node scripts/validate-playwright-console-noise.js",
     "test": "npm run check && npm run test:unit && npm run test:integration",
-    "test:unit": "node scripts/validate-gameplay-session.js",
+    "test:unit": "node scripts/validate-gameplay-session.js && node scripts/validate-prototype-profile-registry.js && node scripts/validate-task11-prototype-replay.js",
     "test:integration": "node scripts/validate-public-integration.js",
     "test:browser": "npm run check:console && node scripts/validate-browser-session.js",
     "demo": "npm --prefix .testbed run demo",

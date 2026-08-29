@@ -49,6 +49,7 @@ const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "crossed_g
  * @property {DataRecord} selectedVariant
  * @property {readonly DataRecord[]} resolvedEvents
  * @property {DataRecord} [profileIdentity]
+ * @property {DataRecord} [scoringSettings]
  * @property {readonly DataRecord[]} [shadowVariants]
  */
 
@@ -72,9 +73,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let packageId = null;
   let variant = /** @type {DataRecord | null} */ (null);
   let profileIdentity = /** @type {DataRecord} */ (defaultProfileIdentity());
+  let scoringSettings = /** @type {DataRecord} */ (defaultScoringSettings());
   let events = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   const variantCatalog = new Map();
   const profileCatalog = new Map();
+  const scoringSettingsCatalog = new Map();
   let shadowVariants = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   let calibrationId = null;
   let safetyReady = false;
@@ -128,15 +131,19 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextVariant = normalizeVariant(source.selectedVariant);
     const nextEvents = normalizeEvents(source.resolvedEvents, nextVariant);
     const nextProfileIdentity = source.profileIdentity === undefined ? defaultProfileIdentity() : normalizeProfile(source.profileIdentity);
+    const nextScoringSettings = source.scoringSettings === undefined ? defaultScoringSettings() : normalizeScoringSettings(source.scoringSettings);
     const nextShadowVariants = source.shadowVariants === undefined ? Object.freeze([]) : normalizeShadowVariants(source.shadowVariants);
     packageId = nextPackageId;
     variant = nextVariant;
     variantCatalog.clear();
     profileCatalog.clear();
+    scoringSettingsCatalog.clear();
     variantCatalog.set(String(nextVariant.variantId), nextVariant);
     profileCatalog.set(String(nextVariant.variantId), nextProfileIdentity);
+    scoringSettingsCatalog.set(String(nextVariant.variantId), nextScoringSettings);
     events = nextEvents;
     profileIdentity = nextProfileIdentity;
+    scoringSettings = nextScoringSettings;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
     state = "calibrating";
@@ -276,6 +283,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextVariant = normalizeVariant(source.selectedVariant);
     const nextEvents = normalizeEvents(source.resolvedEvents, nextVariant);
     const nextProfileIdentity = source.profileIdentity === undefined ? profileIdentity : normalizeProfile(source.profileIdentity);
+    const nextScoringSettings = source.scoringSettings === undefined ? scoringSettings : normalizeScoringSettings(source.scoringSettings);
     const nextShadowVariants = source.shadowVariants === undefined ? shadowVariants : normalizeShadowVariants(source.shadowVariants);
     const preserve = new Map(events.filter((event) => shouldPreserveEvent(event)).map((event) => [String(event.eventId), event]));
     const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
@@ -293,7 +301,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     variant = nextVariant;
     variantCatalog.set(String(nextVariant.variantId), nextVariant);
     profileCatalog.set(String(nextVariant.variantId), nextProfileIdentity);
+    scoringSettingsCatalog.set(String(nextVariant.variantId), nextScoringSettings);
     profileIdentity = nextProfileIdentity;
+    scoringSettings = nextScoringSettings;
     shadowVariants = nextShadowVariants;
     generation += 1;
     publish(null);
@@ -572,17 +582,17 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     else {
       judgements.push(judgement);
       judgedIds.add(String(event.eventId));
-      updateScore(result, eventVariant, eventProfile);
+      updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event));
     }
   }
 
-  /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile */
-  function updateScore(result, scoreVariant, scoreProfile) {
-    const key = scorePartitionKey(scoreVariant, scoreProfile);
-    const current = partitions.get(key) ?? { partitionId: key, variantId: scoreVariant.variantId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, ranked: scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, score: 0, maxCombo: 0, combo: 0 };
+  /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings */
+  function updateScore(result, scoreVariant, scoreProfile, settings) {
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings);
+    const current = partitions.get(key) ?? { partitionId: key, variantId: scoreVariant.variantId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, ranked: scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, score: 0, maxCombo: 0, combo: 0 };
     const next = { ...current };
-    if (result === "hit") { next.hits += 1; next.score += 1; next.combo += 1; next.maxCombo = Math.max(next.maxCombo, next.combo); }
-    else if (result === "miss") { next.misses += 1; next.combo = 0; }
+    if (result === "hit") { next.hits += 1; next.combo += 1; next.score += Number(settings.hitPoints) + Math.max(0, next.combo - 1) * Number(settings.comboBonusPerHit); next.maxCombo = Math.max(next.maxCombo, next.combo); }
+    else if (result === "miss") { next.misses += 1; next.score = Math.max(0, next.score - Number(settings.missPenalty)); next.combo = 0; }
     else next.ignored += 1;
     partitions.set(key, Object.freeze(next));
   }
@@ -614,7 +624,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       schema: "aerobeat/gameplay_coordinator_snapshot", version: 1, serviceId: "aero.gameplay.session", generation,
       session: Object.freeze({ schema: "aerobeat/gameplay_session_snapshot", version: 1, sessionId, state, timestampMs, timelinePositionMs, packageId, chartId: variant?.chartId ?? null, calibrationId, rulesetId: variant?.rulesetId ?? null, recipeId: variant?.recipeId ?? null, ranked: variant?.ranked === true, pauseReason }),
       countdown, safety: Object.freeze({ ready: safetyReady, freshCalibrationRequired }), lease: leaseSnapshot,
-      selectedVariant: variant ? publicVariant(variant) : null, profileIdentity,
+      selectedVariant: variant ? publicVariant(variant) : null, profileIdentity, scoringSettings,
       activeEventIds: Object.freeze([...activeIds].sort(compareCodePoints)), judgedEventIds: Object.freeze([...judgedIds].sort(compareCodePoints)),
       judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
@@ -636,6 +646,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
   /** @param {DataRecord} event @returns {DataRecord} */
   function profileForEvent(event) { return /** @type {DataRecord} */ (profileCatalog.get(String(event.variantId)) ?? profileIdentity); }
+  /** @param {DataRecord} event @returns {DataRecord} */
+  function scoringSettingsForEvent(event) { return /** @type {DataRecord} */ (scoringSettingsCatalog.get(String(event.variantId)) ?? scoringSettings); }
   function assertOpen() { if (destroyed) throw gameplayError("service_destroyed", "Gameplay coordinator is destroyed"); }
   function assertConfigured() { assertOpen(); if (!variant || packageId === null) throw gameplayError("content_not_configured", "Gameplay content is not configured"); }
   /** @param {number} value */
@@ -767,9 +779,18 @@ function validateEventForVariant(event, selectedVariant) {
 /** @param {unknown} value @returns {DataRecord} */
 function normalizeProfile(value) {
   const record = requireRecord(value, "profile_identity_invalid");
-  if (!isPrototypeTuningIdentity(record)) throw gameplayError("profile_identity_invalid", "Profile identity does not satisfy the public tuning contract");
+  if (!isPrototypeTuningIdentity(record) || record.class !== "between_run_ruleset") throw gameplayError("profile_identity_invalid", "Profile identity does not satisfy the gameplay tuning contract for a between-run ruleset");
   return record;
 }
+
+/** @param {unknown} value @returns {DataRecord} */
+function normalizeScoringSettings(value) {
+  const record = requireDataRecordFields(value, "scoring_settings_invalid", ["comboBonusPerHit", "hitPoints", "missPenalty"]);
+  if (Reflect.ownKeys(record).length !== 3) throw gameplayError("scoring_settings_invalid", "Scoring settings require every exact field");
+  return Object.freeze({ comboBonusPerHit: boundedScoreNumber(record.comboBonusPerHit), hitPoints: boundedScoreNumber(record.hitPoints), missPenalty: boundedScoreNumber(record.missPenalty) });
+}
+/** @param {unknown} value */
+function boundedScoreNumber(value) { if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) throw gameplayError("scoring_settings_invalid", "Scoring settings must be finite values from 0 through 100"); return Object.is(value, -0) ? 0 : value; }
 
 /** @param {unknown} value @returns {readonly DataRecord[]} */
 function normalizeShadowVariants(value) {
@@ -896,8 +917,9 @@ function eventOrder(left, right) { return Number(left.centerTimestampMs) - Numbe
 /** @param {unknown} value @param {string} code */
 function positiveNumber(value, code) { const number = requireNonNegativeNumber(value, code); if (number <= 0) throw gameplayError(code, "Expected a positive number"); return number; }
 function defaultProfileIdentity() { return Object.freeze({ schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "aero.gameplay.prototype.default", profileVersion: "1", contentHash: "0".repeat(64), class: "between_run_ruleset", regenerationRequired: false }); }
-/** @param {DataRecord} variant @param {DataRecord} profile */
-function scorePartitionKey(variant, profile) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live"].join("|"); }
+function defaultScoringSettings() { return Object.freeze({ comboBonusPerHit: 0, hitPoints: 1, missPenalty: 0 }); }
+/** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings */
+function scorePartitionKey(variant, profile, settings) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; const parts = [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live"]; if (settings.hitPoints !== 1 || settings.missPenalty !== 0 || settings.comboBonusPerHit !== 0) parts.push(settings.hitPoints, settings.missPenalty, settings.comboBonusPerHit); return parts.join("|"); }
 /** @param {DataRecord} variant */
 function publicVariant(variant) { return Object.freeze({ variantId: variant.variantId, chartId: variant.chartId, mode: variant.mode, rulesetId: variant.rulesetId, recipeId: variant.recipeId, modifierIds: variant.modifierIds, ranked: variant.ranked, mapHash: variant.mapHash, scoreIdentityHash: variant.scoreIdentityHash, provenance: variant.provenance }); }
 /** @param {"three" | "two" | "one" | "complete" | "cancelled"} state @param {AeroCountdownReason | null} reason @param {number | null} value @param {number} timestampMs @param {string | null} calibrationId */

@@ -1,0 +1,41 @@
+{
+  "schema": "aerobeat/prototype_replay_fixture",
+  "version": 1,
+  "fixtureId": "task11-prototype-replay-v1",
+  "candidateMatrix": [
+    {"id":"flow","mode":"flow","rulesetId":"flow_grid_v1","recipeId":null},
+    {"id":"semantic-row","mode":"boxing","rulesetId":"boxing_semantic_track_v1","recipeId":"row_family_balanced_height_v1"},
+    {"id":"spatial-row","mode":"boxing","rulesetId":"boxing_spatial_grid_v1","recipeId":"row_family_balanced_height_v1"},
+    {"id":"semantic-cut","mode":"boxing","rulesetId":"boxing_semantic_track_v1","recipeId":"cut_family_source_height_v1"},
+    {"id":"spatial-cut","mode":"boxing","rulesetId":"boxing_spatial_grid_v1","recipeId":"cut_family_source_height_v1"}
+  ],
+  "requiredScenarios": [
+    "flow_cardinal_cell",
+    "straight_left_100ms",
+    "straight_right_100ms",
+    "hook_left_cardinal",
+    "hook_right_cardinal",
+    "uppercut_left_cardinal",
+    "uppercut_right_cardinal",
+    "standard_guard",
+    "crossed_guard",
+    "obstacle_punch_disjoint",
+    "guard_punch_overlap",
+    "modifier_no_squats",
+    "modifier_no_weaves",
+    "modifier_any_punch",
+    "modifier_cross_body",
+    "tracking_loss_500ms",
+    "fresh_calibration_generation",
+    "frozen_countdown",
+    "paused_future_swap",
+    "shadow_diagnostic_only",
+    "inclusive_timing_180ms",
+    "freshness_150ms",
+    "positive_only_consumption",
+    "one_action_consumption"
+  ],
+  "modifierIds": ["any_punch","cross_body","crossed_guard","no_squats","no_weaves"],
+  "timing": {"checkpointFreshnessMs":150,"straightQualificationMs":100,"timingWindowAfterMs":180,"timingWindowBeforeMs":180,"trackingLossMs":500},
+  "fixtureHash": "sha256:b19da85991effb0e51f90d6a70b10ef12610b8a01fe1091c61fecf89b2fb21eb"
+}
