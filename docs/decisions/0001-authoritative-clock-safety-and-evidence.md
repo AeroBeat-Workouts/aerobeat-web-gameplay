@@ -14,7 +14,7 @@ Rules consume positive evidence only after the whole rule matches. Evidence is k
 
 Scores are local partitions keyed by variant score identity plus the complete tuning profile identity. Boxing composites are unranked and no leaderboard surface exists.
 
-Paused content swaps preserve past, judged, and active truth, including each preserved event's original variant and tuning-profile identity; suppress duplicate source lineage; and replace only bounded future events.
+Paused content swaps bind package/content-generation, chart, variant, profile, and scoring settings to each accepted event object. Past, judged, and active objects retain that truth even when a replacement reuses the same variant ID. Preserved exact event IDs own collisions deterministically; duplicate preserved lineage and stale replacement events are skipped; only bounded future events receive new-generation truth.
 
 ## Consequences
 

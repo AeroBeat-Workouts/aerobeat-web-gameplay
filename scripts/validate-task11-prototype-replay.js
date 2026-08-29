@@ -10,12 +10,12 @@ const fixtureHash = fixture.fixtureHash;
 delete fixture.fixtureHash;
 assert.equal(fixtureHash, `sha256:${sha256PrototypeProfileHex(canonicalPrototypeProfileJson(fixture))}`);
 assert.equal(fixture.candidateMatrix.length, 5);
-assert.equal(new Set(fixture.requiredScenarios).size, 24);
+assert.equal(new Set(fixture.requiredScenarios).size, 26);
 assert.deepEqual(fixture.modifierIds, ["any_punch", "cross_body", "crossed_guard", "no_squats", "no_weaves"]);
 
-function variant(candidate, modifierIds = []) { return { variantId: candidate.id, chartId: `chart-${candidate.id}`, mode: candidate.mode, rulesetId: candidate.rulesetId, recipeId: candidate.recipeId, modifierIds, ranked: false, mapHash: hash(), scoreIdentityHash: hash(), provenance: { baseVariantId: candidate.id } }; }
+function variant(candidate, modifierIds = []) { return { variantId: candidate.id, chartId: candidate.chartId ?? `chart-${candidate.id}`, mode: candidate.mode, rulesetId: candidate.rulesetId, recipeId: candidate.recipeId, modifierIds, ranked: false, mapHash: hash(), scoreIdentityHash: hash(), provenance: { baseVariantId: candidate.id } }; }
 function hash() { return { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }; }
-function event(candidate, eventId, centerTimestampMs, type, extra = {}) { return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: candidate.id, chartId: `chart-${candidate.id}`, centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra }; }
+function event(candidate, eventId, centerTimestampMs, type, extra = {}) { return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: candidate.id, chartId: candidate.chartId ?? `chart-${candidate.id}`, centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra }; }
 function anchor(name, measured, overrides = {}) { const defaults = { nose: [1,2], left_shoulder: [4,16], right_shoulder: [7,23], left_elbow: [4,16], right_elbow: [7,23], left_wrist: [5,20], right_wrist: [5,20] }; const [cell, subcell] = defaults[name]; return { schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: 0.5, y: 0.5, cell, subcell, ...overrides }; }
 function evidence(frameId, measured, actions, entries = []) { return { schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: actions, anchors: ["nose","left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist"].map((name) => anchor(name, measured)), entries }; }
 function input(measured, latestEvidence, options = {}) { return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] }; }
@@ -112,26 +112,32 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   const candidate = fixture.candidateMatrix.find((entry) => entry.id === "semantic-row");
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "swap-shadow" });
   const shadowCandidate = { ...variant(candidate), variantId:"shadow", chartId:"chart-shadow", resolvedEvents:[{...event({id:"shadow"},"shadow-hit",1000,"hook_left"),chartId:"chart-shadow"}] };
-  ready(coordinator, config(candidate, [event(candidate,"past",1000,"hook_right"),event(candidate,"old-future",3000,"squat",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { shadowVariants:[shadowCandidate] }));
+  ready(coordinator, config(candidate, [event(candidate,"past",1000,"hook_right"),event(candidate,"old-future",3000,"squat",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(candidate,"replaceable-future",4000,"hook_right")], { shadowVariants:[shadowCandidate] }));
   coordinator.advance({ timestampMs:4000,clock:clock(1000,true),input:input(4000,evidence("shadow-frame",4000,["hook_left"])) });
   assert.equal(coordinator.getSnapshot().shadowJudgements[0].result,"hit");
   assert.equal(coordinator.getScorePartitions().reduce((sum,item)=>sum+item.hits,0),0);
   coordinator.advance({ timestampMs:4200,clock:clock(1200,true) });
   coordinator.setActiveEventIds(["old-future"]);
   coordinator.pause(4300);
-  const next = {...candidate,id:"semantic-cut",recipeId:"cut_family_source_height_v1"};
-  coordinator.applyFutureContent(config(next,[event(next,"replacement",3000,"weave_left",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { scoringProfileId:"aero.scoring.locked" }));
+  const next = {...candidate,chartId:"chart-semantic-row-revised",recipeId:"cut_family_source_height_v1"};
+  coordinator.applyFutureContent(config(next,[event(next,"old-future",3000,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"replacement",3000,"weave_left",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"stale-replacement",900,"hook_left"),event(next,"replaceable-future",3500,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { scoringProfileId:"aero.scoring.locked" }));
   assert.equal(coordinator.getSnapshot().judgedEventIds.includes("past"),true);
   assert.equal(coordinator.getSnapshot().selectedVariant.recipeId,"cut_family_source_height_v1");
   coordinator.resume(4400);
   coordinator.advance({timestampMs:5400,clock:clock(1200,false)}); coordinator.advance({timestampMs:6400,clock:clock(1200,false)}); coordinator.advance({timestampMs:7400,clock:clock(1200,false)});
   coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_left"]))});
+  coordinator.advance({timestampMs:9700,clock:clock(3500,true),input:input(9700,evidence("swap-future",9700,["weave_right"]))});
   const oldPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide");
   const newPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked");
   assert.equal(oldPartition.scoringSettings.hitPoints,1.25);
   assert.equal(oldPartition.score,1.25,"preserved old events retain old fractional scoring settings");
   assert.equal(newPartition.scoringSettings.hitPoints,1);
-  assert.equal(newPartition.score,1);
+  assert.equal(newPartition.score,2);
+  assert.equal(oldPartition.chartId,"chart-semantic-row");
+  assert.equal(newPartition.chartId,"chart-semantic-row-revised");
+  assert.equal(coordinator.getJudgements().filter((entry)=>entry.eventId === "old-future").length,1,"preserved active event owns a same-ID collision");
+  assert.equal(coordinator.getJudgements().some((entry)=>entry.eventId === "stale-replacement"),false);
+  assert.equal(coordinator.getJudgements().find((entry)=>entry.eventId === "replaceable-future")?.chartId,"chart-semantic-row-revised");
   assert.notEqual(oldPartition.partitionId,newPartition.partitionId);
 }
 

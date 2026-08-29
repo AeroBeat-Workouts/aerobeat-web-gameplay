@@ -94,7 +94,7 @@ The four supported Boxing candidates are Semantic Track and Spatial Grid crossed
 
 ## Future Swaps and Shadows
 
-`applyFutureContent()` is accepted only while paused. Judged, past, and assembly-declared active events remain authoritative; only non-duplicate future lineage is replaced. Preserved events retain their original variant, recipe/ruleset, map/score hashes, and tuning-profile identity when later judged, while replacements use the new selection. Existing judgement and score truth is never rewritten.
+`applyFutureContent()` is accepted only while paused. Judged, past, and assembly-declared active events remain authoritative; only non-duplicate future lineage is replaced. Each accepted event object captures immutable package/content-generation, chart, variant, recipe/ruleset, map/score hash, tuning-profile, and scoring-settings truth. Preserved events retain that exact generation even when a swap reuses the same variant ID, while replacements use the new generation. A preserved exact event ID owns collisions deterministically; stale replacements and duplicate preserved lineage are skipped. Existing judgement and score truth is never rewritten.
 
 Optional shadow variants evaluate the same calibration-matched measured evidence within the same 150ms freshness limit without consuming actions or changing live judgements/scores. Shadow output is explicitly marked `shadow: true` and is diagnostic only.
 

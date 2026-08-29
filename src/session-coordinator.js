@@ -75,9 +75,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let profileIdentity = /** @type {DataRecord} */ (defaultProfileIdentity());
   let scoringSettings = /** @type {DataRecord} */ (defaultScoringSettings());
   let events = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
-  const variantCatalog = new Map();
-  const profileCatalog = new Map();
-  const scoringSettingsCatalog = new Map();
+  let contentGeneration = 0;
+  let eventTruth = new WeakMap();
   let shadowVariants = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   let calibrationId = null;
   let safetyReady = false;
@@ -133,14 +132,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextProfileIdentity = source.profileIdentity === undefined ? defaultProfileIdentity() : normalizeProfile(source.profileIdentity);
     const nextScoringSettings = source.scoringSettings === undefined ? defaultScoringSettings() : normalizeScoringSettings(source.scoringSettings);
     const nextShadowVariants = source.shadowVariants === undefined ? Object.freeze([]) : normalizeShadowVariants(source.shadowVariants);
+    const nextContentGeneration = contentGeneration + 1;
+    const nextEventTruth = bindEventTruth(nextEvents, nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings);
     packageId = nextPackageId;
     variant = nextVariant;
-    variantCatalog.clear();
-    profileCatalog.clear();
-    scoringSettingsCatalog.clear();
-    variantCatalog.set(String(nextVariant.variantId), nextVariant);
-    profileCatalog.set(String(nextVariant.variantId), nextProfileIdentity);
-    scoringSettingsCatalog.set(String(nextVariant.variantId), nextScoringSettings);
+    contentGeneration = nextContentGeneration;
+    eventTruth = nextEventTruth;
     events = nextEvents;
     profileIdentity = nextProfileIdentity;
     scoringSettings = nextScoringSettings;
@@ -288,20 +285,29 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const preserve = new Map(events.filter((event) => shouldPreserveEvent(event)).map((event) => [String(event.eventId), event]));
     const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
     const merged = [...preserve.values()];
+    const acceptedNextEvents = [];
     for (const event of nextEvents) {
       if (preserve.has(String(event.eventId))) continue;
       if (Number(event.centerTimestampMs) <= timelinePositionMs) continue;
       const eventLineage = lineageIds(event);
       if (eventLineage.some((id) => lineage.has(id))) continue;
       merged.push(event);
+      acceptedNextEvents.push(event);
     }
     if (merged.length > 100000) throw gameplayError("content_events_invalid", "Future content merge exceeds the event limit");
     merged.sort(eventOrder);
+    const nextContentGeneration = contentGeneration + 1;
+    const nextEventTruth = new WeakMap();
+    for (const event of preserve.values()) {
+      const truth = eventTruth.get(event);
+      if (!truth) throw gameplayError("event_truth_missing", "Preserved events require immutable content-generation truth");
+      nextEventTruth.set(event, truth);
+    }
+    for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings));
     events = Object.freeze(merged);
     variant = nextVariant;
-    variantCatalog.set(String(nextVariant.variantId), nextVariant);
-    profileCatalog.set(String(nextVariant.variantId), nextProfileIdentity);
-    scoringSettingsCatalog.set(String(nextVariant.variantId), nextScoringSettings);
+    contentGeneration = nextContentGeneration;
+    eventTruth = nextEventTruth;
     profileIdentity = nextProfileIdentity;
     scoringSettings = nextScoringSettings;
     shadowVariants = nextShadowVariants;
@@ -589,7 +595,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings */
   function updateScore(result, scoreVariant, scoreProfile, settings) {
     const key = scorePartitionKey(scoreVariant, scoreProfile, settings);
-    const current = partitions.get(key) ?? { partitionId: key, variantId: scoreVariant.variantId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ranked: scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, score: 0, maxCombo: 0, combo: 0 };
+    const current = partitions.get(key) ?? { partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ranked: scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, score: 0, maxCombo: 0, combo: 0 };
     const next = { ...current };
     if (result === "hit") { next.hits += 1; next.combo += 1; next.score = finiteScore(next.score + Number(settings.hitPoints) + Math.max(0, next.combo - 1) * Number(settings.comboBonusPerHit)); next.maxCombo = Math.max(next.maxCombo, next.combo); }
     else if (result === "miss") { next.misses += 1; next.score = finiteScore(Math.max(0, next.score - Number(settings.missPenalty))); next.combo = 0; }
@@ -638,21 +644,32 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {DataRecord} event */
   function shouldPreserveEvent(event) { return Number(event.centerTimestampMs) <= timelinePositionMs || judgedIds.has(String(event.eventId)) || activeIds.has(String(event.eventId)); }
   /** @param {DataRecord} event @returns {DataRecord} */
-  function variantForEvent(event) {
-    const eventVariant = variantCatalog.get(String(event.variantId));
-    if (eventVariant) return /** @type {DataRecord} */ (eventVariant);
-    if (variant) return variant;
-    throw gameplayError("content_not_configured", "Gameplay content is not configured");
+  function truthForEvent(event) {
+    const truth = eventTruth.get(event);
+    if (!truth) throw gameplayError("event_truth_missing", "Gameplay events require immutable content-generation truth");
+    return /** @type {DataRecord} */ (truth);
   }
   /** @param {DataRecord} event @returns {DataRecord} */
-  function profileForEvent(event) { return /** @type {DataRecord} */ (profileCatalog.get(String(event.variantId)) ?? profileIdentity); }
+  function variantForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).variant); }
   /** @param {DataRecord} event @returns {DataRecord} */
-  function scoringSettingsForEvent(event) { return /** @type {DataRecord} */ (scoringSettingsCatalog.get(String(event.variantId)) ?? scoringSettings); }
+  function profileForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).profileIdentity); }
+  /** @param {DataRecord} event @returns {DataRecord} */
+  function scoringSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).scoringSettings); }
   function assertOpen() { if (destroyed) throw gameplayError("service_destroyed", "Gameplay coordinator is destroyed"); }
   function assertConfigured() { assertOpen(); if (!variant || packageId === null) throw gameplayError("content_not_configured", "Gameplay content is not configured"); }
   /** @param {number} value */
   function advanceTimestamp(value) { const next = requireNonNegativeNumber(value, "timestamp_invalid"); if (next < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back"); timestampMs = next; }
 }
+
+/** @param {readonly DataRecord[]} sourceEvents @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings */
+function bindEventTruth(sourceEvents, contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings) {
+  const result = new WeakMap();
+  const truth = makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings);
+  for (const event of sourceEvents) result.set(event, truth);
+  return result;
+}
+/** @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings */
+function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings }); }
 
 /** @param {GameplayCoordinatorOptions} options */
 function normalizeOptions(options) {
@@ -903,7 +920,7 @@ function makeJudgement(event, selectedVariant, result, diagnostics, evidence, ev
   const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? "flow_grid_v1");
   const recipeId = /** @type {import("@aerobeat/web-contracts").AeroConversionRecipeId | null} */ (selectedVariant?.recipeId ?? null);
   const center = Number(event.centerTimestampMs);
-  return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 1, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow, variantId: selectedVariant?.variantId ?? null, sourceEventIds: Object.freeze([...lineageIds(event)]), mapHash: selectedVariant?.mapHash ?? null, scoreIdentityHash: selectedVariant?.scoreIdentityHash ?? null, profileId: profile.profileId, profileVersion: profile.profileVersion, profileHash: profile.contentHash });
+  return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 1, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow, variantId: selectedVariant?.variantId ?? null, chartId: selectedVariant?.chartId ?? null, sourceEventIds: Object.freeze([...lineageIds(event)]), mapHash: selectedVariant?.mapHash ?? null, scoreIdentityHash: selectedVariant?.scoreIdentityHash ?? null, profileId: profile.profileId, profileVersion: profile.profileVersion, profileHash: profile.contentHash });
 }
 
 /** @param {DataRecord} event */

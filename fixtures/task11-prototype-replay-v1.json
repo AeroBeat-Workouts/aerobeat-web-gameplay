@@ -33,9 +33,11 @@
     "inclusive_timing_180ms",
     "freshness_150ms",
     "positive_only_consumption",
-    "one_action_consumption"
+    "one_action_consumption",
+    "same_variant_collision_swap",
+    "stale_future_swap"
   ],
   "modifierIds": ["any_punch","cross_body","crossed_guard","no_squats","no_weaves"],
   "timing": {"checkpointFreshnessMs":150,"straightQualificationMs":100,"timingWindowAfterMs":180,"timingWindowBeforeMs":180,"trackingLossMs":500},
-  "fixtureHash": "sha256:b19da85991effb0e51f90d6a70b10ef12610b8a01fe1091c61fecf89b2fb21eb"
+  "fixtureHash": "sha256:4fcab256c5c158d52f4dcc26d6553f2949d92dd639e17a15128f9bd37c8879dd"
 }

@@ -292,6 +292,54 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getScorePartitions().some((entry) => entry.variantId === "variant" && entry.profileVersion === "1"), true);
 }
 
+// Same-variant swaps retain immutable old event truth and deterministic ID ownership.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "same-variant-swap" });
+  const initial = config([event("same-past", 1000, "hook_left"), event("same-active", 3000, "squat"), event("same-future", 4000, "hook_right")]);
+  initial.scoringSettings = { comboBonusPerHit: 0.05, hitPoints: 1.25, missPenalty: 0 };
+  coordinator.configureContent(initial);
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 1000, clock: clock(0, false) }); coordinator.advance({ timestampMs: 2000, clock: clock(0, false) }); coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("same-past-frame", 4000, ["hook_left"])) });
+  coordinator.setActiveEventIds(["same-active"]);
+  coordinator.pause(4100);
+  const revisedVariant = { ...variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "variant"), chartId: "chart-variant-revised", mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: "b".repeat(64) }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: "c".repeat(64) } };
+  const revised = config([
+    { ...event("same-active", 3000, "weave_left"), chartId: revisedVariant.chartId },
+    { ...event("same-replacement", 3000, "weave_left"), chartId: revisedVariant.chartId },
+    { ...event("same-stale", 900, "hook_right"), chartId: revisedVariant.chartId },
+    { ...event("same-future", 3500, "weave_right"), chartId: revisedVariant.chartId }
+  ], revisedVariant);
+  revised.profileIdentity = { ...revised.profileIdentity, profileId: "profile-locked", profileVersion: "2", contentHash: "b".repeat(64) };
+  revised.scoringSettings = { comboBonusPerHit: 0, hitPoints: 1, missPenalty: 0 };
+  coordinator.applyFutureContent(revised);
+  assert.deepEqual(coordinator.getSnapshot().activeEventIds, ["same-active"]);
+  assert.equal(coordinator.getSnapshot().judgedEventIds.includes("same-past"), true);
+  coordinator.resume(4100);
+  coordinator.advance({ timestampMs: 5100, clock: clock(1000, false) }); coordinator.advance({ timestampMs: 6100, clock: clock(1000, false) }); coordinator.advance({ timestampMs: 7100, clock: clock(1000, false) });
+  coordinator.advance({ timestampMs: 8000, clock: clock(3000, true), input: input(8000, evidence("same-collision-frame", 8000, ["squat", "weave_left"])) });
+  coordinator.advance({ timestampMs: 8500, clock: clock(3500, true), input: input(8500, evidence("same-future-frame", 8500, ["weave_right"])) });
+  const oldPartition = coordinator.getScorePartitions().find((entry) => entry.profileId === "profile");
+  const newPartition = coordinator.getScorePartitions().find((entry) => entry.profileId === "profile-locked");
+  assert.equal(oldPartition?.chartId, "chart-variant");
+  assert.equal(oldPartition?.mapHash.value, HASH);
+  assert.equal(oldPartition?.scoreIdentityHash.value, HASH);
+  assert.equal(oldPartition?.profileHash, HASH);
+  assert.equal(oldPartition?.scoringSettings.hitPoints, 1.25);
+  assert.equal(oldPartition?.score, 2.55, "old past and active events retain prototype-wide scoring");
+  assert.equal(newPartition?.chartId, "chart-variant-revised");
+  assert.equal(newPartition?.mapHash.value, "b".repeat(64));
+  assert.equal(newPartition?.scoreIdentityHash.value, "c".repeat(64));
+  assert.equal(newPartition?.profileHash, "b".repeat(64));
+  assert.equal(newPartition?.scoringSettings.hitPoints, 1);
+  assert.equal(newPartition?.score, 2, "new replacement and same-ID future event use locked scoring");
+  assert.equal(coordinator.getJudgements().filter((entry) => entry.eventId === "same-active").length, 1, "preserved active event owns exact ID collision");
+  assert.equal(coordinator.getJudgements().some((entry) => entry.eventId === "same-stale"), false, "stale replacement events are not admitted");
+  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-active")?.chartId, "chart-variant");
+  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-future")?.chartId, "chart-variant-revised");
+}
+
 // Shadow diagnostics never consume live evidence or change score partitions.
 {
   const shadow = { ...variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "shadow"), resolvedEvents: [{ ...event("shadow-hook", 1000, "hook_left"), variantId: "shadow", chartId: "chart-shadow" }] };
