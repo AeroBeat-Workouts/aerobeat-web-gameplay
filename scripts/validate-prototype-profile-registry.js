@@ -45,6 +45,11 @@ const beforeVersionMismatch = registry.getSnapshot();
 assert.throws(() => registry.importProfiles(versioned), (error) => error?.code === "profile_bundle_version_incompatible");
 assert.equal(registry.getSnapshot(), beforeVersionMismatch, "incompatible bundle versions reject atomically");
 assert.deepEqual(registry.exportProfiles(), fixture);
+function rehashBundle(candidate) {
+  delete candidate.bundleHash;
+  candidate.bundleHash = `sha256:${sha256PrototypeProfileHex(canonicalPrototypeProfileJson(candidate))}`;
+  return candidate;
+}
 function rejectAtomically(candidate, predicate) {
   const before = registry.getSnapshot();
   assert.throws(() => registry.importProfiles(candidate), predicate);
@@ -56,11 +61,11 @@ rejectAtomically(hostile, (error) => error?.code === "profile_hash_mismatch");
 for (const missingField of ["schema", "version", "contentHash", "experimental", "label", "settings"]) {
   const missing = structuredClone(fixture);
   delete missing.profiles[0][missingField];
-  rejectAtomically(missing, (error) => error?.code === "prototype_profile_fields_missing");
+  rejectAtomically(rehashBundle(missing), (error) => error?.code === "prototype_profile_fields_missing");
 }
 const extra = structuredClone(fixture);
 extra.profiles[0].winner = true;
-rejectAtomically(extra);
+rejectAtomically(rehashBundle(extra));
 for (const missingBundleField of ["schema", "version", "bundleVersion", "profiles", "bundleHash"]) {
   const missingBundle = structuredClone(fixture);
   delete missingBundle[missingBundleField];
@@ -89,6 +94,14 @@ rejectAtomically(excessiveCount);
 const excessiveString = structuredClone(fixture);
 excessiveString.profiles[0].label = "x".repeat(9000);
 rejectAtomically(excessiveString);
+for (const boundedProfileString of ["profileId", "profileVersion", "label"]) {
+  const overMaximum = structuredClone(fixture);
+  overMaximum.profiles[0][boundedProfileString] = "x".repeat(257);
+  rejectAtomically(rehashBundle(overMaximum), (error) => ["profile_id_invalid", "profile_version_invalid", "profile_label_invalid"].includes(error?.code));
+}
+const overBundleVersionMaximum = structuredClone(fixture);
+overBundleVersionMaximum.bundleVersion = "x".repeat(257);
+rejectAtomically(rehashBundle(overBundleVersionMaximum), (error) => error?.code === "profile_bundle_version_invalid");
 const classSettings = structuredClone(fixture);
 class ClassSettings { constructor() { this.motionIntensity = 1; this.roleScale = 1; } }
 classSettings.profiles[4].settings = new ClassSettings();
