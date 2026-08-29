@@ -126,6 +126,8 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   coordinator.resume(4400);
   coordinator.advance({timestampMs:5400,clock:clock(1200,false)}); coordinator.advance({timestampMs:6400,clock:clock(1200,false)}); coordinator.advance({timestampMs:7400,clock:clock(1200,false)});
   coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_left"]))});
+  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide")?.score,1.25,"same-ID preserved event scores with old settings");
+  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked")?.score,1,"same-variant replacement scores with new settings");
   coordinator.advance({timestampMs:9700,clock:clock(3500,true),input:input(9700,evidence("swap-future",9700,["weave_right"]))});
   const oldPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide");
   const newPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked");
