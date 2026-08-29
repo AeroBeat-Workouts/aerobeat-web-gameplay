@@ -18,6 +18,7 @@ export const aeroGameplaySessionCapabilities = Object.freeze({
   calibratedInputOnly: true,
   trackingSafetyPause: true,
   frozenCountdown: true,
+  explicitPausedClockSynchronization: true,
   flowGrid: true,
   semanticTrackBoxing: true,
   spatialGridBoxing: true,

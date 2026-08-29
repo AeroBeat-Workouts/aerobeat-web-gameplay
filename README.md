@@ -46,6 +46,7 @@ Coordinator operations:
 - `configureContent(configuration)`
 - `requestStart(timestampMs)` / `pause(timestampMs, reason?)` / `resume(timestampMs)`
 - `advance({ timestampMs, clock, input?, lease? })`
+- `synchronizePausedClock({ timestampMs, clock })`
 - `applyFutureContent(configuration)`
 - `setActiveEventIds(ids)` / `setLeaseSnapshot(snapshot)`
 - `stop(timestampMs)` / `reset(timestampMs?)` / `destroy()`
@@ -55,7 +56,7 @@ Coordinator operations:
 
 The state machine follows the public session states: `idle -> calibrating -> countdown -> playing`, with manual/tracking pauses, completion, and destruction. Initial play requires a valid calibration. The input service's calibrated `countdown` readiness (and the additive `ready` state) are both accepted as safe-to-count-down. Sustained tracking/no-frame loss is reported as `gameplayPaused`/`freshCalibrationRequired`; gameplay immediately clears current evidence, cancels the countdown, freezes progress, latches the invalidated calibration ID, and enters `paused_tracking`. The invalidated ID cannot resume gameplay even if a later caller clears its upstream flag; a different fresh calibrated generation automatically starts a tracking-resume countdown.
 
-Countdown is a wall-timestamp-driven frozen `3..2..1`; both the authoritative audio clock's `playing` flag and position must remain frozen. Playback, paused-position drift, a stopped running clock, tracking loss, or lease loss fails closed without moving gameplay time. During play, only the supplied audio clock's `positionSeconds` establishes event timing, and timeline rollback fails closed without rewriting judgement truth. Current public audio snapshots are consumed directly, including an optional own `durationSeconds: undefined` field.
+Countdown is a wall-timestamp-driven frozen `3..2..1`; both the authoritative audio clock's `playing` flag and position must remain frozen. Playback, paused-position drift, a stopped running clock, tracking loss, or lease loss fails closed without moving gameplay time. Ordinary `advance()` calls cannot move a manually paused timeline; assembly uses the explicit stopped-clock-only `synchronizePausedClock()` seam after an intentional audio seek. During play, only the supplied audio clock's `positionSeconds` establishes event timing, and timeline rollback fails closed without rewriting judgement truth. Current public audio snapshots are consumed directly, including an optional own `durationSeconds: undefined` field.
 
 The assembly may inject a media-lease snapshot. Gameplay verifies that its `instanceId` owns camera and audio and pauses when it does not; it never acquires, releases, or arbitrates the lease.
 

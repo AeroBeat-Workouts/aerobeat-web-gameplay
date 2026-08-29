@@ -106,6 +106,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     pause,
     resume,
     advance,
+    synchronizePausedClock,
     applyFutureContent,
     setActiveEventIds,
     setLeaseSnapshot,
@@ -238,9 +239,29 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
           pauseReason = null;
         }
       }
-    } else if (enteredState !== "playing" && enteredState !== "countdown" && enteredState !== "paused_tracking" && state !== "paused_tracking") {
+    } else if (enteredState !== "playing" && enteredState !== "countdown" && enteredState !== "paused_manual" && enteredState !== "paused_tracking" && state !== "paused_tracking") {
       timelinePositionMs = clock.positionMs;
     }
+    publish(null);
+    return snapshot;
+  }
+
+  /**
+   * Synchronize an explicit paused seek from the authoritative audio clock.
+   * Ordinary advance frames cannot move a manually paused timeline.
+   *
+   * @param {{timestampMs: number, clock: unknown}} frame
+   */
+  function synchronizePausedClock(frame) {
+    assertConfigured();
+    if (state !== "paused_manual") throw gameplayError("session_state_invalid", "Paused clock synchronization requires a manual pause");
+    const safeFrame = requireDataRecordFields(frame, "paused_clock_frame_invalid", ["timestampMs", "clock"]);
+    const nextTimestampMs = requireNonNegativeNumber(safeFrame.timestampMs, "timestamp_invalid");
+    if (nextTimestampMs < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back");
+    const clock = normalizeClock(safeFrame.clock);
+    if (clock.playing) throw gameplayError("paused_clock_not_frozen", "Paused clock synchronization requires a stopped audio clock");
+    timestampMs = nextTimestampMs;
+    timelinePositionMs = clock.positionMs;
     publish(null);
     return snapshot;
   }

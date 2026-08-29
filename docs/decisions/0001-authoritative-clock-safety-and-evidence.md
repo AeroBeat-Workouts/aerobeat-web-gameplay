@@ -6,7 +6,7 @@ Accepted for Task 6.
 
 ## Decision
 
-Each connected game owns one gameplay coordinator. Wall timestamps order host/input observations and drive the frozen countdown; only the injected audio snapshot establishes song timeline position and judgement timing. Gameplay never synthesizes an advancing clock. It selects the documented clock fields without recursively rejecting the audio package's optional `durationSeconds: undefined`, and validates a complete frame before committing its wall timestamp or domain state.
+Each connected game owns one gameplay coordinator. Wall timestamps order host/input observations and drive the frozen countdown; only the injected audio snapshot establishes song timeline position and judgement timing. Gameplay never synthesizes an advancing clock. It selects the documented clock fields without recursively rejecting the audio package's optional `durationSeconds: undefined`, and validates a complete frame before committing its wall timestamp or domain state. Manual pause frames remain frozen; an intentional host/audio seek is synchronized only through an explicit stopped-clock-only operation.
 
 Initial play and every tracking-loss recovery require calibrated, measured, current input. Tracking loss cancels the countdown, clears current evidence, and latches the invalidated calibration ID until a different ready generation arrives. The resume countdown is `3..2..1` while both audio playback and position remain frozen; drift or rollback fails closed without rewinding gameplay truth. Media lease data is an injected participation check; arbitration stays process-wide in assembly.
 

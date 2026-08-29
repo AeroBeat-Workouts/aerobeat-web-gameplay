@@ -363,6 +363,23 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(lost.getSnapshot().session.state, "paused_tracking");
 }
 
+// Manual pause remains frozen under ordinary frames; only explicit stopped-clock synchronization seeks.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "explicit-paused-seek" });
+  readyPlaying(coordinator, [event("seek-future", 5000, "hook_left")]);
+  coordinator.advance({ timestampMs: 3100, clock: clock(1000, true) });
+  coordinator.pause(3200);
+  coordinator.advance({ timestampMs: 3300, clock: clock(2000, false) });
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 1000);
+  const beforeRejectedSeek = coordinator.getSnapshot();
+  assert.throws(() => coordinator.synchronizePausedClock({ timestampMs: 3400, clock: clock(2000, true) }), /stopped audio clock/u);
+  assert.equal(coordinator.getSnapshot(), beforeRejectedSeek);
+  coordinator.synchronizePausedClock({ timestampMs: 3400, clock: createPlaybackClock({ durationSeconds: 10 }).snapshot(0) });
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+  coordinator.synchronizePausedClock({ timestampMs: 3500, clock: clock(2000, false) });
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 2000);
+}
+
 // Failed configuration and frame validation are transactional and publish no hidden state.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "transactional" });
