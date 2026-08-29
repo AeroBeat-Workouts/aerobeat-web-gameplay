@@ -120,12 +120,12 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   coordinator.setActiveEventIds(["old-future"]);
   coordinator.pause(4300);
   const next = {...candidate,chartId:"chart-semantic-row-revised",recipeId:"cut_family_source_height_v1"};
-  coordinator.applyFutureContent(config(next,[event(next,"old-future",3000,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"stale-replacement",900,"hook_left"),event(next,"replaceable-future",3500,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { scoringProfileId:"aero.scoring.locked" }));
+  coordinator.applyFutureContent(config(next,[event(next,"old-future",3000,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"replacement",3000,"weave_left",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"stale-replacement",900,"hook_left"),event(next,"replaceable-future",3500,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { scoringProfileId:"aero.scoring.locked" }));
   assert.equal(coordinator.getSnapshot().judgedEventIds.includes("past"),true);
   assert.equal(coordinator.getSnapshot().selectedVariant.recipeId,"cut_family_source_height_v1");
   coordinator.resume(4400);
   coordinator.advance({timestampMs:5400,clock:clock(1200,false)}); coordinator.advance({timestampMs:6400,clock:clock(1200,false)}); coordinator.advance({timestampMs:7400,clock:clock(1200,false)});
-  coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_right"]))});
+  coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_left"]))});
   assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide")?.score,1.25,"same-ID preserved event scores with old settings");
   assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked")?.score,1,"same-variant replacement scores with new settings");
   coordinator.advance({timestampMs:9700,clock:clock(3500,true),input:input(9700,evidence("swap-future",9700,["weave_right"]))});
@@ -137,9 +137,7 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   assert.equal(newPartition.score,2);
   assert.equal(oldPartition.chartId,"chart-semantic-row");
   assert.equal(newPartition.chartId,"chart-semantic-row-revised");
-  const sameIdJudgements = coordinator.getJudgements().filter((entry)=>entry.eventId === "old-future");
-  assert.equal(sameIdJudgements.length,2,"same-ID and same-lineage generations judge exactly once each");
-  assert.deepEqual(sameIdJudgements.map((entry)=>entry.chartId).sort(),["chart-semantic-row","chart-semantic-row-revised"]);
+  assert.equal(coordinator.getJudgements().filter((entry)=>entry.eventId === "old-future").length,1,"preserved active event owns a same-ID collision");
   assert.equal(coordinator.getJudgements().some((entry)=>entry.eventId === "stale-replacement"),false);
   assert.equal(coordinator.getJudgements().find((entry)=>entry.eventId === "replaceable-future")?.chartId,"chart-semantic-row-revised");
   assert.notEqual(oldPartition.partitionId,newPartition.partitionId);
