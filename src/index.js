@@ -1,22 +1,28 @@
 // @ts-check
 
-/**
- * Stable package marker for the browser gameplay domain.
- *
- * @type {"aero.gameplay"}
- */
+import { serviceIds } from "@aerobeat/web-contracts";
+
+export { createAeroGameplaySessionCoordinator } from "./session-coordinator.js";
+
+/** @type {"aero.gameplay"} */
 export const aeroGameplayPackageId = "aero.gameplay";
 
-/**
- * Stable service identifier reserved for the per-game gameplay-session coordinator.
- *
- * @type {"aero.gameplay.session"}
- */
-export const aeroGameplaySessionServiceId = "aero.gameplay.session";
+/** @type {"aero.gameplay.session"} */
+export const aeroGameplaySessionServiceId = serviceIds.gameplaySession;
 
-/**
- * Gameplay modes owned by the future gameplay-session implementation.
- *
- * @type {readonly ["flow", "boxing"]}
- */
+/** @type {readonly ["flow", "boxing"]} */
 export const aeroGameplayModeIds = Object.freeze(["flow", "boxing"]);
+
+export const aeroGameplaySessionCapabilities = Object.freeze({
+  authoritativeAudioClock: true,
+  calibratedInputOnly: true,
+  trackingSafetyPause: true,
+  frozenCountdown: true,
+  flowGrid: true,
+  semanticTrackBoxing: true,
+  spatialGridBoxing: true,
+  futureVariantSwap: true,
+  diagnosticShadows: true,
+  localPrototypeScoresOnly: true,
+  publicLeaderboards: false
+});

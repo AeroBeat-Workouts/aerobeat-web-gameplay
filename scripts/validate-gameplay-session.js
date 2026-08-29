@@ -1,0 +1,341 @@
+// @ts-check
+
+import assert from "node:assert/strict";
+import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot } from "@aerobeat/web-contracts";
+import {
+  aeroGameplaySessionCapabilities,
+  createAeroGameplaySessionCoordinator
+} from "../src/index.js";
+
+const HASH = "a".repeat(64);
+
+function variant(rulesetId = "boxing_semantic_track_v1", recipeId = "row_family_balanced_height_v1", id = "variant") {
+  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_grid_v1" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_grid_v1" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { value: HASH }, scoreIdentityHash: { value: HASH }, provenance: { baseVariantId: id } };
+}
+
+function event(eventId, centerTimestampMs, type, extra = {}) {
+  return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra };
+}
+
+function anchor(name, cell, subcell, measured = 1000) {
+  return { schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: 0.5, y: 0.5, cell, subcell };
+}
+
+function evidence(frameId, measured, actions, overrides = {}) {
+  const cells = { nose: 1, left_shoulder: 4, right_shoulder: 7, left_elbow: 4, right_elbow: 7, left_wrist: 5, right_wrist: 6 };
+  const subs = { nose: 2, left_shoulder: 16, right_shoulder: 23, left_elbow: 16, right_elbow: 23, left_wrist: 20, right_wrist: 27 };
+  const anchors = Object.entries(cells).map(([name, cell]) => anchor(name, cell, subs[name], measured));
+  return { schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: actions, anchors, entries: [], ...overrides };
+}
+
+function input(measured, latestEvidence, options = {}) {
+  return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: options.ready === false ? "calibration_required" : "ready" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] };
+}
+
+function config(events, selected = variant(), shadowVariants = []) {
+  return { packageId: "package-1", selectedVariant: selected, resolvedEvents: events, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false }, shadowVariants };
+}
+
+function clock(positionMs, playing) { return { contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, playing }; }
+
+function readyPlaying(coordinator, events, selected = variant()) {
+  coordinator.configureContent(config(events, selected));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  assert.equal(coordinator.requestStart(0).accepted, true);
+  coordinator.advance({ timestampMs: 1000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 2000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+}
+
+// Initial calibration gate and immutable frozen countdown against authoritative audio.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "gate", countdownStepMs: 1000 });
+  coordinator.configureContent(config([event("punch", 1000, "hook_left")]));
+  assert.equal(coordinator.requestStart(0).accepted, false);
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  assert.equal(coordinator.getSnapshot().countdown.value, 3);
+  coordinator.advance({ timestampMs: 1000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 2);
+  coordinator.advance({ timestampMs: 2000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 1);
+  coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+  assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
+  assert.equal(isCountdownSnapshot(coordinator.getSnapshot().countdown), true);
+  assert.equal(Object.isFrozen(coordinator.getSnapshot()), true);
+}
+
+// Countdown rejects advancing audio.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "countdown-audio" });
+  coordinator.configureContent(config([]));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 10, clock: clock(10, true) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_manual");
+  assert.equal(coordinator.getSnapshot().session.pauseReason, "countdown_audio_not_frozen");
+}
+
+// Countdown rejects paused-clock drift and preserves the frozen gameplay position.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "countdown-drift" });
+  coordinator.configureContent(config([]));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 10, clock: clock(1, false) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_manual");
+  assert.equal(coordinator.getSnapshot().session.pauseReason, "countdown_audio_not_frozen");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+}
+
+// A running audio-clock rollback fails closed without rewinding gameplay truth.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "clock-rollback" });
+  readyPlaying(coordinator, [event("future", 5000, "hook_left")]);
+  coordinator.advance({ timestampMs: 3100, clock: clock(1000, true), input: input(3100, null) });
+  coordinator.advance({ timestampMs: 3200, clock: clock(900, true), input: input(3200, null) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_manual");
+  assert.equal(coordinator.getSnapshot().session.pauseReason, "audio_clock_rollback");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 1000);
+}
+
+// Inclusive -180ms semantic straight boundary and exact 100ms start qualification.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "semantic" });
+  readyPlaying(coordinator, [event("straight", 1000, "straight_left")]);
+  const sample = evidence("frame-semantic", 3100, ["straight_left"]);
+  coordinator.advance({ timestampMs: 3100, clock: clock(820, true), input: input(3100, sample, { qualifications: [{ hand: "left", semanticStartTimestampMs: 3000, semanticDurationMs: 100, semanticQualified: true, spatialStartTimestampMs: null, spatialDurationMs: 0, spatialQualified: false, acceptedSubcellColumns: [] }] }) });
+  assert.equal(coordinator.getJudgements()[0].result, "hit");
+  assert.equal(coordinator.getJudgements()[0].timingOffsetMs, -180);
+  assert.equal(isGameplayJudgement(coordinator.getJudgements()[0]), true);
+}
+
+// Inclusive +180ms boundary and 150ms freshness fail closed beyond the limit.
+{
+  const boundary = createAeroGameplaySessionCoordinator({ sessionId: "plus-boundary" });
+  readyPlaying(boundary, [event("hook", 1000, "hook_left")]);
+  boundary.advance({ timestampMs: 4000, clock: clock(1180, true), input: input(4000, evidence("frame-plus", 4000, ["hook_left"])) });
+  assert.equal(boundary.getJudgements()[0].timingOffsetMs, 180);
+
+  const freshBoundary = createAeroGameplaySessionCoordinator({ sessionId: "fresh-boundary" });
+  readyPlaying(freshBoundary, [event("fresh-hook", 1000, "hook_left")]);
+  freshBoundary.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-fresh", 3850, ["hook_left"])) });
+  assert.equal(freshBoundary.getJudgements()[0].result, "hit");
+
+  const stale = createAeroGameplaySessionCoordinator({ sessionId: "stale" });
+  readyPlaying(stale, [event("stale-hook", 1000, "hook_left")]);
+  const old = evidence("frame-stale", 3000, ["hook_left"]);
+  stale.advance({ timestampMs: 3151, clock: clock(1000, true), input: input(3151, old) });
+  stale.advance({ timestampMs: 3300, clock: clock(1181, true) });
+  assert.deepEqual(stale.getJudgements()[0].diagnostics, ["stale_input"]);
+}
+
+// All four Boxing candidate identities configure independently.
+{
+  for (const rulesetId of ["boxing_semantic_track_v1", "boxing_spatial_grid_v1"]) for (const recipeId of ["row_family_balanced_height_v1", "cut_family_source_height_v1"]) {
+    const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `${rulesetId}-${recipeId}` });
+    const extra = rulesetId === "boxing_spatial_grid_v1" ? { spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up" } } : {};
+    coordinator.configureContent(config([event("candidate", 1000, "hook_left", extra)], variant(rulesetId, recipeId)));
+    assert.equal(coordinator.getSnapshot().selectedVariant.rulesetId, rulesetId);
+    assert.equal(coordinator.getSnapshot().selectedVariant.recipeId, recipeId);
+  }
+}
+
+// Consume the actual content-runtime envelope; authored beat fields drive gameplay.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "content-envelope" });
+  const authoredBeat = { start: 1, type: "hook_left", eventId: "runtime-hook", sourceEventIds: ["source-runtime-hook"], spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up" } };
+  const resolved = { schema: "aerobeat/resolved_content_event", version: 1, eventId: "runtime-hook", variantId: "variant", chartId: "chart-variant", centerTimestampMs: 1000, authoredBeat };
+  readyPlaying(coordinator, [resolved]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-runtime", 4000, ["hook_left"])) });
+  const judgement = coordinator.getJudgements()[0];
+  assert.equal(judgement.result, "hit");
+  assert.deepEqual(judgement.sourceEventIds, ["source-runtime-hook"]);
+}
+
+// Spatial grid: exact accepted subcell, cardinal entry, and straight qualification.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "spatial" });
+  const spatial = variant("boxing_spatial_grid_v1", "cut_family_source_height_v1");
+  readyPlaying(coordinator, [event("spatial-straight", 1000, "straight_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up", qualificationMs: 100 } })], spatial);
+  const sample = evidence("frame-spatial", 4000, ["straight_left"]);
+  sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 4000, fromCell: 9, toCell: 5, direction: "up", provenance: "measured" }];
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, sample, { qualifications: [{ hand: "left", semanticStartTimestampMs: 3800, semanticDurationMs: 200, semanticQualified: true, spatialStartTimestampMs: 3900, spatialDurationMs: 100, spatialQualified: true, acceptedSubcellColumns: [4] }] }) });
+  assert.equal(coordinator.getJudgements()[0].result, "hit");
+  assert.equal(coordinator.getJudgements()[0].rulesetId, "boxing_spatial_grid_v1");
+}
+
+// Spatial crossed-guard checkpoints consume the same measured wrist sample.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "crossed-guard" });
+  const spatial = variant("boxing_spatial_grid_v1", "row_family_balanced_height_v1");
+  readyPlaying(coordinator, [event("crossed", 1000, "guard", { guardTarget: { leftCell: 6, rightCell: 5, crossed: true } })], spatial);
+  const sample = evidence("frame-crossed", 4000, ["crossed_guard"]);
+  sample.anchors.find((entry) => entry.anchor === "left_wrist").cell = 6;
+  sample.anchors.find((entry) => entry.anchor === "right_wrist").cell = 5;
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, sample) });
+  assert.equal(coordinator.getJudgements()[0].result, "hit");
+}
+
+// Flow cell and cardinal direction preserve legacy grid semantics.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow" });
+  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  readyPlaying(coordinator, [event("flow-note", 500, "note", { hand: "left", placement: 5, direction: "up" })], flow);
+  const sample = evidence("frame-flow", 3500, []);
+  sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: "up", provenance: "measured" }];
+  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, sample) });
+  assert.equal(coordinator.getJudgements()[0].result, "hit");
+}
+
+// Flow wrong-direction evidence misses, while non-note source events are explicitly ignored.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-diagnostics" });
+  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  readyPlaying(coordinator, [event("wrong-flow", 500, "note", { hand: "left", placement: 5, direction: "up" }), event("flow-bomb", 900, "bomb", { placement: 6 })], flow);
+  const sample = evidence("frame-flow-wrong", 3500, []);
+  sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 1, toCell: 5, direction: "down", provenance: "measured" }];
+  coordinator.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, sample) });
+  coordinator.advance({ timestampMs: 3700, clock: clock(900, true), input: input(3700, null) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.diagnostics]), [["wrong-flow", "miss", ["wrong_direction"]], ["flow-bomb", "ignored", []]]);
+}
+
+// Same-frame guard/punch overlap is exclusive, while disjoint squat+punch is concurrent.
+{
+  const overlap = createAeroGameplaySessionCoordinator({ sessionId: "overlap" });
+  readyPlaying(overlap, [event("a-guard", 1000, "guard", { guardTarget: { leftCell: 5, rightCell: 6 } }), event("b-hook", 1000, "hook_left")]);
+  overlap.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-overlap", 4000, ["guard", "hook_left"])) });
+  assert.deepEqual(overlap.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["hit", []], ["miss", ["blocked_overlap"]]]);
+
+  const disjoint = createAeroGameplaySessionCoordinator({ sessionId: "disjoint" });
+  readyPlaying(disjoint, [event("a-squat", 1000, "squat", { checkpoint: { kind: "instantaneous", noseSafeCells: [1] } }), event("b-hook", 1000, "hook_left")]);
+  disjoint.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-disjoint", 4000, ["squat", "hook_left"])) });
+  assert.deepEqual(disjoint.getJudgements().map((entry) => entry.result), ["hit", "hit"]);
+}
+
+// Wrong evidence never consumes the later positive action in the same timing window.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "positive-only" });
+  readyPlaying(coordinator, [event("positive-hook", 1000, "hook_left")]);
+  coordinator.advance({ timestampMs: 3900, clock: clock(900, true), input: input(3900, evidence("wrong-frame", 3900, ["hook_right"])) });
+  assert.equal(coordinator.getJudgements().length, 0);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("right-frame", 4000, ["hook_left"])) });
+  assert.equal(coordinator.getJudgements()[0].result, "hit");
+}
+
+// One action cannot satisfy duplicate targets; no input becomes a deterministic miss.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "consume" });
+  readyPlaying(coordinator, [event("a-hook", 1000, "hook_left"), event("b-hook", 1000, "hook_left"), event("empty", 1500, "hook_right")]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-consume", 4000, ["hook_left"])) });
+  assert.deepEqual(coordinator.getJudgements().slice(0, 2).map((entry) => entry.diagnostics), [[], ["action_consumed"]]);
+  coordinator.advance({ timestampMs: 4700, clock: clock(1681, true), input: input(4700, null) });
+  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "empty")?.result, "miss");
+}
+
+// Tracking loss clears evidence, freezes/cancels, and requires a fresh calibration before countdown.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "tracking" });
+  readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, null, { paused: true, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking");
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, false), input: input(4500, null, { calibrationId: "cal-1" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "the invalidated calibration cannot resume gameplay");
+  assert.equal(coordinator.getSnapshot().safety.freshCalibrationRequired, true);
+  coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, null, { calibrationId: "cal-2" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown");
+  assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+}
+
+// Paused future swap preserves judged and active IDs, replaces only future events.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "swap" });
+  readyPlaying(coordinator, [event("past", 1000, "hook_left"), event("active", 2000, "hook_right"), event("old-future", 3000, "squat")]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-past", 4000, ["hook_left"])) });
+  coordinator.setActiveEventIds(["active"]);
+  coordinator.pause(4100);
+  coordinator.applyFutureContent(config([{ ...event("replacement", 3000, "weave_left"), variantId: "variant-next", chartId: "chart-variant-next" }], variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "variant-next")));
+  const snapshot = coordinator.getSnapshot();
+  assert.deepEqual(snapshot.judgedEventIds, ["past"]);
+  assert.deepEqual(snapshot.activeEventIds, ["active"]);
+  assert.equal(snapshot.selectedVariant.variantId, "variant-next");
+}
+
+// Shadow diagnostics never consume live evidence or change score partitions.
+{
+  const shadow = { ...variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "shadow"), resolvedEvents: [{ ...event("shadow-hook", 1000, "hook_left"), variantId: "shadow", chartId: "chart-shadow" }] };
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "shadow" });
+  coordinator.configureContent(config([event("live-hook", 1000, "hook_left")], variant(), [shadow]));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-shadow", 4000, ["hook_left"])) });
+  assert.equal(coordinator.getJudgements()[0].result, "hit");
+  assert.equal(coordinator.getSnapshot().shadowJudgements.length, 1);
+  assert.equal(coordinator.getScorePartitions()[0].hits, 1);
+}
+
+// Shadows reject stale evidence and remain side-effect free.
+{
+  const shadow = { ...variant("boxing_semantic_track_v1", "cut_family_source_height_v1", "stale-shadow"), resolvedEvents: [{ ...event("stale-shadow-hook", 1000, "hook_left"), variantId: "stale-shadow", chartId: "chart-stale-shadow" }] };
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "stale-shadow" });
+  coordinator.configureContent(config([event("later-live", 5000, "hook_right")], variant(), [shadow]));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("stale-shadow-frame", 3849, ["hook_left"])) });
+  assert.equal(coordinator.getSnapshot().shadowJudgements.length, 0);
+  assert.equal(coordinator.getScorePartitions().length, 0);
+}
+
+// Candidate identity is exact and composites cannot claim ranked score partitions.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "variant-identity" });
+  assert.throws(() => coordinator.configureContent(config([], { ...variant(), mode: "flow" })), /Flow variants require/u);
+  assert.throws(() => coordinator.configureContent(config([], { ...variant("flow_grid_v1"), mode: "boxing" })), /Boxing variants require/u);
+  assert.throws(() => coordinator.configureContent(config([], { ...variant(), ranked: true, provenance: { kind: "composite" } })), /unranked/u);
+}
+
+// Lease participation pauses but never arbitrates; instances are isolated.
+{
+  const left = createAeroGameplaySessionCoordinator({ sessionId: "left", instanceId: "left" });
+  const right = createAeroGameplaySessionCoordinator({ sessionId: "right", instanceId: "right" });
+  readyPlaying(left, [event("left-event", 5000, "hook_left")]);
+  readyPlaying(right, [event("right-event", 5000, "hook_left")]);
+  const lease = { schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "left", generation: 1, state: "owned", resources: ["camera", "audio"] };
+  left.setLeaseSnapshot(lease);
+  right.setLeaseSnapshot(lease);
+  assert.equal(left.getSnapshot().session.state, "playing");
+  assert.equal(right.getSnapshot().session.pauseReason, "media_lease_unavailable");
+}
+
+// Descriptor-safe boundaries, listener isolation, rollback, destroy, and no bytes/media leakage.
+{
+  let getterCalled = false;
+  const malicious = {};
+  Object.defineProperty(malicious, "packageId", { enumerable: true, get() { getterCalled = true; return "bad"; } });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "security", onListenerError() {} });
+  assert.throws(() => coordinator.configureContent(malicious), /accessors/u);
+  assert.equal(getterCalled, false);
+  let arrayGetterCalled = false;
+  const maliciousIds = [];
+  Object.defineProperty(maliciousIds, "0", { enumerable: true, get() { arrayGetterCalled = true; return "event"; } });
+  Object.defineProperty(maliciousIds, "length", { value: 1 });
+  assert.throws(() => coordinator.setActiveEventIds(maliciousIds), /accessors/u);
+  assert.equal(arrayGetterCalled, false);
+  let notifications = 0;
+  coordinator.subscribe(() => { notifications += 1; throw new Error("listener"); });
+  coordinator.configureContent(config([]));
+  assert.ok(notifications >= 2);
+  assert.throws(() => coordinator.advance({ timestampMs: -1, clock: clock(0, false) }), /non-negative/u);
+  assert.equal(JSON.stringify(coordinator.getSnapshot()).includes("Uint8Array"), false);
+  coordinator.destroy();
+  assert.equal(coordinator.getSnapshot().session.state, "destroyed");
+  assert.throws(() => coordinator.reset(), /destroyed/u);
+}
+
+assert.equal(aeroGameplaySessionCapabilities.publicLeaderboards, false);
+console.log("Gameplay session deterministic validation passed.");
