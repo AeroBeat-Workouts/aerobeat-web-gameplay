@@ -84,7 +84,7 @@ The assembly may inject a media-lease snapshot. Gameplay verifies that its `inst
 - Straight punches require continuous semantic or accepted-spatial qualification for at least `100ms`, measured from the input service's start timestamp.
 - Positive evidence is consumed only after a complete match. Wrong/no/stale evidence cannot consume an action.
 - One measured frame/action can score once. A guard and punch cannot both consume the same frame only when their inclusive windows overlap; different-category windows that do not overlap are not globally frame-blocked. Squat/weave checkpoints may score concurrently with a disjoint punch.
-- Flow matches athlete-space wrist cell and cardinal entry direction; non-note Flow source events are explicitly recorded as non-scoring `ignored` events.
+- Flow matches athlete-space wrist cell and exact eight-way shoulder-relative entry direction. BeatSaver arrow directions `0..7` map to `up`, `down`, `left`, `right`, `up-left`, `up-right`, `down-left`, and `down-right`; dot direction `8` is authored by omitting the direction requirement while still requiring a measured wrist entry into the target cell. Non-note Flow source events are explicitly recorded as non-scoring `ignored` events.
 - Semantic Track matches calibrated semantic actions.
 - Spatial Grid additionally matches hand wrist target cells/subcells, cardinal source/destination entries, guard wrist targets, and nose-safe checkpoint cells.
 - Actual content-runtime envelopes are consumed directly: identity/timing stay on the resolved envelope while target, action, checkpoint, and lineage fields come from its immutable `authoredBeat`.

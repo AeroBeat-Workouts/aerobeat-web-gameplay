@@ -196,15 +196,54 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getJudgements()[0].result, "hit");
 }
 
-// Flow cell and cardinal direction preserve legacy grid semantics.
+// Flow maps every Beat Saber arrow direction 0..7 into exact eight-way measured evidence.
 {
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow" });
   const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
-  readyPlaying(coordinator, [event("flow-note", 500, "note", { hand: "left", placement: 5, direction: "up" })], flow);
-  const sample = evidence("frame-flow", 3500, []);
-  sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: "up", provenance: "measured" }];
-  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, sample) });
-  assert.equal(coordinator.getJudgements()[0].result, "hit");
+  const directionCases = [[0,"up"],[1,"down"],[2,"left"],[3,"right"],[4,"up-left"],[5,"up-right"],[6,"down-left"],[7,"down-right"]];
+  for (const [numericDirection, measuredDirection] of directionCases) {
+    const hit = createAeroGameplaySessionCoordinator({ sessionId: `flow-hit-${numericDirection}` });
+    readyPlaying(hit, [event(`flow-${numericDirection}`, 500, "note", { hand: "left", placement: 5, direction: numericDirection })], flow);
+    const hitSample = evidence(`frame-flow-${numericDirection}`, 3500, []);
+    hitSample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: measuredDirection, provenance: "measured" }];
+    hit.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, hitSample) });
+    assert.deepEqual(hit.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["hit", []]]);
+
+    const miss = createAeroGameplaySessionCoordinator({ sessionId: `flow-miss-${numericDirection}` });
+    readyPlaying(miss, [event(`flow-wrong-${numericDirection}`, 500, "note", { hand: "left", placement: 5, direction: numericDirection })], flow);
+    const missSample = evidence(`frame-flow-wrong-${numericDirection}`, 3500, []);
+    const wrongDirection = directionCases[(numericDirection + 1) % directionCases.length][1];
+    missSample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: wrongDirection, provenance: "measured" }];
+    miss.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, missSample) });
+    assert.deepEqual(miss.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["miss", ["wrong_direction"]]]);
+  }
+}
+
+// Beat Saber dot direction 8 is represented by an omitted direction and needs cell entry only.
+{
+  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-dot" });
+  readyPlaying(coordinator, [event("flow-dot", 500, "note", { hand: "left", placement: 5 })], flow);
+  const dotSample = evidence("frame-flow-dot", 3500, []);
+  dotSample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: "down-right", provenance: "measured" }];
+  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, dotSample) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["hit", []]]);
+
+  const noEntry = createAeroGameplaySessionCoordinator({ sessionId: "flow-dot-no-entry" });
+  readyPlaying(noEntry, [event("flow-dot-no-entry", 500, "note", { hand: "left", placement: 5 })], flow);
+  noEntry.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, evidence("frame-flow-dot-no-entry", 3500, [])) });
+  assert.deepEqual(noEntry.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["miss", ["no_input"]]]);
+
+  for (const invalidDirection of [-1, 8, 9, 1.5, "UP", "up_left", "diagonal", null]) {
+    const invalid = createAeroGameplaySessionCoordinator({ sessionId: `flow-invalid-${String(invalidDirection)}` });
+    assert.throws(() => invalid.configureContent(config([event("invalid-flow", 500, "note", { hand: "left", placement: 5, direction: invalidDirection })], flow)), /Flow note direction is unsupported/u);
+  }
+}
+
+// Boxing spatial targets remain cardinal-only even though measured evidence is eight-way.
+{
+  const spatial = variant("boxing_spatial_grid_v1", "cut_family_source_height_v1");
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "boxing-diagonal-target" });
+  assert.throws(() => coordinator.configureContent(config([event("diagonal-hook", 500, "hook_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up-left" } })], spatial)), /Spatial entry direction is invalid/u);
 }
 
 // Flow wrong-direction evidence misses, while non-note source events are explicitly ignored.

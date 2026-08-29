@@ -1,6 +1,7 @@
 // @ts-check
 
 import {
+  bodyGridDirections,
   conversionRecipeIds,
   isContentHash,
   isGameplayEvidenceSnapshot,
@@ -765,7 +766,7 @@ function validateEventForVariant(event, selectedVariant) {
     if (type === "note") {
       if (event.hand !== "left" && event.hand !== "right") throw gameplayError("event_hand_invalid", "Flow notes require a hand");
       requireGridCell(event.placement, "event_placement_invalid");
-      if (event.direction !== undefined && directionName(event.direction) === null) throw gameplayError("event_direction_invalid", "Flow note direction is unsupported");
+      if (event.direction !== undefined && flowDirectionName(event.direction) === null) throw gameplayError("event_direction_invalid", "Flow note direction is unsupported");
     }
   } else {
     const action = expectedAction(event);
@@ -776,7 +777,7 @@ function validateEventForVariant(event, selectedVariant) {
         requireGridCell(target.targetCell, "spatial_target_invalid");
         if (!Array.isArray(target.acceptedSubcells) || target.acceptedSubcells.length > 48 || target.acceptedSubcells.some((entry) => !Number.isInteger(entry) || entry < 0 || entry > 47)) throw gameplayError("spatial_target_invalid", "Spatial accepted subcells are invalid");
         if (target.sourceCell !== undefined) requireGridCell(target.sourceCell, "spatial_target_invalid");
-        if (target.entryDirection !== undefined && directionName(target.entryDirection) === null) throw gameplayError("spatial_target_invalid", "Spatial entry direction is invalid");
+        if (target.entryDirection !== undefined && cardinalDirectionName(target.entryDirection) === null) throw gameplayError("spatial_target_invalid", "Spatial entry direction is invalid");
       } else if (action === "guard" || action === "crossed_guard") {
         const target = requireRecord(event.guardTarget, "guard_target_invalid");
         requireGridCell(target.leftCell, "guard_target_invalid");
@@ -872,9 +873,11 @@ function matchFlow(event, evidence) {
   const diagnostics = [];
   const placement = requireGridCell(event.placement, "event_placement_invalid");
   if (!anchor || anchor.cell !== placement) diagnostics.push("wrong_cell");
-  if (event.direction !== undefined) {
-    const direction = directionName(event.direction);
-    const entry = evidence.entries.find((candidate) => candidate.anchor === anchorName && candidate.toCell === placement);
+  const entry = evidence.entries.find((candidate) => candidate.anchor === anchorName && candidate.toCell === placement);
+  if (event.direction === undefined) {
+    if (!entry) diagnostics.push("no_input");
+  } else {
+    const direction = flowDirectionName(event.direction);
     if (!entry || direction === null || entry.direction !== direction) diagnostics.push("wrong_direction");
   }
   return Object.freeze({ hit: diagnostics.length === 0, diagnostics: Object.freeze(diagnostics) });
@@ -893,7 +896,7 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
     else if (anchor.cell !== targetCell) diagnostics.push("wrong_cell");
     if (target.entryDirection !== undefined) {
       const sourceCell = target.sourceCell === undefined ? null : requireGridCell(target.sourceCell, "spatial_target_invalid");
-      const direction = directionName(target.entryDirection);
+      const direction = cardinalDirectionName(target.entryDirection);
       if (!evidence.entries.some((entry) => entry.anchor === `${hand}_wrist` && entry.toCell === targetCell && (sourceCell === null || entry.fromCell === sourceCell) && entry.direction === direction)) diagnostics.push("wrong_direction");
     }
     if (action.startsWith("straight_")) {
@@ -949,8 +952,20 @@ function countdownSnapshot(state, reason, value, timestampMs, calibrationId) { r
 function inactiveCountdown(timestampMs) { return Object.freeze({ schema: "aerobeat/countdown_snapshot", version: 1, state: "inactive", reason: null, value: null, timestampMs, gameplayTimeFrozen: true, calibrationId: null }); }
 /** @param {unknown} value */
 function boundedReason(value) { return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : "manual"; }
-/** @param {unknown} value */
-function directionName(value) { return value === 0 ? "up" : value === 1 ? "down" : value === 2 ? "left" : value === 3 ? "right" : typeof value === "string" && ["up", "down", "left", "right"].includes(value) ? value : null; }
+/** @type {readonly import("@aerobeat/web-contracts").AeroBodyGridDirection[]} */
+const BEAT_SABER_FLOW_DIRECTIONS = Object.freeze(["up", "down", "left", "right", "up-left", "up-right", "down-left", "down-right"]);
+/** @type {readonly ("up" | "down" | "left" | "right")[]} */
+const CARDINAL_DIRECTIONS = Object.freeze(["up", "down", "left", "right"]);
+/** @param {unknown} value @returns {import("@aerobeat/web-contracts").AeroBodyGridDirection | null} */
+function flowDirectionName(value) {
+  if (Number.isInteger(value) && Number(value) >= 0 && Number(value) < BEAT_SABER_FLOW_DIRECTIONS.length) return BEAT_SABER_FLOW_DIRECTIONS[Number(value)] ?? null;
+  return typeof value === "string" && bodyGridDirections.includes(/** @type {import("@aerobeat/web-contracts").AeroBodyGridDirection} */ (value)) ? /** @type {import("@aerobeat/web-contracts").AeroBodyGridDirection} */ (value) : null;
+}
+/** @param {unknown} value @returns {"up" | "down" | "left" | "right" | null} */
+function cardinalDirectionName(value) {
+  if (Number.isInteger(value) && Number(value) >= 0 && Number(value) < CARDINAL_DIRECTIONS.length) return CARDINAL_DIRECTIONS[Number(value)] ?? null;
+  return typeof value === "string" && CARDINAL_DIRECTIONS.includes(/** @type {"up" | "down" | "left" | "right"} */ (value)) ? /** @type {"up" | "down" | "left" | "right"} */ (value) : null;
+}
 /** @param {unknown} value @param {string} code */
 function requireGridCell(value, code) { if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 11) throw gameplayError(code, "Expected a 4x3 grid cell"); return Number(value); }
 function randomToken() { const bytes = new Uint32Array(2); if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes); else { bytes[0] = Math.floor(Math.random() * 0xffffffff); bytes[1] = Math.floor(Math.random() * 0xffffffff); } return `${bytes[0].toString(16)}${bytes[1].toString(16)}`; }
