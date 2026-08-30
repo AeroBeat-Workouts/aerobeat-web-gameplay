@@ -76,7 +76,7 @@ The state machine follows the public session states: `idle -> calibrating -> cou
 
 Countdown is a wall-timestamp-driven frozen `3..2..1`. Each numeral remains active for at least one configured countdown step measured from that numeral's actual transition; one sparse or delayed `advance()` can move at most one step, so ordinary exact one-second calls still complete in three seconds while long main-thread gaps cannot skip a numeral. Both the authoritative audio clock's `playing` flag and position must remain frozen. Playback, paused-position drift, a stopped running clock, tracking loss, or lease loss fails closed without moving gameplay time. Ordinary `advance()` calls cannot move a manually paused timeline; assembly uses the explicit stopped-clock-only `synchronizePausedClock()` seam after an intentional audio seek. During play, only the supplied audio clock's `positionSeconds` establishes event timing, and timeline rollback fails closed without rewriting judgement truth. Current public audio snapshots are consumed directly, including an optional own `durationSeconds: undefined` field.
 
-The assembly may inject a media-lease snapshot. Gameplay verifies that its `instanceId` owns camera and audio and pauses when it does not; it never acquires, releases, or arbitrates the lease.
+The assembly may inject a media-lease snapshot. Normal Play verifies that its `instanceId` owns camera and audio; Visual Test requires audio ownership only. Gameplay pauses when the purpose-specific lease is unavailable and never acquires, releases, or arbitrates the lease.
 
 ## Judgement Rules
 
@@ -90,7 +90,7 @@ The assembly may inject a media-lease snapshot. Gameplay verifies that its `inst
 - Semantic Track matches calibrated semantic actions.
 - Spatial Grid additionally matches hand wrist target cells/subcells, cardinal source/destination entries, guard wrist targets, and nose-safe checkpoint cells.
 - Actual content-runtime envelopes are consumed directly: identity/timing stay on the resolved envelope while target, action, checkpoint, and lineage fields come from its immutable `authoredBeat`.
-- Every scoring event receives one immutable binary hit/miss record with diagnostics, timeline offset, source lineage, recipe/ruleset, map/score identity, and active profile hashes; non-scoring Flow source events receive an immutable `ignored` record.
+- Every scoring event receives one exact immutable v2 hit/miss record with diagnostics, timing offset, authoritative commitment timeline, and recipe/ruleset identity; non-scoring Flow source events receive an immutable `ignored` record. Source lineage, map/score identity, and active profile truth remain in the event/content generation and local score partition rather than the exact v2 judgement record.
 
 The four supported Boxing candidates are Semantic Track and Spatial Grid crossed with Row Family and Cut Family. Mode/ruleset/recipe pairings are exact. Variant, mode, ruleset, recipe, sorted modifier identity, ranked state, score hash, and complete profile identity form separate local-only score partitions. Runtime composites remain unranked. This package exposes no public leaderboard path.
 
