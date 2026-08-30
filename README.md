@@ -46,13 +46,15 @@ Exports:
 Coordinator operations:
 
 - `configureContent(configuration)`
-- `requestStart(timestampMs)` / `pause(timestampMs, reason?)` / `resume(timestampMs)`
+- `requestStart(timestampMs, request?)` / `pause(timestampMs, reason?)` / `resume(timestampMs)`
 - `advance({ timestampMs, clock, input?, lease? })`
 - `synchronizePausedClock({ timestampMs, clock })`
 - `applyFutureContent(configuration)`
 - `setActiveEventIds(ids)` / `setLeaseSnapshot(snapshot)`
 - `stop(timestampMs)` / `reset(timestampMs?)` / `destroy()`
 - `getSnapshot()` / `getJudgements()` / `getScorePartitions()` / `subscribe(listener)`
+
+Calling `requestStart(timestampMs)` preserves the legacy normal-Play calibration/countdown path. An exact `aerobeat/gameplay_session_start` v1 request selects either `play` or `visual_test`. Visual Test starts at song time zero without calibration/input matching, remains unranked with no calibration identity, advances only from the authoritative audio clock, resumes directly from manual pause, and emits no real/shadow judgements or score partitions. Explicit starts are restarts: they increment the coordinator generation and clear prior run truth. Normal Play judgements are exact v2 records with `sessionPurpose: "play"` and the authoritative `committedTimelinePositionMs`; synthetic demonstration feedback remains outside gameplay and scoring.
 
 ## Prototype profiles
 

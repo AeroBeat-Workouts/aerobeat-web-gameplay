@@ -5,6 +5,7 @@ import {
   conversionRecipeIds,
   isContentHash,
   isGameplayEvidenceSnapshot,
+  isGameplaySessionStartRequest,
   isMediaLeaseSnapshot,
   isPrototypeTuningIdentity,
   prototypeJudgementDefaults,
@@ -25,8 +26,9 @@ import {
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
 /** @typedef {import("@aerobeat/web-contracts").AeroGameplayEvidenceSnapshot} AeroGameplayEvidenceSnapshot */
-/** @typedef {import("@aerobeat/web-contracts").AeroGameplayJudgement} AeroGameplayJudgement */
+/** @typedef {import("@aerobeat/web-contracts").AeroGameplayJudgementV2} AeroGameplayJudgement */
 /** @typedef {import("@aerobeat/web-contracts").AeroGameplaySessionState} AeroGameplaySessionState */
+/** @typedef {import("@aerobeat/web-contracts").AeroGameplaySessionPurpose} AeroGameplaySessionPurpose */
 /** @typedef {import("@aerobeat/web-contracts").AeroCountdownReason} AeroCountdownReason */
 
 /** @type {readonly string[]} */
@@ -69,6 +71,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let destroyed = false;
   let generation = 0;
   let state = /** @type {AeroGameplaySessionState} */ ("idle");
+  let sessionPurpose = /** @type {AeroGameplaySessionPurpose} */ ("play");
   let timestampMs = 0;
   let timelinePositionMs = 0;
   let packageId = null;
@@ -144,6 +147,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
+    sessionPurpose = "play";
     state = "calibrating";
     pauseReason = "calibration_required";
     generation += 1;
@@ -151,16 +155,45 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return snapshot;
   }
 
-  /** @param {number} atTimestampMs */
-  function requestStart(atTimestampMs) {
+  /**
+   * Start or explicitly restart the configured session.
+   * A missing request preserves the legacy normal-Play calibrating-state API.
+   *
+   * @param {number} atTimestampMs
+   * @param {unknown} [request]
+   */
+  function requestStart(atTimestampMs, request) {
     assertConfigured();
-    if (state !== "calibrating") throw gameplayError("session_state_invalid", "Initial start requires the calibrating state");
+    const explicit = request !== undefined;
+    const nextPurpose = normalizeStartPurpose(request);
+    if (!explicit && state !== "calibrating") throw gameplayError("session_state_invalid", "Initial start requires the calibrating state");
     advanceTimestamp(atTimestampMs);
+    if (explicit) {
+      generation += 1;
+      clearRunTruth();
+      sessionPurpose = nextPurpose;
+      pauseReason = null;
+      if (nextPurpose === "visual_test") {
+        calibrationId = null;
+        invalidatedCalibrationId = null;
+        safetyReady = false;
+        freshCalibrationRequired = true;
+      } else {
+        state = "calibrating";
+        pauseReason = "calibration_required";
+      }
+    } else sessionPurpose = "play";
     if (!hasRequiredLease()) {
       state = "paused_manual";
       pauseReason = "media_lease_unavailable";
       publish(null);
       return Object.freeze({ accepted: false, reason: "media_lease_unavailable" });
+    }
+    if (sessionPurpose === "visual_test") {
+      state = "playing";
+      pauseReason = null;
+      publish(null);
+      return Object.freeze({ accepted: true, reason: null });
     }
     if (!safetyReady || freshCalibrationRequired || calibrationId === null) {
       state = "calibrating";
@@ -195,6 +228,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       publish(null);
       return Object.freeze({ accepted: false, reason: "media_lease_unavailable" });
     }
+    if (sessionPurpose === "visual_test") {
+      state = "playing";
+      pauseReason = null;
+      publish(null);
+      return Object.freeze({ accepted: true, reason: null });
+    }
     if (!safetyReady || freshCalibrationRequired || calibrationId === null) {
       state = freshCalibrationRequired ? "paused_tracking" : "calibrating";
       pauseReason = "calibration_required";
@@ -223,25 +262,33 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const previousTimelinePositionMs = timelinePositionMs;
     timestampMs = nextTimestampMs;
     if (nextLease !== null) leaseSnapshot = nextLease;
-    if (nextInput !== null) commitInput(nextInput);
+    if (nextInput !== null && sessionPurpose === "play") commitInput(nextInput);
     enforceLease();
     enforceSafety();
     if (enteredAsCountdown && state === "countdown") advanceCountdown(clock);
     if (enteredState === "playing" && state === "playing") {
       if (!clock.playing) {
-        state = "paused_manual";
-        pauseReason = "audio_clock_not_playing";
+        if (sessionPurpose === "visual_test" && clock.ended) {
+          timelinePositionMs = clock.positionMs;
+          state = "completed";
+          pauseReason = null;
+        } else {
+          state = "paused_manual";
+          pauseReason = "audio_clock_not_playing";
+        }
       } else if (clock.positionMs < previousTimelinePositionMs) {
         state = "paused_manual";
         pauseReason = "audio_clock_rollback";
       } else {
         timelinePositionMs = clock.positionMs;
-        captureEvidenceForTimeline();
-        judgeLiveEvents();
-        judgeShadowEvents();
-        if (events.length > 0 && judgedIds.size >= events.length) {
-          state = "completed";
-          pauseReason = null;
+        if (sessionPurpose === "play") {
+          captureEvidenceForTimeline();
+          judgeLiveEvents();
+          judgeShadowEvents();
+          if (events.length > 0 && judgedIds.size >= events.length) {
+            state = "completed";
+            pauseReason = null;
+          }
         }
       }
     } else if (enteredState !== "playing" && enteredState !== "countdown" && enteredState !== "paused_manual" && enteredState !== "paused_tracking" && state !== "paused_tracking") {
@@ -355,6 +402,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     advanceTimestamp(atTimestampMs);
     generation += 1;
     clearRunTruth();
+    sessionPurpose = "play";
     state = packageId === null ? "idle" : "calibrating";
     pauseReason = packageId === null ? null : "calibration_required";
     calibrationId = null;
@@ -432,6 +480,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function enforceSafety() {
+    if (sessionPurpose === "visual_test") return;
     if (state === "playing" || state === "countdown" || state === "paused_manual") {
       if (!safetyReady || freshCalibrationRequired) enterTrackingPause();
     } else if (state === "paused_tracking" && safetyReady && !freshCalibrationRequired && calibrationId !== null) {
@@ -454,7 +503,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function hasRequiredLease() {
     if (!leaseSnapshot || !instanceId) return true;
-    return leaseSnapshot.ownerInstanceId === instanceId && leaseSnapshot.state === "owned" && Array.isArray(leaseSnapshot.resources) && leaseSnapshot.resources.includes("audio") && leaseSnapshot.resources.includes("camera");
+    return leaseSnapshot.ownerInstanceId === instanceId && leaseSnapshot.state === "owned" && Array.isArray(leaseSnapshot.resources) && leaseSnapshot.resources.includes("audio") && (sessionPurpose === "visual_test" || leaseSnapshot.resources.includes("camera"));
   }
 
   function enforceLease() {
@@ -546,7 +595,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const match = matchEvent(event, shadow, latestEvidence, lastInput);
         if (match.hit) {
           shadowConsumed.add(key);
-          shadowJudgements.push(makeJudgement(event, shadow, "hit", match.diagnostics, latestEvidence, latestEvidenceTimelineMs, profileIdentity, true));
+          shadowJudgements.push(makeJudgement(event, shadow, "hit", match.diagnostics, latestEvidence, latestEvidenceTimelineMs, timelinePositionMs, true));
         }
       }
     }
@@ -587,7 +636,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function recordJudgement(event, result, diagnostics, evidence, shadow) {
     const eventVariant = variantForEvent(event);
     const eventProfile = profileForEvent(event);
-    const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidence ? latestEvidenceTimelineMs : null, eventProfile, shadow);
+    const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidence ? latestEvidenceTimelineMs : null, timelinePositionMs, shadow);
     if (shadow) shadowJudgements.push(judgement);
     else {
       judgements.push(judgement);
@@ -632,7 +681,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function makeSnapshot(error) {
     return Object.freeze({
       schema: "aerobeat/gameplay_coordinator_snapshot", version: 1, serviceId: "aero.gameplay.session", generation,
-      session: Object.freeze({ schema: "aerobeat/gameplay_session_snapshot", version: 1, sessionId, state, timestampMs, timelinePositionMs, packageId, chartId: variant?.chartId ?? null, calibrationId, rulesetId: variant?.rulesetId ?? null, recipeId: variant?.recipeId ?? null, ranked: variant?.ranked === true, pauseReason }),
+      session: Object.freeze({ schema: "aerobeat/gameplay_session_snapshot", version: 2, sessionId, state, purpose: sessionPurpose, timestampMs, timelinePositionMs, packageId, chartId: variant?.chartId ?? null, calibrationId: sessionPurpose === "visual_test" ? null : calibrationId, rulesetId: variant?.rulesetId ?? null, recipeId: variant?.recipeId ?? null, ranked: sessionPurpose === "play" && variant?.ranked === true, pauseReason }),
       countdown, safety: Object.freeze({ ready: safetyReady, freshCalibrationRequired }), lease: leaseSnapshot,
       selectedVariant: variant ? publicVariant(variant) : null, profileIdentity, scoringSettings,
       activeEventIds: Object.freeze([...activeIds].sort(compareCodePoints)), judgedEventIds: Object.freeze([...judgedIds].sort(compareCodePoints)),
@@ -659,6 +708,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function profileForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).profileIdentity); }
   /** @param {DataRecord} event @returns {DataRecord} */
   function scoringSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).scoringSettings); }
+  /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
+  function normalizeStartPurpose(value) {
+    if (value === undefined) return "play";
+    if (!isGameplaySessionStartRequest(value)) throw gameplayError("session_start_request_invalid", "Session start request must satisfy the exact public contract");
+    return value.purpose;
+  }
   function assertOpen() { if (destroyed) throw gameplayError("service_destroyed", "Gameplay coordinator is destroyed"); }
   function assertConfigured() { assertOpen(); if (!variant || packageId === null) throw gameplayError("content_not_configured", "Gameplay content is not configured"); }
   /** @param {number} value */
@@ -693,17 +748,18 @@ function normalizeOptions(options) {
   return Object.freeze({ sessionId: values.sessionId === undefined ? `session-${randomToken()}` : requireString(values.sessionId, "session_id_invalid"), instanceId: values.instanceId === undefined ? null : requireString(values.instanceId, "instance_id_invalid"), countdownStepMs: values.countdownStepMs === undefined ? 1000 : positiveNumber(values.countdownStepMs, "countdown_step_invalid"), onListenerError: /** @type {((error: unknown) => void) | undefined} */ (callback) });
 }
 
-/** @param {unknown} value @returns {{positionMs: number, playing: boolean}} */
+/** @param {unknown} value @returns {{positionMs: number, playing: boolean, ended: boolean}} */
 function normalizeClock(value) {
   const record = requireDataRecordFields(value, "audio_clock_invalid", ["contextTimeSeconds", "positionSeconds", "durationSeconds", "progress", "playing"]);
   const positionSeconds = requireNonNegativeNumber(record.positionSeconds, "audio_clock_invalid");
   if (record.contextTimeSeconds !== undefined) requireNonNegativeNumber(record.contextTimeSeconds, "audio_clock_invalid");
-  if (record.durationSeconds !== undefined) requireNonNegativeNumber(record.durationSeconds, "audio_clock_invalid");
+  const durationSeconds = record.durationSeconds === undefined ? null : requireNonNegativeNumber(record.durationSeconds, "audio_clock_invalid");
   if (record.progress !== undefined && (typeof record.progress !== "number" || !Number.isFinite(record.progress) || record.progress < 0 || record.progress > 1)) throw gameplayError("audio_clock_invalid", "Audio clock progress must be normalized");
   if (typeof record.playing !== "boolean") throw gameplayError("audio_clock_invalid", "Audio clock playing must be boolean");
   const positionMs = positionSeconds * 1000;
   if (!Number.isSafeInteger(positionMs) && (!Number.isFinite(positionMs) || positionMs > Number.MAX_SAFE_INTEGER)) throw gameplayError("audio_clock_invalid", "Audio clock position exceeds safe gameplay range");
-  return Object.freeze({ positionMs, playing: record.playing });
+  const ended = record.playing === false && ((durationSeconds !== null && durationSeconds > 0 && positionSeconds >= durationSeconds) || record.progress === 1);
+  return Object.freeze({ positionMs, playing: record.playing, ended });
 }
 
 /** @param {unknown} value @returns {DataRecord} */
@@ -921,12 +977,12 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
   }
 }
 
-/** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {DataRecord} profile @param {boolean} shadow @returns {AeroGameplayJudgement} */
-function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, profile, shadow) {
+/** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @returns {AeroGameplayJudgement} */
+function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow) {
   const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? "flow_grid_v1");
   const recipeId = /** @type {import("@aerobeat/web-contracts").AeroConversionRecipeId | null} */ (selectedVariant?.recipeId ?? null);
   const center = Number(event.centerTimestampMs);
-  return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 1, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow, variantId: selectedVariant?.variantId ?? null, chartId: selectedVariant?.chartId ?? null, sourceEventIds: Object.freeze([...lineageIds(event)]), mapHash: selectedVariant?.mapHash ?? null, scoreIdentityHash: selectedVariant?.scoreIdentityHash ?? null, profileId: profile.profileId, profileVersion: profile.profileVersion, profileHash: profile.contentHash });
+  return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose: "play", eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow });
 }
 
 /** @param {DataRecord} event */

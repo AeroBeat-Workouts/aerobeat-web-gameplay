@@ -139,7 +139,7 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   assert.equal(newPartition.chartId,"chart-semantic-row-revised");
   assert.equal(coordinator.getJudgements().filter((entry)=>entry.eventId === "old-future").length,1,"preserved active event owns a same-ID collision");
   assert.equal(coordinator.getJudgements().some((entry)=>entry.eventId === "stale-replacement"),false);
-  assert.equal(coordinator.getJudgements().find((entry)=>entry.eventId === "replaceable-future")?.chartId,"chart-semantic-row-revised");
+  assert.equal(coordinator.getJudgements().find((entry)=>entry.eventId === "replaceable-future")?.recipeId,"cut_family_source_height_v1");
   assert.notEqual(oldPartition.partitionId,newPartition.partitionId);
 }
 

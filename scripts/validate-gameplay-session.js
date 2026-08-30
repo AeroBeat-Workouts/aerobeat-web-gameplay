@@ -37,7 +37,7 @@ function config(events, selected = variant(), shadowVariants = []) {
   return { packageId: "package-1", selectedVariant: selected, resolvedEvents: events, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false }, shadowVariants };
 }
 
-function clock(positionMs, playing) { return { contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, playing }; }
+function clock(positionMs, playing, durationMs = null) { return { contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, ...(durationMs === null ? {} : { durationSeconds: durationMs / 1000, progress: durationMs === 0 ? 0 : Math.min(1, positionMs / durationMs) }), playing }; }
 
 function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.configureContent(config(events, selected));
@@ -67,6 +67,63 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
   assert.equal(isCountdownSnapshot(coordinator.getSnapshot().countdown), true);
   assert.equal(Object.isFrozen(coordinator.getSnapshot()), true);
+  assert.equal(coordinator.getSnapshot().session.version, 2);
+  assert.equal(coordinator.getSnapshot().session.purpose, "play");
+}
+
+// Visual Test starts immediately with audio-only lease, ignores input, never scores/judges, resumes directly, completes, and restarts generation-safely.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-test", instanceId: "game-a" });
+  coordinator.configureContent(config([event("visual-a", 500, "hook_left"), event("visual-b", 1000, "hook_right")]));
+  coordinator.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-a", generation: 1, state: "owned", resources: ["audio"] });
+  const request = Object.freeze({ schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" });
+  const startedGeneration = coordinator.getSnapshot().generation;
+  assert.deepEqual(coordinator.requestStart(0, request), { accepted: true, reason: null });
+  assert.equal(coordinator.getSnapshot().generation, startedGeneration + 1);
+  assert.deepEqual({ state: coordinator.getSnapshot().session.state, purpose: coordinator.getSnapshot().session.purpose, ranked: coordinator.getSnapshot().session.ranked, calibrationId: coordinator.getSnapshot().session.calibrationId }, { state: "playing", purpose: "visual_test", ranked: false, calibrationId: null });
+  assert.equal(Object.isFrozen(coordinator.getSnapshot().session), true);
+  assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
+  coordinator.advance({ timestampMs: 100, clock: clock(250, true, 2000), input: input(100, evidence("ignored-frame", 100, ["hook_left"]), { paused: true, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 250);
+  assert.deepEqual(coordinator.getJudgements(), []);
+  assert.deepEqual(coordinator.getSnapshot().shadowJudgements, []);
+  assert.deepEqual(coordinator.getScorePartitions(), []);
+  coordinator.pause(200, "menu");
+  assert.equal(coordinator.getSnapshot().session.state, "paused_manual");
+  assert.deepEqual(coordinator.resume(300), { accepted: true, reason: null });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+  coordinator.advance({ timestampMs: 400, clock: clock(2000, false, 2000) });
+  assert.equal(coordinator.getSnapshot().session.state, "completed");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 2000);
+  assert.deepEqual(coordinator.getSnapshot().judgements, []);
+  assert.deepEqual(coordinator.getSnapshot().scorePartitions, []);
+  const completedGeneration = coordinator.getSnapshot().generation;
+  assert.equal(coordinator.requestStart(500, request).accepted, true);
+  assert.equal(coordinator.getSnapshot().generation, completedGeneration + 1);
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+  assert.deepEqual(coordinator.getSnapshot().activeEventIds, []);
+  assert.throws(() => coordinator.requestStart(501, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test", extra: true }), /exact public contract/u);
+  let accessorCalls = 0;
+  const accessorRequest = { schema: "aerobeat/gameplay_session_start", version: 1 };
+  Object.defineProperty(accessorRequest, "purpose", { enumerable: true, get() { accessorCalls += 1; return "visual_test"; } });
+  assert.throws(() => coordinator.requestStart(501, accessorRequest), /exact public contract/u);
+  assert.equal(accessorCalls, 0);
+  coordinator.destroy();
+  assert.equal(coordinator.getSnapshot().session.state, "destroyed");
+  assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
+}
+
+// Explicit Play restart remains calibration-gated while the legacy one-argument request stays compatible.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "explicit-play" });
+  coordinator.configureContent(config([event("play-a", 1000, "hook_left")]));
+  const playRequest = { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "play" };
+  assert.deepEqual(coordinator.requestStart(0, playRequest), { accepted: false, reason: "calibration_required" });
+  assert.equal(coordinator.getSnapshot().session.purpose, "play");
+  assert.equal(coordinator.getSnapshot().session.state, "calibrating");
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  assert.equal(coordinator.requestStart(0).accepted, true);
 }
 
 // Sparse and huge timestamp jumps can advance only one countdown step, and every new step dwells from its actual transition.
@@ -155,6 +212,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 3100, clock: clock(820, true), input: input(3100, sample, { qualifications: [{ hand: "left", semanticStartTimestampMs: 3000, semanticDurationMs: 100, semanticQualified: true, spatialStartTimestampMs: null, spatialDurationMs: 0, spatialQualified: false, acceptedSubcellColumns: [] }] }) });
   assert.equal(coordinator.getJudgements()[0].result, "hit");
   assert.equal(coordinator.getJudgements()[0].timingOffsetMs, -180);
+  assert.equal(coordinator.getJudgements()[0].committedTimelinePositionMs, 820);
   assert.equal(isGameplayJudgement(coordinator.getJudgements()[0]), true);
   const partition = coordinator.getScorePartitions()[0];
   assert.equal(partition.localOnly, true);
@@ -179,6 +237,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   readyPlaying(boundary, [event("hook", 1000, "hook_left")]);
   boundary.advance({ timestampMs: 4000, clock: clock(1180, true), input: input(4000, evidence("frame-plus", 4000, ["hook_left"])) });
   assert.equal(boundary.getJudgements()[0].timingOffsetMs, 180);
+  assert.equal(boundary.getJudgements()[0].committedTimelinePositionMs, 1180);
 
   const freshBoundary = createAeroGameplaySessionCoordinator({ sessionId: "fresh-boundary" });
   readyPlaying(freshBoundary, [event("fresh-hook", 1000, "hook_left")]);
@@ -191,6 +250,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   stale.advance({ timestampMs: 3151, clock: clock(1000, true), input: input(3151, old) });
   stale.advance({ timestampMs: 3300, clock: clock(1181, true) });
   assert.deepEqual(stale.getJudgements()[0].diagnostics, ["stale_input"]);
+  assert.equal(stale.getJudgements()[0].result, "miss");
+  assert.equal(stale.getJudgements()[0].committedTimelinePositionMs, 1181);
 }
 
 // All four Boxing candidate identities configure independently.
@@ -213,7 +274,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-runtime", 4000, ["hook_left"])) });
   const judgement = coordinator.getJudgements()[0];
   assert.equal(judgement.result, "hit");
-  assert.deepEqual(judgement.sourceEventIds, ["source-runtime-hook"]);
+  assert.equal(judgement.version, 2);
+  assert.equal(judgement.sessionPurpose, "play");
+  assert.equal(judgement.committedTimelinePositionMs, 1000);
+  assert.equal(isGameplayJudgement(judgement), true);
 }
 
 // Spatial grid: exact accepted subcell, cardinal entry, and straight qualification.
@@ -379,9 +443,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 7100, clock: clock(1000, false) });
   coordinator.advance({ timestampMs: 8000, clock: clock(2000, true), input: input(8000, evidence("active-old-frame", 8000, ["hook_right"])) });
   const activeJudgement = coordinator.getJudgements().find((entry) => entry.eventId === "active");
-  assert.equal(activeJudgement?.variantId, "variant");
   assert.equal(activeJudgement?.recipeId, "row_family_balanced_height_v1");
-  assert.equal(activeJudgement?.profileVersion, "1");
+  assert.equal(activeJudgement?.sessionPurpose, "play");
   assert.equal(coordinator.getScorePartitions().some((entry) => entry.variantId === "variant" && entry.profileVersion === "1"), true);
 }
 
@@ -429,8 +492,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(newPartition?.score, 2, "new replacement and same-ID future event use locked scoring");
   assert.equal(coordinator.getJudgements().filter((entry) => entry.eventId === "same-active").length, 1, "preserved active event owns exact ID collision");
   assert.equal(coordinator.getJudgements().some((entry) => entry.eventId === "same-stale"), false, "stale replacement events are not admitted");
-  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-active")?.chartId, "chart-variant");
-  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-future")?.chartId, "chart-variant-revised");
+  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-active")?.recipeId, "row_family_balanced_height_v1");
+  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-future")?.recipeId, "cut_family_source_height_v1");
 }
 
 // Shadow diagnostics never consume live evidence or change score partitions.
@@ -608,5 +671,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.throws(() => coordinator.reset(), /destroyed/u);
 }
 
+assert.equal(aeroGameplaySessionCapabilities.visualTestSession, true);
+assert.equal(aeroGameplaySessionCapabilities.commitmentTimedJudgements, true);
 assert.equal(aeroGameplaySessionCapabilities.publicLeaderboards, false);
 console.log("Gameplay session deterministic validation passed.");

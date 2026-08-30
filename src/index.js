@@ -27,6 +27,8 @@ export const aeroGameplaySessionCapabilities = Object.freeze({
   diagnosticShadows: true,
   prototypeProfileRegistry: true,
   deterministicProfileBundles: true,
+  visualTestSession: true,
+  commitmentTimedJudgements: true,
   localPrototypeScoresOnly: true,
   publicLeaderboards: false
 });
