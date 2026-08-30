@@ -84,7 +84,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let freshCalibrationRequired = true;
   let pauseReason = /** @type {string | null} */ (null);
   let countdown = /** @type {DataRecord} */ (inactiveCountdown(0));
-  let countdownStartedAtMs = 0;
+  let countdownStepStartedAtMs = 0;
   let countdownTimelinePositionMs = 0;
   let countdownReason = /** @type {AeroCountdownReason | null} */ (null);
   let invalidatedCalibrationId = /** @type {string | null} */ (null);
@@ -476,7 +476,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     state = "countdown";
     pauseReason = null;
     countdownReason = reason;
-    countdownStartedAtMs = timestampMs;
+    countdownStepStartedAtMs = timestampMs;
     countdownTimelinePositionMs = timelinePositionMs;
     countdown = countdownSnapshot("three", reason, 3, timestampMs, calibrationId);
     publish(null);
@@ -491,10 +491,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       pauseReason = "countdown_audio_not_frozen";
       return;
     }
-    const elapsed = timestampMs - countdownStartedAtMs;
-    if (elapsed < countdownStepMs) countdown = countdownSnapshot("three", countdownReason, 3, timestampMs, calibrationId);
-    else if (elapsed < countdownStepMs * 2) countdown = countdownSnapshot("two", countdownReason, 2, timestampMs, calibrationId);
-    else if (elapsed < countdownStepMs * 3) countdown = countdownSnapshot("one", countdownReason, 1, timestampMs, calibrationId);
+    if (timestampMs - countdownStepStartedAtMs < countdownStepMs) {
+      countdown = countdownSnapshot(countdown.state, countdownReason, countdown.value, timestampMs, calibrationId);
+      return;
+    }
+    countdownStepStartedAtMs = timestampMs;
+    if (countdown.state === "three") countdown = countdownSnapshot("two", countdownReason, 2, timestampMs, calibrationId);
+    else if (countdown.state === "two") countdown = countdownSnapshot("one", countdownReason, 1, timestampMs, calibrationId);
     else {
       countdown = countdownSnapshot("complete", countdownReason, null, timestampMs, calibrationId);
       state = "playing";

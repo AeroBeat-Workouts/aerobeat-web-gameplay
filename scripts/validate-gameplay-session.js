@@ -69,6 +69,50 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(Object.isFrozen(coordinator.getSnapshot()), true);
 }
 
+// Sparse and huge timestamp jumps can advance only one countdown step, and every new step dwells from its actual transition.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "sparse-countdown", countdownStepMs: 1000 });
+  coordinator.configureContent(config([]));
+  coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 100_000, clock: clock(0, false) });
+  assert.deepEqual([coordinator.getSnapshot().session.state, coordinator.getSnapshot().countdown.value], ["countdown", 2]);
+  coordinator.advance({ timestampMs: 100_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 2, "a second call at the transition timestamp cannot consume the new step");
+  coordinator.advance({ timestampMs: 100_999, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 2);
+  coordinator.advance({ timestampMs: 101_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 1);
+  coordinator.advance({ timestampMs: 1_000_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+}
+
+// Safety and lease loss cancel a sparse countdown immediately rather than waiting for the active step dwell.
+{
+  const tracking = createAeroGameplaySessionCoordinator({ sessionId: "sparse-tracking-cancel", countdownStepMs: 1000 });
+  tracking.configureContent(config([]));
+  tracking.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  tracking.requestStart(0);
+  tracking.advance({ timestampMs: 100_000, clock: clock(0, false) });
+  assert.equal(tracking.getSnapshot().countdown.value, 2);
+  tracking.advance({ timestampMs: 100_001, clock: clock(0, false), input: input(100_001, null, { paused: true, fresh: true }) });
+  assert.equal(tracking.getSnapshot().session.state, "paused_tracking");
+  assert.equal(tracking.getSnapshot().countdown.state, "cancelled");
+
+  const lease = createAeroGameplaySessionCoordinator({ sessionId: "sparse-lease-cancel", instanceId: "game-a", countdownStepMs: 1000 });
+  lease.configureContent(config([]));
+  lease.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-a", generation: 1, state: "owned", resources: ["camera", "audio"] });
+  lease.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
+  lease.requestStart(0);
+  lease.advance({ timestampMs: 100_000, clock: clock(0, false) });
+  assert.equal(lease.getSnapshot().countdown.value, 2);
+  lease.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-b", generation: 2, state: "owned", resources: ["camera", "audio"] });
+  assert.equal(lease.getSnapshot().session.state, "paused_manual");
+  assert.equal(lease.getSnapshot().session.pauseReason, "media_lease_unavailable");
+  assert.equal(lease.getSnapshot().countdown.state, "cancelled");
+}
+
 // Countdown rejects advancing audio.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "countdown-audio" });
@@ -303,6 +347,16 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, null, { calibrationId: "cal-2" }) });
   assert.equal(coordinator.getSnapshot().session.state, "countdown");
   assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+  assert.equal(coordinator.getSnapshot().countdown.value, 3);
+  coordinator.advance({ timestampMs: 50_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 2, "tracking recovery cannot skip directly through a sparse countdown");
+  coordinator.advance({ timestampMs: 50_999, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 2);
+  coordinator.advance({ timestampMs: 51_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().countdown.value, 1);
+  coordinator.advance({ timestampMs: 52_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
 }
 
 // Paused future swap preserves judged and active IDs, replaces only future events.
@@ -386,6 +440,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.configureContent(config([event("live-hook", 1000, "hook_left")], variant(), [shadow]));
   coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
   coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 1000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 2000, clock: clock(0, false) });
   coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
   coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-shadow", 4000, ["hook_left"])) });
   assert.equal(coordinator.getJudgements()[0].result, "hit");
@@ -400,6 +456,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.configureContent(config([event("later-live", 5000, "hook_right")], variant(), [shadow]));
   coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
   coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 1000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 2000, clock: clock(0, false) });
   coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
   coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("stale-shadow-frame", 3849, ["hook_left"])) });
   assert.equal(coordinator.getSnapshot().shadowJudgements.length, 0);
@@ -495,6 +553,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.throws(() => coordinator.setActiveEventIds(["same", "same"]), /unique/u);
   coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: input(0, null) });
   coordinator.requestStart(0);
+  coordinator.advance({ timestampMs: 1000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 2000, clock: clock(0, false) });
   coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
   const duplicateActions = evidence("duplicate-action-frame", 4000, ["hook_left", "hook_left"]);
   assert.throws(() => coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, duplicateActions) }), /action IDs must be unique/u);
