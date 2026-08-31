@@ -36,10 +36,21 @@ assert.equal(gameplay.getSnapshot().selectedVariant.variantId, content.selectedV
 assert.equal(Object.isFrozen(gameplay.getSnapshot()), true);
 assert.doesNotThrow(() => JSON.parse(JSON.stringify(gameplay.getSnapshot())));
 
+const flowVariant = content.variants.find((entry) => entry.rulesetId === "flow_grid_v1");
+assert.ok(flowVariant);
+runtime.selectVariant(flowVariant.variantId, { modifierIds: [] });
+const flowContent = runtime.getSnapshot();
+const flowObstacle = flowContent.resolvedEvents.find((entry) => entry.authoredBeat?.type === "obstacle");
+assert.deepEqual({ centerTimestampMs: flowObstacle?.centerTimestampMs, endTimestampMs: flowObstacle?.endTimestampMs, cells: flowObstacle?.authoredBeat?.cells }, { centerTimestampMs: 1000, endTimestampMs: 1500, cells: [0,1,4,5] }, "content runtime exposes canonical obstacle interval and geometry");
+const flowGameplay = createAeroGameplaySessionCoordinator({ sessionId: "public-flow-non-notes" });
+assert.doesNotThrow(() => flowGameplay.configureContent({ packageId: flowContent.packageId, selectedVariant: flowContent.selectedVariant, resolvedEvents: flowContent.resolvedEvents, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "public-flow", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false } }), "gameplay accepts canonical content-runtime Flow bombs/obstacles/arcs/bursts transactionally");
+assert.equal(flowGameplay.getSnapshot().selectedVariant.rulesetId, "flow_grid_v1");
+
 bodyGrid.destroy();
+flowGameplay.destroy();
 gameplay.destroy();
 runtime.destroy();
-console.log("Gameplay public audio/content/input integration passed.");
+console.log("Gameplay public audio/content/input integration passed with canonical Flow non-note intervals.");
 
 /** @param {Uint8Array} bytes */
 function hashBytes(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
@@ -57,7 +68,13 @@ async function makePackage(audioHash) {
     const contentHash = hashJson({ beats, recipeId, rulesetId, sourceHash });
     charts.push({ schemaId: "aerobeat.chart.boxing.v1", schemaVersion: 1, recordVersion: 1, chartId: `chart-${token}`, chartName: token, mode: "boxing", difficulty: "Expert", prototype: { contractId: "aerobeat.boxing.prototype.v1", recipeId, recipeVersion: "1.0.0", rulesetId, rulesetVersion: "1.0.0", sourceHash, recipeHash: `sha256:${"1".repeat(64)}`, rulesetHash: `sha256:${"2".repeat(64)}`, contentHash: `sha256:${contentHash}`, modifiers: [], regenerationRequiredFor: [] }, beats });
   }
-  charts.push({ schemaId: "aerobeat.chart.v1", schemaVersion: 1, recordVersion: 1, chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", beats: [{ start: 1, type: "note", hand: "left", placement: 4, direction: 1 }] });
+  charts.push({ schemaId: "aerobeat.chart.v1", schemaVersion: 1, recordVersion: 1, chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", beats: [
+    { start: 1, type: "note", hand: "left", placement: 4, direction: 1 },
+    { start: 1.5, type: "bomb", placement: 3 },
+    { start: 2, end: 3, type: "obstacle", cells: [0,1,4,5] },
+    { start: 3, end: 4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 },
+    { start: 4, end: 4.5, type: "burst", hand: "right", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 3 }
+  ] });
   return {
     schemaId: "aerobeat.song-package.v1", schemaVersion: 1, packageVersion: "1.0.0", packageId: "gameplay-public-package", songId: "gameplay-public-song", songName: "Gameplay Public Integration",
     source: { provider: "local", sourceId: "gameplay-public", sourceVersionHash: "public-version", difficulty: "Expert", sourceDifficultyPath: "Expert.dat", sourceHash },

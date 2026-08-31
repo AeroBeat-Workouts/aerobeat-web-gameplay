@@ -826,7 +826,7 @@ function validateEventForVariant(event, selectedVariant) {
       if (event.hand !== "left" && event.hand !== "right") throw gameplayError("event_hand_invalid", "Flow notes require a hand");
       requireGridCell(event.placement, "event_placement_invalid");
       if (event.direction !== undefined && flowDirectionName(event.direction) === null) throw gameplayError("event_direction_invalid", "Flow note direction is unsupported");
-    }
+    } else validateFlowNonNote(event, type);
   } else {
     const action = expectedAction(event);
     if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
@@ -851,6 +851,58 @@ function validateEventForVariant(event, selectedVariant) {
     const sourceIds = requireStringArray(event.sourceEventIds, "event_lineage_invalid", 256);
     if (new Set(sourceIds).size !== sourceIds.length) throw gameplayError("event_lineage_invalid", "Event lineage IDs must be unique");
   }
+}
+
+/** @param {DataRecord} event @param {string} type */
+function validateFlowNonNote(event, type) {
+  if (type === "bomb") { requireGridCell(event.placement, "event_placement_invalid"); return; }
+  if (type === "obstacle") {
+    validateFlowInterval(event, "event_obstacle_invalid");
+    if (!Array.isArray(event.cells) || event.cells.length === 0 || event.cells.length > 12 || event.cells.some((cell) => !Number.isInteger(cell) || Number(cell) < 0 || Number(cell) > 11) || new Set(event.cells).size !== event.cells.length) throw gameplayError("event_obstacle_invalid", "Flow obstacle cells must be nonempty, unique canonical 4x3 cells");
+    return;
+  }
+  if (type === "arc") {
+    validateFlowInterval(event, "event_arc_invalid");
+    requireGridCell(event.startPlacement, "event_arc_invalid");
+    requireGridCell(event.endPlacement, "event_arc_invalid");
+    if (event.startDirection !== undefined) requireFlowSourceDirection(event.startDirection, "event_arc_invalid");
+    if (event.endDirection !== undefined) requireFlowSourceDirection(event.endDirection, "event_arc_invalid");
+    return;
+  }
+  validateFlowInterval(event, "event_burst_invalid");
+  requireGridCell(event.placement, "event_burst_invalid");
+  requireGridCell(event.tailPlacement, "event_burst_invalid");
+  if (event.direction !== undefined) requireFlowSourceDirection(event.direction, "event_burst_invalid");
+  if (!Number.isInteger(event.checkpointCount) || Number(event.checkpointCount) < 1 || Number(event.checkpointCount) > 4096) throw gameplayError("event_burst_invalid", "Flow burst checkpoint count must be a positive bounded integer");
+}
+
+/**
+ * Canonical content-runtime interval envelopes own `endTimestampMs`. Legacy direct
+ * flattened events without `authoredBeat` remain compatible as instantaneous ignored
+ * checkpoints when that field is absent; if direct callers provide it, it is validated.
+ * @param {DataRecord} event @param {string} code
+ */
+function validateFlowInterval(event, code) {
+  const canonicalEnvelope = event.authoredBeat !== null;
+  if (event.endTimestampMs === undefined) {
+    if (canonicalEnvelope) throw gameplayError(code, "Canonical Flow interval events require an end timestamp");
+    return;
+  }
+  const endTimestampMs = requireNonNegativeNumber(event.endTimestampMs, code);
+  if (endTimestampMs < Number(event.centerTimestampMs)) throw gameplayError(code, "Flow interval end timestamp cannot precede its center timestamp");
+  if (!canonicalEnvelope) return;
+  const authoredBeat = requireRecord(event.authoredBeat, code);
+  const startBeat = requireNonNegativeNumber(authoredBeat.start, code);
+  const endBeat = requireNonNegativeNumber(authoredBeat.end, code);
+  if (endBeat < startBeat) throw gameplayError(code, "Flow authored interval end cannot precede its start");
+  if ((endBeat === startBeat) !== (endTimestampMs === Number(event.centerTimestampMs))) throw gameplayError(code, "Flow authored and resolved interval spans are inconsistent");
+}
+
+/** @param {unknown} value @param {string} code */
+function requireFlowSourceDirection(value, code) {
+  if (Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 8) return;
+  if (typeof value === "string" && bodyGridDirections.includes(/** @type {import("@aerobeat/web-contracts").AeroBodyGridDirection} */ (value))) return;
+  throw gameplayError(code, "Flow source direction is unsupported");
 }
 
 /** @param {unknown} value @returns {DataRecord} */

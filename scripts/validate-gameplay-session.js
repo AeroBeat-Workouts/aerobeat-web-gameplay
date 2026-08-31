@@ -18,6 +18,10 @@ function event(eventId, centerTimestampMs, type, extra = {}) {
   return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra };
 }
 
+function canonicalFlowEvent(eventId, centerTimestampMs, authoredBeat, endTimestampMs) {
+  return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, ...(endTimestampMs === undefined ? {} : { endTimestampMs }), sourceEventIds: [`source-${eventId}`], authoredBeat };
+}
+
 function anchor(name, cell, subcell, measured = 1000) {
   return { schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: 0.5, y: 0.5, cell, subcell };
 }
@@ -364,6 +368,52 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, sample) });
   coordinator.advance({ timestampMs: 3700, clock: clock(900, true), input: input(3700, null) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.diagnostics]), [["wrong-flow", "miss", ["wrong_direction"]], ["flow-bomb", "ignored", []]]);
+}
+
+// Canonical runtime Flow non-notes validate exact geometry/intervals and remain ignored for scoring.
+{
+  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  const valid = [
+    canonicalFlowEvent("canonical-bomb", 500, { start: 1, type: "bomb", placement: 11 }),
+    canonicalFlowEvent("canonical-obstacle", 700, { start: 1.4, end: 2, type: "obstacle", cells: [1,2,5,6] }, 1000),
+    canonicalFlowEvent("canonical-arc", 900, { start: 1.8, end: 2.4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 }, 1200),
+    canonicalFlowEvent("canonical-burst", 1100, { start: 2.2, end: 2.6, type: "burst", hand: "right", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 4 }, 1300)
+  ];
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-canonical-non-notes" });
+  readyPlaying(coordinator, valid, flow);
+  coordinator.advance({ timestampMs: 5000, clock: clock(1300, true), input: input(5000, null) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), valid.map((entry) => [entry.eventId, "ignored"]), "valid canonical Flow non-notes retain explicit ignored scoring path");
+
+  const legacyDirect = createAeroGameplaySessionCoordinator({ sessionId: "flow-direct-interval-compatibility" });
+  assert.doesNotThrow(() => legacyDirect.configureContent(config([event("legacy-obstacle", 500, "obstacle", { cells: [0,1] })], flow)), "legacy direct flattened interval without authoredBeat/endTimestampMs remains an instantaneous ignored-compatible input");
+
+  const stable = createAeroGameplaySessionCoordinator({ sessionId: "flow-invalid-non-note-transaction" });
+  stable.configureContent(config([event("stable-bomb", 500, "bomb", { placement: 4 })], flow));
+  const before = JSON.stringify(stable.getSnapshot());
+  const invalid = [
+    event("bad-bomb-cell", 500, "bomb", { placement: 12 }),
+    event("legacy-obstacle-end-rollback", 500, "obstacle", { endTimestampMs: 499, cells: [1] }),
+    canonicalFlowEvent("obstacle-missing-end-ms", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }),
+    canonicalFlowEvent("obstacle-ms-rollback", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 499),
+    canonicalFlowEvent("obstacle-empty", 500, { start: 1, end: 2, type: "obstacle", cells: [] }, 1000),
+    canonicalFlowEvent("obstacle-duplicate", 500, { start: 1, end: 2, type: "obstacle", cells: [1,1] }, 1000),
+    canonicalFlowEvent("obstacle-bad-cell", 500, { start: 1, end: 2, type: "obstacle", cells: [12] }, 1000),
+    canonicalFlowEvent("obstacle-authored-rollback", 500, { start: 2, end: 1, type: "obstacle", cells: [1] }, 1000),
+    canonicalFlowEvent("obstacle-span-mismatch", 500, { start: 1, end: 1, type: "obstacle", cells: [1] }, 1000),
+    canonicalFlowEvent("arc-bad-head", 500, { start: 1, end: 2, type: "arc", startPlacement: -1, endPlacement: 2 }, 1000),
+    canonicalFlowEvent("arc-bad-tail", 500, { start: 1, end: 2, type: "arc", startPlacement: 1, endPlacement: 12 }, 1000),
+    canonicalFlowEvent("arc-bad-direction", 500, { start: 1, end: 2, type: "arc", startPlacement: 1, endPlacement: 2, startDirection: 9 }, 1000),
+    canonicalFlowEvent("arc-missing-end-ms", 500, { start: 1, end: 2, type: "arc", startPlacement: 1, endPlacement: 2 }),
+    canonicalFlowEvent("burst-bad-tail", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: -1, checkpointCount: 2 }, 1000),
+    canonicalFlowEvent("burst-bad-direction", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: 2, direction: 9, checkpointCount: 2 }, 1000),
+    canonicalFlowEvent("burst-zero-checkpoints", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 0 }, 1000),
+    canonicalFlowEvent("burst-excess-checkpoints", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 4097 }, 1000),
+    canonicalFlowEvent("burst-interval-rollback", 500, { start: 2, end: 1, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 2 }, 1000)
+  ];
+  for (const candidate of invalid) {
+    assert.throws(() => stable.configureContent(config([candidate], flow)), /Flow|Expected/u, `malformed ${candidate.eventId} must reject`);
+    assert.equal(JSON.stringify(stable.getSnapshot()), before, `malformed ${candidate.eventId} must reject transactionally`);
+  }
 }
 
 // Same-frame guard/punch overlap is exclusive, while disjoint squat+punch is concurrent.

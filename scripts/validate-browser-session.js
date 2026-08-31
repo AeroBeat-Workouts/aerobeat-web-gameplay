@@ -45,12 +45,33 @@ const server = createServer(async (request, response) => {
         recoverySequence.push(runtime.getSnapshot().countdown.value);
         runtime.advance({ timestampMs: 12_000, clock: clock(0, false) });
         recoverySequence.push(runtime.getSnapshot().session.state);
+        const flowVariant = { ...variant, variantId: "browser-flow", chartId: "browser-flow-chart", mode: "flow", rulesetId: "flow_grid_v1", recipeId: null };
+        const flowEvent = (eventId, centerTimestampMs, authoredBeat, endTimestampMs) => ({ schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: flowVariant.variantId, chartId: flowVariant.chartId, centerTimestampMs, ...(endTimestampMs === undefined ? {} : { endTimestampMs }), authoredBeat });
+        const flowEvents = [
+          flowEvent("browser-bomb", 500, { start: 1, type: "bomb", placement: 11 }),
+          flowEvent("browser-obstacle", 600, { start: 1.2, end: 2, type: "obstacle", cells: [1,2,5,6] }, 1000),
+          flowEvent("browser-arc", 700, { start: 1.4, end: 2.2, type: "arc", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 }, 1100),
+          flowEvent("browser-burst", 800, { start: 1.6, end: 2.4, type: "burst", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 3 }, 1200)
+        ];
+        const flowRuntime = createAeroGameplaySessionCoordinator({ sessionId: "browser-flow" });
+        flowRuntime.configureContent({ packageId: "browser-flow-package", selectedVariant: flowVariant, resolvedEvents: flowEvents });
+        const beforeMalformedFlow = JSON.stringify(flowRuntime.getSnapshot());
+        let malformedFlowRejected = false;
+        try { flowRuntime.configureContent({ packageId: "browser-flow-package", selectedVariant: flowVariant, resolvedEvents: [flowEvent("bad-obstacle", 500, { start: 1, end: 2, type: "obstacle", cells: [1,1] }, 1000)] }); } catch { malformedFlowRejected = true; }
+        const malformedFlowTransactional = beforeMalformedFlow === JSON.stringify(flowRuntime.getSnapshot());
+        flowRuntime.advance({ timestampMs: 0, clock: clock(0, false), input: input("flow-cal") });
+        flowRuntime.requestStart(0);
+        flowRuntime.advance({ timestampMs: 1000, clock: clock(0, false) });
+        flowRuntime.advance({ timestampMs: 2000, clock: clock(0, false) });
+        flowRuntime.advance({ timestampMs: 3000, clock: clock(0, false) });
+        flowRuntime.advance({ timestampMs: 4000, clock: clock(1200, true), input: input("flow-cal") });
+        const ignoredFlowResults = flowRuntime.getJudgements().map((entry) => [entry.eventId, entry.result]);
         const profiles = createAeroPrototypeProfileRegistry();
         profiles.select("aero.visual.compact");
         profiles.select("aero.scoring.prototype-wide", { sessionState: "paused_manual" });
         profiles.select("aero.converter.prototype-reach");
         const profileSnapshot = JSON.parse(JSON.stringify(profiles.getSnapshot()));
-        window.result = { states, recoverySequence, frozen: Object.isFrozen(runtime.getSnapshot()), serializable: JSON.parse(JSON.stringify(runtime.getSnapshot())).session.sessionId, countdownReason: runtime.getSnapshot().countdown.reason, visualProfile: profileSnapshot.active.visual.profile.profileId, scoringProfile: profileSnapshot.active.scoring.profile.profileId, regenerationRequired: profileSnapshot.regenerationRequired, bundleHash: profiles.exportProfiles().bundleHash };
+        window.result = { states, recoverySequence, frozen: Object.isFrozen(runtime.getSnapshot()), serializable: JSON.parse(JSON.stringify(runtime.getSnapshot())).session.sessionId, countdownReason: runtime.getSnapshot().countdown.reason, malformedFlowRejected, malformedFlowTransactional, ignoredFlowResults, visualProfile: profileSnapshot.active.visual.profile.profileId, scoringProfile: profileSnapshot.active.scoring.profile.profileId, regenerationRequired: profileSnapshot.regenerationRequired, bundleHash: profiles.exportProfiles().bundleHash };
       </script>`);
       return;
     }
@@ -78,7 +99,7 @@ try {
   await page.goto(`http://127.0.0.1:${address.port}/`);
   await page.waitForFunction(() => "result" in window);
   const result = await page.evaluate(() => window.result);
-  assert.deepEqual(result, { states: ["idle", "calibrating", "countdown", "playing", "paused_tracking", "paused_tracking", "countdown"], recoverySequence: [3, 2, 2, 1, "playing"], frozen: true, serializable: "browser", countdownReason: "tracking_resume", visualProfile: "aero.visual.compact", scoringProfile: "aero.scoring.prototype-wide", regenerationRequired: true, bundleHash: "sha256:81df0fa01910c08bac660c036be23a1ac1bf3f0e8f62ad3355b9e8362b20ae37" });
+  assert.deepEqual(result, { states: ["idle", "calibrating", "countdown", "playing", "paused_tracking", "paused_tracking", "countdown"], recoverySequence: [3, 2, 2, 1, "playing"], frozen: true, serializable: "browser", countdownReason: "tracking_resume", malformedFlowRejected: true, malformedFlowTransactional: true, ignoredFlowResults: [["browser-bomb", "ignored"], ["browser-obstacle", "ignored"], ["browser-arc", "ignored"], ["browser-burst", "ignored"]], visualProfile: "aero.visual.compact", scoringProfile: "aero.scoring.prototype-wide", regenerationRequired: true, bundleHash: "sha256:81df0fa01910c08bac660c036be23a1ac1bf3f0e8f62ad3355b9e8362b20ae37" });
   assert.deepEqual(consoleNoise, []);
 } finally {
   await browser.close();
