@@ -797,6 +797,7 @@ function normalizeEvents(value, selectedVariant) {
   const result = value.map((entry) => {
     const envelope = requireRecord(entry, "content_event_invalid");
     const authoredBeat = envelope.authoredBeat === undefined ? null : requireRecord(envelope.authoredBeat, "authored_beat_invalid");
+    if (authoredBeat !== null && Object.hasOwn(authoredBeat, "endTimestampMs")) throw gameplayError("authored_beat_invalid", "Authored beats cannot own resolved interval timestamps");
     const eventId = requireString(envelope.eventId, "event_id_invalid");
     if (ids.has(eventId)) throw gameplayError("event_id_duplicate", "Resolved event IDs must be unique");
     ids.add(eventId);
@@ -889,6 +890,7 @@ function validateFlowInterval(event, code) {
     return;
   }
   const endTimestampMs = requireNonNegativeNumber(event.endTimestampMs, code);
+  if (endTimestampMs > 86_400_000) throw gameplayError(code, "Flow interval end timestamp cannot exceed 24 hours");
   if (endTimestampMs < Number(event.centerTimestampMs)) throw gameplayError(code, "Flow interval end timestamp cannot precede its center timestamp");
   if (!canonicalEnvelope) return;
   const authoredBeat = requireRecord(event.authoredBeat, code);

@@ -386,13 +386,30 @@ function readyPlaying(coordinator, events, selected = variant()) {
 
   const legacyDirect = createAeroGameplaySessionCoordinator({ sessionId: "flow-direct-interval-compatibility" });
   assert.doesNotThrow(() => legacyDirect.configureContent(config([event("legacy-obstacle", 500, "obstacle", { cells: [0,1] })], flow)), "legacy direct flattened interval without authoredBeat/endTimestampMs remains an instantaneous ignored-compatible input");
+  const maxBoundary = createAeroGameplaySessionCoordinator({ sessionId: "flow-interval-max-boundary" });
+  assert.doesNotThrow(() => maxBoundary.configureContent(config([
+    event("legacy-obstacle-max-end", 500, "obstacle", { endTimestampMs: 86_400_000, cells: [0] }),
+    canonicalFlowEvent("canonical-obstacle-max-end", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 86_400_000)
+  ], flow)), "the exact shared 24-hour interval maximum remains valid for canonical and legacy supplied ends");
 
   const stable = createAeroGameplaySessionCoordinator({ sessionId: "flow-invalid-non-note-transaction" });
   stable.configureContent(config([event("stable-bomb", 500, "bomb", { placement: 4 })], flow));
   const before = JSON.stringify(stable.getSnapshot());
+  let intervalAccessorCalls = 0;
+  const accessorInterval = event("legacy-obstacle-end-accessor", 500, "obstacle", { cells: [1] });
+  Object.defineProperty(accessorInterval, "endTimestampMs", { enumerable: true, get() { intervalAccessorCalls += 1; return 1000; } });
+  const prototypedAuthoredBeat = Object.assign(Object.create({ endTimestampMs: 1000 }), { start: 1, end: 2, type: "obstacle", cells: [1] });
   const invalid = [
     event("bad-bomb-cell", 500, "bomb", { placement: 12 }),
     event("legacy-obstacle-end-rollback", 500, "obstacle", { endTimestampMs: 499, cells: [1] }),
+    event("legacy-obstacle-end-over-max", 500, "obstacle", { endTimestampMs: 86_400_001, cells: [1] }),
+    event("legacy-obstacle-end-max-value", 500, "obstacle", { endTimestampMs: Number.MAX_VALUE, cells: [1] }),
+    accessorInterval,
+    canonicalFlowEvent("prototyped-authored-interval", 500, prototypedAuthoredBeat, 1000),
+    canonicalFlowEvent("authored-masks-envelope-rollback", 500, { start: 1, end: 2, type: "obstacle", cells: [1], endTimestampMs: 1000 }, 499),
+    canonicalFlowEvent("authored-replaces-valid-envelope", 500, { start: 1, end: 2, type: "obstacle", cells: [1], endTimestampMs: Number.MAX_VALUE }, 1000),
+    canonicalFlowEvent("canonical-obstacle-end-over-max", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 86_400_001),
+    canonicalFlowEvent("canonical-obstacle-end-max-value", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, Number.MAX_VALUE),
     canonicalFlowEvent("obstacle-missing-end-ms", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }),
     canonicalFlowEvent("obstacle-ms-rollback", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 499),
     canonicalFlowEvent("obstacle-empty", 500, { start: 1, end: 2, type: "obstacle", cells: [] }, 1000),
@@ -411,9 +428,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
     canonicalFlowEvent("burst-interval-rollback", 500, { start: 2, end: 1, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 2 }, 1000)
   ];
   for (const candidate of invalid) {
-    assert.throws(() => stable.configureContent(config([candidate], flow)), /Flow|Expected/u, `malformed ${candidate.eventId} must reject`);
+    assert.throws(() => stable.configureContent(config([candidate], flow)), /Flow|Expected|accessor|plain|record|Authored/ui, `malformed ${candidate.eventId} must reject`);
     assert.equal(JSON.stringify(stable.getSnapshot()), before, `malformed ${candidate.eventId} must reject transactionally`);
   }
+  assert.equal(intervalAccessorCalls, 0, "interval accessors reject without invocation");
 }
 
 // Same-frame guard/punch overlap is exclusive, while disjoint squat+punch is concurrent.
