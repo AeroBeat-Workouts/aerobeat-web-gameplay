@@ -1,7 +1,7 @@
 // @ts-check
 
 import assert from "node:assert/strict";
-import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot } from "@aerobeat/web-contracts";
+import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot, isObstacleOutcome } from "@aerobeat/web-contracts";
 import { createPlaybackClock } from "../../aerobeat-web-audio/src/index.js";
 import {
   aeroGameplaySessionCapabilities,
@@ -11,15 +11,15 @@ import {
 const HASH = "a".repeat(64);
 
 function variant(rulesetId = "boxing_semantic_track_v1", recipeId = "row_family_balanced_height_v1", id = "variant") {
-  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_grid_v1" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_grid_v1" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { baseVariantId: id } };
+  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_grid_v2" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_grid_v2" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { baseVariantId: id } };
 }
 
 function event(eventId, centerTimestampMs, type, extra = {}) {
-  return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra };
+  return { schema: "aerobeat/resolved_content_event", version: 2, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra };
 }
 
 function canonicalFlowEvent(eventId, centerTimestampMs, authoredBeat, endTimestampMs) {
-  return { schema: "aerobeat/resolved_content_event", version: 1, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, ...(endTimestampMs === undefined ? {} : { endTimestampMs }), sourceEventIds: [`source-${eventId}`], authoredBeat };
+  return { schema: "aerobeat/resolved_content_event", version: 2, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, ...(endTimestampMs === undefined ? {} : { intervalStartTimestampMs: centerTimestampMs, intervalEndTimestampMs: endTimestampMs }), sourceEventIds: [`source-${eventId}`], authoredBeat };
 }
 
 function anchor(name, cell, subcell, measured = 1000) {
@@ -273,7 +273,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "content-envelope" });
   const authoredBeat = { start: 1, type: "hook_left", eventId: "runtime-hook", sourceEventIds: ["source-runtime-hook"], spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up" } };
-  const resolved = { schema: "aerobeat/resolved_content_event", version: 1, eventId: "runtime-hook", variantId: "variant", chartId: "chart-variant", centerTimestampMs: 1000, authoredBeat };
+  const resolved = { schema: "aerobeat/resolved_content_event", version: 2, eventId: "runtime-hook", variantId: "variant", chartId: "chart-variant", centerTimestampMs: 1000, authoredBeat };
   readyPlaying(coordinator, [resolved]);
   coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-runtime", 4000, ["hook_left"])) });
   const judgement = coordinator.getJudgements()[0];
@@ -310,7 +310,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 
 // Flow maps every Beat Saber arrow direction 0..7 into exact eight-way measured evidence.
 {
-  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
   const directionCases = [[0,"up"],[1,"down"],[2,"left"],[3,"right"],[4,"up-left"],[5,"up-right"],[6,"down-left"],[7,"down-right"]];
   for (const [numericDirection, measuredDirection] of directionCases) {
     const hit = createAeroGameplaySessionCoordinator({ sessionId: `flow-hit-${numericDirection}` });
@@ -332,7 +332,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 
 // Beat Saber dot direction 8 is represented by an omitted direction and needs cell entry only.
 {
-  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-dot" });
   readyPlaying(coordinator, [event("flow-dot", 500, "note", { hand: "left", placement: 5 })], flow);
   const dotSample = evidence("frame-flow-dot", 3500, []);
@@ -361,7 +361,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 // Flow wrong-direction evidence misses, while non-note source events are explicitly ignored.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-diagnostics" });
-  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
   readyPlaying(coordinator, [event("wrong-flow", 500, "note", { hand: "left", placement: 5, direction: "up" }), event("flow-bomb", 900, "bomb", { placement: 6 })], flow);
   const sample = evidence("frame-flow-wrong", 3500, []);
   sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 1, toCell: 5, direction: "down", provenance: "measured" }];
@@ -370,68 +370,48 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.diagnostics]), [["wrong-flow", "miss", ["wrong_direction"]], ["flow-bomb", "ignored", []]]);
 }
 
-// Canonical runtime Flow non-notes validate exact geometry/intervals and remain ignored for scoring.
+// Source-geometry Flow obstacles validate transactionally; obstacle truth is separate from note judgements.
 {
-  const flow = variant("flow_grid_v1", "row_family_balanced_height_v1");
+  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
+  const geometry = { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 };
   const valid = [
     canonicalFlowEvent("canonical-bomb", 500, { start: 1, type: "bomb", placement: 11 }),
-    canonicalFlowEvent("canonical-obstacle", 700, { start: 1.4, end: 2, type: "obstacle", cells: [1,2,5,6] }, 1000),
+    canonicalFlowEvent("canonical-obstacle", 700, { start: 1.4, end: 2, type: "obstacle", geometry, gridMask: [1] }, 1000),
     canonicalFlowEvent("canonical-arc", 900, { start: 1.8, end: 2.4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 }, 1200),
     canonicalFlowEvent("canonical-burst", 1100, { start: 2.2, end: 2.6, type: "burst", hand: "right", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 4 }, 1300)
   ];
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-canonical-non-notes" });
   readyPlaying(coordinator, valid, flow);
   coordinator.advance({ timestampMs: 5000, clock: clock(1300, true), input: input(5000, null) });
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), valid.map((entry) => [entry.eventId, "ignored"]), "valid canonical Flow non-notes retain explicit ignored scoring path");
-
-  const legacyDirect = createAeroGameplaySessionCoordinator({ sessionId: "flow-direct-interval-compatibility" });
-  assert.doesNotThrow(() => legacyDirect.configureContent(config([event("legacy-obstacle", 500, "obstacle", { cells: [0,1] })], flow)), "legacy direct flattened interval without authoredBeat/endTimestampMs remains an instantaneous ignored-compatible input");
-  const maxBoundary = createAeroGameplaySessionCoordinator({ sessionId: "flow-interval-max-boundary" });
-  assert.doesNotThrow(() => maxBoundary.configureContent(config([
-    event("legacy-obstacle-max-end", 500, "obstacle", { endTimestampMs: 86_400_000, cells: [0] }),
-    canonicalFlowEvent("canonical-obstacle-max-end", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 86_400_000)
-  ], flow)), "the exact shared 24-hour interval maximum remains valid for canonical and legacy supplied ends");
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["canonical-bomb", "ignored"], ["canonical-arc", "ignored"], ["canonical-burst", "ignored"]]);
+  assert.equal(coordinator.getObstacleOutcomes()[0].result, "unevaluated_tracking");
 
   const stable = createAeroGameplaySessionCoordinator({ sessionId: "flow-invalid-non-note-transaction" });
   stable.configureContent(config([event("stable-bomb", 500, "bomb", { placement: 4 })], flow));
   const before = JSON.stringify(stable.getSnapshot());
-  let intervalAccessorCalls = 0;
-  const accessorInterval = event("legacy-obstacle-end-accessor", 500, "obstacle", { cells: [1] });
-  Object.defineProperty(accessorInterval, "endTimestampMs", { enumerable: true, get() { intervalAccessorCalls += 1; return 1000; } });
-  const prototypedAuthoredBeat = Object.assign(Object.create({ endTimestampMs: 1000 }), { start: 1, end: 2, type: "obstacle", cells: [1] });
   const invalid = [
-    event("bad-bomb-cell", 500, "bomb", { placement: 12 }),
-    event("legacy-obstacle-end-rollback", 500, "obstacle", { endTimestampMs: 499, cells: [1] }),
-    event("legacy-obstacle-end-over-max", 500, "obstacle", { endTimestampMs: 86_400_001, cells: [1] }),
-    event("legacy-obstacle-end-max-value", 500, "obstacle", { endTimestampMs: Number.MAX_VALUE, cells: [1] }),
-    accessorInterval,
-    canonicalFlowEvent("prototyped-authored-interval", 500, prototypedAuthoredBeat, 1000),
-    canonicalFlowEvent("authored-masks-envelope-rollback", 500, { start: 1, end: 2, type: "obstacle", cells: [1], endTimestampMs: 1000 }, 499),
-    canonicalFlowEvent("authored-replaces-valid-envelope", 500, { start: 1, end: 2, type: "obstacle", cells: [1], endTimestampMs: Number.MAX_VALUE }, 1000),
-    canonicalFlowEvent("canonical-obstacle-end-over-max", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 86_400_001),
-    canonicalFlowEvent("canonical-obstacle-end-max-value", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, Number.MAX_VALUE),
-    canonicalFlowEvent("obstacle-missing-end-ms", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }),
-    canonicalFlowEvent("obstacle-ms-rollback", 500, { start: 1, end: 2, type: "obstacle", cells: [1] }, 499),
-    canonicalFlowEvent("obstacle-empty", 500, { start: 1, end: 2, type: "obstacle", cells: [] }, 1000),
-    canonicalFlowEvent("obstacle-duplicate", 500, { start: 1, end: 2, type: "obstacle", cells: [1,1] }, 1000),
-    canonicalFlowEvent("obstacle-bad-cell", 500, { start: 1, end: 2, type: "obstacle", cells: [12] }, 1000),
-    canonicalFlowEvent("obstacle-authored-rollback", 500, { start: 2, end: 1, type: "obstacle", cells: [1] }, 1000),
-    canonicalFlowEvent("obstacle-span-mismatch", 500, { start: 1, end: 1, type: "obstacle", cells: [1] }, 1000),
-    canonicalFlowEvent("arc-bad-head", 500, { start: 1, end: 2, type: "arc", startPlacement: -1, endPlacement: 2 }, 1000),
-    canonicalFlowEvent("arc-bad-tail", 500, { start: 1, end: 2, type: "arc", startPlacement: 1, endPlacement: 12 }, 1000),
-    canonicalFlowEvent("arc-bad-direction", 500, { start: 1, end: 2, type: "arc", startPlacement: 1, endPlacement: 2, startDirection: 9 }, 1000),
-    canonicalFlowEvent("arc-missing-end-ms", 500, { start: 1, end: 2, type: "arc", startPlacement: 1, endPlacement: 2 }),
-    canonicalFlowEvent("burst-bad-tail", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: -1, checkpointCount: 2 }, 1000),
-    canonicalFlowEvent("burst-bad-direction", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: 2, direction: 9, checkpointCount: 2 }, 1000),
-    canonicalFlowEvent("burst-zero-checkpoints", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 0 }, 1000),
-    canonicalFlowEvent("burst-excess-checkpoints", 500, { start: 1, end: 2, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 4097 }, 1000),
-    canonicalFlowEvent("burst-interval-rollback", 500, { start: 2, end: 1, type: "burst", placement: 1, tailPlacement: 2, checkpointCount: 2 }, 1000)
+    canonicalFlowEvent("mask-mismatch", 500, { start: 1, end: 2, type: "obstacle", geometry, gridMask: [1,5,9] }, 1000),
+    canonicalFlowEvent("duration-zero", 500, { start: 1, end: 1, type: "obstacle", geometry, gridMask: [1] }, 500),
+    canonicalFlowEvent("authored-shadow", 500, { start: 1, end: 2, type: "obstacle", geometry, gridMask: [1], intervalEndTimestampMs: 1000 }, 1000)
   ];
-  for (const candidate of invalid) {
-    assert.throws(() => stable.configureContent(config([candidate], flow)), /Flow|Expected|accessor|plain|record|Authored/ui, `malformed ${candidate.eventId} must reject`);
-    assert.equal(JSON.stringify(stable.getSnapshot()), before, `malformed ${candidate.eventId} must reject transactionally`);
-  }
-  assert.equal(intervalAccessorCalls, 0, "interval accessors reject without invocation");
+  for (const candidate of invalid) { assert.throws(() => stable.configureContent(config([candidate], flow))); assert.equal(JSON.stringify(stable.getSnapshot()), before); }
+}
+
+// A 25 ms wall tunneled between 15 fps samples is contacted; overlapping walls form one episode/consequence.
+{
+  const flow = variant("flow_grid_v2", null);
+  const geometry = { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 };
+  const walls = [canonicalFlowEvent("a-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", geometry, gridMask: [1] }, 725), canonicalFlowEvent("b-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", geometry, gridMask: [1] }, 725)];
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "continuous-wall" });
+  readyPlaying(coordinator, walls, flow);
+  const first = evidence("wall-before", 4000, []); const firstNose = first.anchors.find((entry) => entry.anchor === "nose"); firstNose.x = 0.125; firstNose.y = 0;
+  coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, first) });
+  const second = evidence("wall-after", 4060, []); const secondNose = second.anchors.find((entry) => entry.anchor === "nose"); secondNose.x = 0.875; secondNose.y = 0;
+  coordinator.advance({ timestampMs: 4060, clock: clock(740, true), input: input(4060, second) });
+  assert.equal(coordinator.getObstacleOutcomes().every(isObstacleOutcome), true);
+  assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => [entry.eventId, entry.result, entry.consequenceApplied]), [["a-wall", "contact", true], ["b-wall", "contact", false]]);
+  assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 1);
+  assert.equal(coordinator.getJudgements().length, 0, "obstacle contact never emits note judgement truth");
 }
 
 // Same-frame guard/punch overlap is exclusive, while disjoint squat+punch is concurrent.
@@ -599,7 +579,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "variant-identity" });
   assert.throws(() => coordinator.configureContent(config([], { ...variant(), mode: "flow" })), /Flow variants require/u);
-  assert.throws(() => coordinator.configureContent(config([], { ...variant("flow_grid_v1"), mode: "boxing" })), /Boxing variants require/u);
+  assert.throws(() => coordinator.configureContent(config([], { ...variant("flow_grid_v2"), mode: "boxing" })), /Boxing variants require/u);
   assert.throws(() => coordinator.configureContent(config([], { ...variant(), ranked: true, provenance: { kind: "composite" } })), /unranked/u);
 }
 

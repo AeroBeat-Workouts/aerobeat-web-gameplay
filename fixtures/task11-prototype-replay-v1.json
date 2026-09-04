@@ -3,11 +3,36 @@
   "version": 1,
   "fixtureId": "task11-prototype-replay-v1",
   "candidateMatrix": [
-    {"id":"flow","mode":"flow","rulesetId":"flow_grid_v1","recipeId":null},
-    {"id":"semantic-row","mode":"boxing","rulesetId":"boxing_semantic_track_v1","recipeId":"row_family_balanced_height_v1"},
-    {"id":"spatial-row","mode":"boxing","rulesetId":"boxing_spatial_grid_v1","recipeId":"row_family_balanced_height_v1"},
-    {"id":"semantic-cut","mode":"boxing","rulesetId":"boxing_semantic_track_v1","recipeId":"cut_family_source_height_v1"},
-    {"id":"spatial-cut","mode":"boxing","rulesetId":"boxing_spatial_grid_v1","recipeId":"cut_family_source_height_v1"}
+    {
+      "id": "flow",
+      "mode": "flow",
+      "rulesetId": "flow_grid_v2",
+      "recipeId": null
+    },
+    {
+      "id": "semantic-row",
+      "mode": "boxing",
+      "rulesetId": "boxing_semantic_track_v1",
+      "recipeId": "row_family_balanced_height_v1"
+    },
+    {
+      "id": "spatial-row",
+      "mode": "boxing",
+      "rulesetId": "boxing_spatial_grid_v1",
+      "recipeId": "row_family_balanced_height_v1"
+    },
+    {
+      "id": "semantic-cut",
+      "mode": "boxing",
+      "rulesetId": "boxing_semantic_track_v1",
+      "recipeId": "cut_family_source_height_v1"
+    },
+    {
+      "id": "spatial-cut",
+      "mode": "boxing",
+      "rulesetId": "boxing_spatial_grid_v1",
+      "recipeId": "cut_family_source_height_v1"
+    }
   ],
   "requiredScenarios": [
     "flow_cardinal_cell",
@@ -37,7 +62,19 @@
     "same_variant_collision_swap",
     "stale_future_swap"
   ],
-  "modifierIds": ["any_punch","cross_body","crossed_guard","no_squats","no_weaves"],
-  "timing": {"checkpointFreshnessMs":150,"straightQualificationMs":100,"timingWindowAfterMs":180,"timingWindowBeforeMs":180,"trackingLossMs":500},
-  "fixtureHash": "sha256:4fcab256c5c158d52f4dcc26d6553f2949d92dd639e17a15128f9bd37c8879dd"
+  "modifierIds": [
+    "any_punch",
+    "cross_body",
+    "crossed_guard",
+    "no_squats",
+    "no_weaves"
+  ],
+  "timing": {
+    "checkpointFreshnessMs": 150,
+    "straightQualificationMs": 100,
+    "timingWindowAfterMs": 180,
+    "timingWindowBeforeMs": 180,
+    "trackingLossMs": 500
+  },
+  "fixtureHash": "sha256:71048f48035b3032e37c917d1d6c4e3eacab716d490f9392c1e489eb1e917ad1"
 }

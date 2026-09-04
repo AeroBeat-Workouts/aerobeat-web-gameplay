@@ -21,7 +21,7 @@
     "check:components": "node scripts/validate-component-rules.js",
     "check:console": "node scripts/validate-playwright-console-noise.js",
     "test": "npm run check && npm run test:unit && npm run test:integration",
-    "test:unit": "node scripts/validate-gameplay-session.js && node scripts/validate-prototype-profile-registry.js && node scripts/validate-task11-prototype-replay.js",
+    "test:unit": "node scripts/validate-gameplay-session.js && node scripts/validate-flow-obstacle-collision.js && node scripts/validate-prototype-profile-registry.js && node scripts/validate-task11-prototype-replay.js",
     "test:integration": "node scripts/validate-public-integration.js",
     "test:browser": "npm run check:console && node scripts/validate-browser-session.js",
     "demo": "npm --prefix .testbed run demo",

@@ -12,6 +12,8 @@ import {
   readinessStates,
   rulesetIds
 } from "@aerobeat/web-contracts";
+import { isFlowObstacleGeometry, isFlowObstacleGridMask, maximumFlowObstaclesPerChart } from "@aerobeat/web-contracts/flow-obstacle-contracts";
+import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -30,13 +32,15 @@ import {
 /** @typedef {import("@aerobeat/web-contracts").AeroGameplaySessionState} AeroGameplaySessionState */
 /** @typedef {import("@aerobeat/web-contracts").AeroGameplaySessionPurpose} AeroGameplaySessionPurpose */
 /** @typedef {import("@aerobeat/web-contracts").AeroCountdownReason} AeroCountdownReason */
+/** @typedef {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,calibrationId:string,sx:number,sy:number}>} NoseSample */
+/** @typedef {{coverage: readonly Readonly<{startMs:number,endMs:number}>[], contact: readonly Readonly<{startMs:number,endMs:number}>[], firstContactTimelinePositionMs:number|null, contactEpisodeId:string|null, evidenceFrameId:string|null, calibrationId:string|null, consequenceApplied:boolean}} ObstacleState */
 
 /** @type {readonly string[]} */
 const CHECKPOINT_ACTIONS = Object.freeze(["guard", "crossed_guard", "squat", "weave_left", "weave_right"]);
 /** @type {readonly string[]} */
 const PUNCH_ACTIONS = Object.freeze(["straight_left", "straight_right", "hook_left", "hook_right", "uppercut_left", "uppercut_right"]);
 /** @type {readonly string[]} */
-const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "crossed_guard", "no_squats", "no_weaves"]);
+const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "crossed_guard", "no_obstacles", "no_squats", "no_weaves", "obstacle_visual_only"]);
 
 /**
  * @typedef {Object} GameplayCoordinatorOptions
@@ -104,6 +108,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const consumedActions = new Set();
   const consumedGuardPunchWindows = new Map();
   const partitions = new Map();
+  const obstacleStates = /** @type {Map<string, ObstacleState>} */ (new Map());
+  const obstacleOutcomes = /** @type {DataRecord[]} */ ([]);
+  const occupiedObstacleIds = new Set();
+  let previousNoseSample = /** @type {NoseSample | null} */ (null);
+  let obstacleEpisodeOrdinal = 0;
   let snapshot = makeSnapshot(null);
 
   const service = Object.freeze({
@@ -120,6 +129,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     reset,
     getSnapshot: () => snapshot,
     getJudgements: () => Object.freeze([...judgements]),
+    getObstacleOutcomes: () => Object.freeze([...obstacleOutcomes]),
     getScorePartitions: () => Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))),
     subscribe,
     destroy
@@ -213,6 +223,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     cancelCountdown();
     state = "paused_manual";
     pauseReason = boundedReason(reason);
+    previousNoseSample = null; occupiedObstacleIds.clear();
     publish(null);
     return snapshot;
   }
@@ -283,9 +294,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         timelinePositionMs = clock.positionMs;
         if (sessionPurpose === "play") {
           captureEvidenceForTimeline();
+          evaluateFlowObstacles();
           judgeLiveEvents();
           judgeShadowEvents();
-          if (events.length > 0 && judgedIds.size >= events.length) {
+          if (events.length > 0 && judgedIds.size + obstacleOutcomes.length + suppressedObstacleCount() >= events.length) {
             state = "completed";
             pauseReason = null;
           }
@@ -314,6 +326,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (clock.playing) throw gameplayError("paused_clock_not_frozen", "Paused clock synchronization requires a stopped audio clock");
     timestampMs = nextTimestampMs;
     timelinePositionMs = clock.positionMs;
+    previousNoseSample = null; occupiedObstacleIds.clear();
     publish(null);
     return snapshot;
   }
@@ -468,6 +481,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       calibrationId = nextCalibrationId;
       latestEvidence = null;
       lastEvidenceFrameId = null;
+      previousNoseSample = null; occupiedObstacleIds.clear();
     }
     if (safetyReady && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId) invalidatedCalibrationId = null;
     if (normalized.candidate !== null) latestEvidence = /** @type {AeroGameplayEvidenceSnapshot} */ (normalized.candidate);
@@ -475,7 +489,6 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function captureEvidenceForTimeline() {
     if (!latestEvidence || latestEvidence.measuredSourceFrameId === lastEvidenceFrameId) return;
-    lastEvidenceFrameId = latestEvidence.measuredSourceFrameId;
     latestEvidenceTimelineMs = timelinePositionMs;
   }
 
@@ -561,6 +574,85 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     countdownReason = null;
   }
 
+  function suppressedObstacleCount() { return variant?.mode === "flow" && (variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) ? events.filter((event) => event.type === "obstacle").length : 0; }
+
+  function evaluateFlowObstacles() {
+    if (!variant || variant.mode !== "flow" || sessionPurpose !== "play" || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) return;
+    const obstacles = events.filter((event) => event.type === "obstacle" && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
+    if (obstacles.length === 0) return;
+    /** @type {NoseSample | null} */
+    const sample = latestEvidence && latestEvidence.measuredSourceFrameId !== lastEvidenceFrameId ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
+    lastEvidenceFrameId = sample.sourceFrameId;
+    latestEvidenceTimelineMs = sample.songTimeMs;
+    const prior = previousNoseSample;
+    const continuous = prior !== null && prior.calibrationId === sample.calibrationId && prior.sourceFrameId !== sample.sourceFrameId && sample.measurementTimestampMs > prior.measurementTimestampMs && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs > prior.songTimeMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
+    /** @type {{timelineMs:number,kind:"enter"|"exit",eventId:string}[]} */ const boundaries = [];
+    for (const obstacle of obstacles) {
+      const eventId = String(obstacle.eventId);
+      let tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
+      if (continuous && prior) {
+        const coverageStart = Math.max(prior.songTimeMs, Number(obstacle.intervalStartTimestampMs));
+        const coverageEnd = Math.min(sample.songTimeMs, Number(obstacle.intervalEndTimestampMs));
+        if (coverageStart <= coverageEnd) tracker = { ...tracker, coverage: addInterval(tracker.coverage, coverageStart, coverageEnd) };
+        const contact = clipNoseSegment(obstacle, prior, sample);
+        if (contact) {
+          tracker = { ...tracker, contact: addInterval(tracker.contact, contact.startMs, contact.endMs), firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs ?? contact.startMs, evidenceFrameId: tracker.evidenceFrameId ?? sample.sourceFrameId, calibrationId: tracker.calibrationId ?? sample.calibrationId };
+          const beganInside = pointContactsObstacle(obstacle, prior);
+          const endedInside = pointContactsObstacle(obstacle, sample);
+          if (!occupiedObstacleIds.has(eventId) && (!beganInside || contact.startMs >= prior.songTimeMs)) boundaries.push({ timelineMs: contact.startMs, kind: "enter", eventId });
+          if (!endedInside) boundaries.push({ timelineMs: contact.endMs, kind: "exit", eventId });
+        } else if (occupiedObstacleIds.has(eventId)) boundaries.push({ timelineMs: prior.songTimeMs, kind: "exit", eventId });
+      } else if (pointContactsObstacle(obstacle, sample)) {
+        tracker = { ...tracker, contact: addInterval(tracker.contact, sample.songTimeMs, sample.songTimeMs), firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs ?? sample.songTimeMs, evidenceFrameId: tracker.evidenceFrameId ?? sample.sourceFrameId, calibrationId: tracker.calibrationId ?? sample.calibrationId };
+        boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId }, { timelineMs: sample.songTimeMs, kind: "exit", eventId });
+      }
+      obstacleStates.set(eventId, tracker);
+    }
+    processObstacleBoundaries(boundaries);
+    previousNoseSample = sample;
+    finalizeObstacles(obstacles);
+  }
+
+  /** @param {readonly {timelineMs:number,kind:"enter"|"exit",eventId:string}[]} boundaries */
+  function processObstacleBoundaries(boundaries) {
+    const ordered = [...boundaries].sort((left, right) => left.timelineMs - right.timelineMs || (left.kind === right.kind ? compareCodePoints(left.eventId, right.eventId) : left.kind === "enter" ? -1 : 1));
+    let index = 0;
+    while (index < ordered.length) {
+      const timelineMs = ordered[index].timelineMs; const group = [];
+      while (index < ordered.length && ordered[index].timelineMs === timelineMs) group.push(ordered[index++]);
+      const entrants = group.filter((entry) => entry.kind === "enter" && !occupiedObstacleIds.has(entry.eventId));
+      if (occupiedObstacleIds.size === 0 && entrants.length > 0) {
+        obstacleEpisodeOrdinal += 1; const episodeId = `${sessionId}:g${generation}:obstacle:${obstacleEpisodeOrdinal}`;
+        const winner = [...entrants].sort((left, right) => compareCodePoints(left.eventId, right.eventId))[0];
+        for (const entry of entrants) { const tracker = obstacleStates.get(entry.eventId); if (tracker && tracker.contactEpisodeId === null) tracker.contactEpisodeId = episodeId; }
+        const tracker = obstacleStates.get(winner.eventId); if (tracker) tracker.consequenceApplied = true;
+        applyObstacleConsequence();
+      }
+      for (const entry of entrants) occupiedObstacleIds.add(entry.eventId);
+      for (const entry of group) if (entry.kind === "exit") occupiedObstacleIds.delete(entry.eventId);
+    }
+  }
+
+  function applyObstacleConsequence() {
+    if (!variant) return;
+    const current = scorePartition(variant, profileIdentity, scoringSettings); const next = { ...current, combo: 0, obstacleContacts: Number(current.obstacleContacts ?? 0) + 1 };
+    partitions.set(String(current.partitionId), Object.freeze(next));
+  }
+
+  /** @param {readonly DataRecord[]} obstacles */
+  function finalizeObstacles(obstacles) {
+    for (const obstacle of obstacles) {
+      if (timelinePositionMs < Number(obstacle.intervalEndTimestampMs)) continue;
+      const eventId = String(obstacle.eventId); const tracker = obstacleStates.get(eventId) ?? { coverage: [], contact: [], firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
+      const result = tracker.contact.length > 0 ? "contact" : coversInterval(tracker.coverage, Number(obstacle.intervalStartTimestampMs), Number(obstacle.intervalEndTimestampMs)) ? "avoided" : "unevaluated_tracking";
+      const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
+      obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: "flow_grid_v2", result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
+      occupiedObstacleIds.delete(eventId); obstacleStates.delete(eventId);
+    }
+    obstacleOutcomes.sort((left, right) => compareCodePoints(String(left.eventId), String(right.eventId)));
+  }
+
   function judgeLiveEvents() {
     for (const event of events) {
       const eventId = String(event.eventId);
@@ -568,6 +660,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const center = Number(event.centerTimestampMs);
       const eventVariant = variantForEvent(event);
       if (eventVariant.mode === "flow" && event.type !== "note") {
+        if (event.type === "obstacle") continue;
         if (timelinePositionMs >= center) recordJudgement(event, "ignored", Object.freeze([]), null, false);
         continue;
       }
@@ -648,12 +741,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings */
   function updateScore(result, scoreVariant, scoreProfile, settings) {
     const key = scorePartitionKey(scoreVariant, scoreProfile, settings);
-    const current = partitions.get(key) ?? { partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ranked: scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, score: 0, maxCombo: 0, combo: 0 };
+    const current = scorePartition(scoreVariant, scoreProfile, settings);
     const next = { ...current };
     if (result === "hit") { next.hits += 1; next.combo += 1; next.score = finiteScore(next.score + Number(settings.hitPoints) + Math.max(0, next.combo - 1) * Number(settings.comboBonusPerHit)); next.maxCombo = Math.max(next.maxCombo, next.combo); }
     else if (result === "miss") { next.misses += 1; next.score = finiteScore(Math.max(0, next.score - Number(settings.missPenalty))); next.combo = 0; }
     else next.ignored += 1;
     partitions.set(key, Object.freeze(next));
+  }
+
+  /** @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings */
+  function scorePartition(scoreVariant, scoreProfile, settings) {
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings);
+    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ranked: scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
   }
 
   /** @param {DataRecord} event @returns {readonly string[]} */
@@ -680,18 +779,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {Readonly<{code: string, message: string}> | null} error */
   function makeSnapshot(error) {
     return Object.freeze({
-      schema: "aerobeat/gameplay_coordinator_snapshot", version: 1, serviceId: "aero.gameplay.session", generation,
+      schema: "aerobeat/gameplay_coordinator_snapshot", version: 2, serviceId: "aero.gameplay.session", generation,
       session: Object.freeze({ schema: "aerobeat/gameplay_session_snapshot", version: 2, sessionId, state, purpose: sessionPurpose, timestampMs, timelinePositionMs, packageId, chartId: variant?.chartId ?? null, calibrationId: sessionPurpose === "visual_test" ? null : calibrationId, rulesetId: variant?.rulesetId ?? null, recipeId: variant?.recipeId ?? null, ranked: sessionPurpose === "play" && variant?.ranked === true, pauseReason }),
       countdown, safety: Object.freeze({ ready: safetyReady, freshCalibrationRequired }), lease: leaseSnapshot,
       selectedVariant: variant ? publicVariant(variant) : null, profileIdentity, scoringSettings,
       activeEventIds: Object.freeze([...activeIds].sort(compareCodePoints)), judgedEventIds: Object.freeze([...judgedIds].sort(compareCodePoints)),
-      judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]),
+      judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]), obstacleOutcomes: Object.freeze([...obstacleOutcomes]),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
     });
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); previousNoseSample = null; obstacleEpisodeOrdinal = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
@@ -776,17 +875,20 @@ function normalizeVariant(value) {
   if (!rulesetIds.includes(/** @type {never} */ (rulesetId))) throw gameplayError("ruleset_invalid", "Variant ruleset is unsupported");
   const mode = record.mode === "flow" ? "flow" : record.mode === "boxing" ? "boxing" : (() => { throw gameplayError("mode_invalid", "Variant mode is unsupported"); })();
   const recipeId = record.recipeId === null ? null : requireString(record.recipeId, "recipe_invalid");
-  if (mode === "flow" && (rulesetId !== "flow_grid_v1" || recipeId !== null)) throw gameplayError("variant_identity_invalid", "Flow variants require the Flow ruleset and no conversion recipe");
-  if (mode === "boxing" && (rulesetId === "flow_grid_v1" || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
+  if (mode === "flow" && (rulesetId !== "flow_grid_v2" || recipeId !== null)) throw gameplayError("variant_identity_invalid", "Flow variants require the Flow ruleset and no conversion recipe");
+  if (mode === "boxing" && (rulesetId.startsWith("flow_grid_") || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
   const modifierIds = requireStringArray(record.modifierIds ?? [], "modifier_ids_invalid", 32);
+  if (modifierIds.includes("no_obstacles") && modifierIds.includes("obstacle_visual_only")) throw gameplayError("modifier_ids_invalid", "Obstacle accessibility modes conflict");
   if (new Set(modifierIds).size !== modifierIds.length || [...modifierIds].sort(compareCodePoints).some((entry, index) => entry !== modifierIds[index]) || modifierIds.some((entry) => !SUPPORTED_MODIFIERS.includes(entry))) throw gameplayError("modifier_ids_invalid", "Modifier identity must be supported, sorted and unique");
   if (typeof record.ranked !== "boolean") throw gameplayError("variant_rank_invalid", "Variant ranked identity must be boolean");
+  const obstacleAssist = modifierIds.includes("no_obstacles") || modifierIds.includes("obstacle_visual_only");
+  if (obstacleAssist && (record.ranked !== false || record.localOnly !== true)) throw gameplayError("variant_rank_invalid", "Obstacle accessibility variants must be unranked and local-only");
   const provenance = record.provenance === undefined ? null : cloneGameplayData(record.provenance);
   if (isPlainRecord(provenance) && provenance.kind === "composite" && record.ranked) throw gameplayError("variant_rank_invalid", "Runtime composite variants must be unranked");
   const mapHash = cloneGameplayData(record.mapHash, "map_hash_invalid");
   const scoreIdentityHash = cloneGameplayData(record.scoreIdentityHash, "score_identity_hash_invalid");
   if (!isContentHash(mapHash) || !isContentHash(scoreIdentityHash)) throw gameplayError("variant_hash_invalid", "Variant map and score identity hashes must satisfy the public content contract");
-  return Object.freeze({ variantId: requireString(record.variantId, "variant_id_invalid"), chartId: requireString(record.chartId, "chart_id_invalid"), mode, rulesetId, recipeId, modifierIds, ranked: record.ranked === true, mapHash, scoreIdentityHash, provenance });
+  return Object.freeze({ variantId: requireString(record.variantId, "variant_id_invalid"), chartId: requireString(record.chartId, "chart_id_invalid"), mode, rulesetId, recipeId, modifierIds, ranked: record.ranked === true, localOnly: record.localOnly === true, mapHash, scoreIdentityHash, provenance });
 }
 
 /** @param {unknown} value @param {DataRecord} selectedVariant @returns {readonly DataRecord[]} */
@@ -796,8 +898,9 @@ function normalizeEvents(value, selectedVariant) {
   const lineageOwners = new Set();
   const result = value.map((entry) => {
     const envelope = requireRecord(entry, "content_event_invalid");
+    if (envelope.schema !== "aerobeat/resolved_content_event" || envelope.version !== 2) throw gameplayError("content_event_invalid", "Resolved content events must use version 2");
     const authoredBeat = envelope.authoredBeat === undefined ? null : requireRecord(envelope.authoredBeat, "authored_beat_invalid");
-    if (authoredBeat !== null && Object.hasOwn(authoredBeat, "endTimestampMs")) throw gameplayError("authored_beat_invalid", "Authored beats cannot own resolved interval timestamps");
+    if (authoredBeat !== null && ["centerTimestampMs", "intervalStartTimestampMs", "intervalEndTimestampMs", "endTimestampMs"].some((key) => Object.hasOwn(authoredBeat, key))) throw gameplayError("authored_beat_invalid", "Authored beats cannot own resolved timestamps");
     const eventId = requireString(envelope.eventId, "event_id_invalid");
     if (ids.has(eventId)) throw gameplayError("event_id_duplicate", "Resolved event IDs must be unique");
     ids.add(eventId);
@@ -814,6 +917,7 @@ function normalizeEvents(value, selectedVariant) {
     }
     return event;
   });
+  if (result.filter((event) => event.type === "obstacle").length > maximumFlowObstaclesPerChart) throw gameplayError("event_obstacle_limit_exceeded", "Flow obstacle count exceeds the gameplay limit");
   result.sort(eventOrder);
   return Object.freeze(result);
 }
@@ -859,7 +963,7 @@ function validateFlowNonNote(event, type) {
   if (type === "bomb") { requireGridCell(event.placement, "event_placement_invalid"); return; }
   if (type === "obstacle") {
     validateFlowInterval(event, "event_obstacle_invalid");
-    if (!Array.isArray(event.cells) || event.cells.length === 0 || event.cells.length > 12 || event.cells.some((cell) => !Number.isInteger(cell) || Number(cell) < 0 || Number(cell) > 11) || new Set(event.cells).size !== event.cells.length) throw gameplayError("event_obstacle_invalid", "Flow obstacle cells must be nonempty, unique canonical 4x3 cells");
+    if (!isFlowObstacleGeometry(event.geometry) || !isFlowObstacleGridMask(event.gridMask, /** @type {import("@aerobeat/web-contracts/flow-obstacle-contracts").AeroFlowObstacleGeometry} */ (event.geometry))) throw gameplayError("event_obstacle_invalid", "Flow obstacle source geometry and derived mask must agree");
     return;
   }
   if (type === "arc") {
@@ -885,19 +989,19 @@ function validateFlowNonNote(event, type) {
  */
 function validateFlowInterval(event, code) {
   const canonicalEnvelope = event.authoredBeat !== null;
-  if (event.endTimestampMs === undefined) {
-    if (canonicalEnvelope) throw gameplayError(code, "Canonical Flow interval events require an end timestamp");
+  if (event.intervalStartTimestampMs === undefined || event.intervalEndTimestampMs === undefined) {
+    if (canonicalEnvelope) throw gameplayError(code, "Canonical Flow interval events require start/end timestamps");
     return;
   }
-  const endTimestampMs = requireNonNegativeNumber(event.endTimestampMs, code);
+  const startTimestampMs = requireNonNegativeNumber(event.intervalStartTimestampMs, code);
+  const endTimestampMs = requireNonNegativeNumber(event.intervalEndTimestampMs, code);
   if (endTimestampMs > 86_400_000) throw gameplayError(code, "Flow interval end timestamp cannot exceed 24 hours");
-  if (endTimestampMs < Number(event.centerTimestampMs)) throw gameplayError(code, "Flow interval end timestamp cannot precede its center timestamp");
+  if (startTimestampMs !== Number(event.centerTimestampMs) || endTimestampMs <= startTimestampMs) throw gameplayError(code, "Flow interval timestamps must have positive duration and start at center");
   if (!canonicalEnvelope) return;
   const authoredBeat = requireRecord(event.authoredBeat, code);
   const startBeat = requireNonNegativeNumber(authoredBeat.start, code);
   const endBeat = requireNonNegativeNumber(authoredBeat.end, code);
-  if (endBeat < startBeat) throw gameplayError(code, "Flow authored interval end cannot precede its start");
-  if ((endBeat === startBeat) !== (endTimestampMs === Number(event.centerTimestampMs))) throw gameplayError(code, "Flow authored and resolved interval spans are inconsistent");
+  if (endBeat <= startBeat) throw gameplayError(code, "Flow authored interval requires positive duration");
 }
 
 /** @param {unknown} value @param {string} code */
@@ -962,8 +1066,8 @@ function validateEvidenceIdentity(evidence) {
 /** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {AeroGameplayEvidenceSnapshot} evidence @param {DataRecord | null} input */
 function matchEvent(event, selectedVariant, evidence, input) {
   const diagnostics = [];
-  const rulesetId = String(selectedVariant?.rulesetId ?? "flow_grid_v1");
-  if (rulesetId === "flow_grid_v1") return matchFlow(event, evidence);
+  const rulesetId = String(selectedVariant?.rulesetId ?? "flow_grid_v2");
+  if (rulesetId.startsWith("flow_grid_")) return matchFlow(event, evidence);
   const action = expectedAction(event);
   if (!evidence.activeBoxingActions.includes(/** @type {never} */ (action))) diagnostics.push("no_input");
   if (action.startsWith("straight_") && rulesetId === "boxing_semantic_track_v1") {
@@ -1033,7 +1137,7 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
 
 /** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @returns {AeroGameplayJudgement} */
 function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow) {
-  const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? "flow_grid_v1");
+  const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? "flow_grid_v2");
   const recipeId = /** @type {import("@aerobeat/web-contracts").AeroConversionRecipeId | null} */ (selectedVariant?.recipeId ?? null);
   const center = Number(event.centerTimestampMs);
   return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose: "play", eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow });
@@ -1058,7 +1162,7 @@ function finiteScore(value) { if (!Number.isFinite(value) || value < 0) throw ga
 /** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings */
 function scorePartitionKey(variant, profile, settings) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings)].join("|"); }
 /** @param {DataRecord} variant */
-function publicVariant(variant) { return Object.freeze({ variantId: variant.variantId, chartId: variant.chartId, mode: variant.mode, rulesetId: variant.rulesetId, recipeId: variant.recipeId, modifierIds: variant.modifierIds, ranked: variant.ranked, mapHash: variant.mapHash, scoreIdentityHash: variant.scoreIdentityHash, provenance: variant.provenance }); }
+function publicVariant(variant) { return Object.freeze({ variantId: variant.variantId, chartId: variant.chartId, mode: variant.mode, rulesetId: variant.rulesetId, recipeId: variant.recipeId, modifierIds: variant.modifierIds, ranked: variant.ranked, localOnly: variant.localOnly, mapHash: variant.mapHash, scoreIdentityHash: variant.scoreIdentityHash, provenance: variant.provenance }); }
 /** @param {"three" | "two" | "one" | "complete" | "cancelled"} state @param {AeroCountdownReason | null} reason @param {number | null} value @param {number} timestampMs @param {string | null} calibrationId */
 function countdownSnapshot(state, reason, value, timestampMs, calibrationId) { return Object.freeze({ schema: "aerobeat/countdown_snapshot", version: 1, state, reason, value, timestampMs, gameplayTimeFrozen: state !== "complete", calibrationId }); }
 /** @param {number} timestampMs */
