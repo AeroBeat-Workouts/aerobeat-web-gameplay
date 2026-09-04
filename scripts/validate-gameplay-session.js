@@ -397,21 +397,110 @@ function readyPlaying(coordinator, events, selected = variant()) {
   for (const candidate of invalid) { assert.throws(() => stable.configureContent(config([candidate], flow))); assert.equal(JSON.stringify(stable.getSnapshot()), before); }
 }
 
-// A 25 ms wall tunneled between 15 fps samples is contacted; overlapping walls form one episode/consequence.
+// Sparse 15 fps endpoints retain analytical 25 ms wall collision across one or many display-rate repeats.
 {
   const flow = variant("flow_grid_v2", null);
   const geometry = { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 };
   const walls = [canonicalFlowEvent("a-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", geometry, gridMask: [1] }, 725), canonicalFlowEvent("b-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", geometry, gridMask: [1] }, 725)];
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "continuous-wall" });
-  readyPlaying(coordinator, walls, flow);
-  const first = evidence("wall-before", 4000, []); const firstNose = first.anchors.find((entry) => entry.anchor === "nose"); firstNose.x = 0.125; firstNose.y = 0;
+  const setNose = (sample, x, y = 0) => { const nose = sample.anchors.find((entry) => entry.anchor === "nose"); nose.x = x; nose.y = y; return sample; };
+  for (const repeatOffsets of [[16], [10, 20, 30, 40, 50]]) {
+    const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `continuous-wall-${repeatOffsets.length}` });
+    readyPlaying(coordinator, [event("combo-note", 500, "note", { hand: "left", placement: 5 }), ...walls], flow);
+    const note = evidence(`combo-frame-${repeatOffsets.length}`, 3500, []);
+    note.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: "down-right", provenance: "measured" }];
+    coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, note) });
+    const first = setNose(evidence(`wall-before-${repeatOffsets.length}`, 3680, []), 0.125);
+    coordinator.advance({ timestampMs: 3680, clock: clock(680, true), input: input(3680, first) });
+    for (const offset of repeatOffsets) coordinator.advance({ timestampMs: 3680 + offset, clock: clock(680 + offset, true), input: input(3680, first) });
+    const second = setNose(evidence(`wall-after-${repeatOffsets.length}`, 3740, []), 0.875);
+    coordinator.advance({ timestampMs: 3740, clock: clock(740, true), input: input(3740, second) });
+    assert.equal(coordinator.getObstacleOutcomes().every(isObstacleOutcome), true);
+    assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => [entry.eventId, entry.result, entry.consequenceApplied]), [["a-wall", "contact", true], ["b-wall", "contact", false]]);
+    const partition = coordinator.getScorePartitions()[0];
+    assert.deepEqual([partition.hits, partition.misses, partition.score, partition.maxCombo, partition.combo, partition.obstacleContacts], [1, 0, 1, 1, 0, 1], "overlapping walls reset one combo with zero score delta and unchanged note counts");
+    assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["combo-note", "hit"]], "obstacles never add or rewrite note judgements");
+  }
+}
+
+// Repeated valid frames also preserve complete measured avoidance coverage without creating score truth.
+{
+  const flow = variant("flow_grid_v2", null);
+  const geometry = { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 };
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "repeated-wall-avoidance" });
+  readyPlaying(coordinator, [canonicalFlowEvent("avoided-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", geometry, gridMask: [1] }, 725)], flow);
+  const first = evidence("avoid-before", 4000, []); const firstNose = first.anchors.find((entry) => entry.anchor === "nose"); firstNose.x = 0.125; firstNose.y = 0.5;
   coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, first) });
-  const second = evidence("wall-after", 4060, []); const secondNose = second.anchors.find((entry) => entry.anchor === "nose"); secondNose.x = 0.875; secondNose.y = 0;
+  for (const offset of [10, 20, 30, 40, 50]) coordinator.advance({ timestampMs: 4000 + offset, clock: clock(680 + offset, true), input: input(4000, first) });
+  const second = evidence("avoid-after", 4060, []); const secondNose = second.anchors.find((entry) => entry.anchor === "nose"); secondNose.x = 0.125; secondNose.y = 0.5;
   coordinator.advance({ timestampMs: 4060, clock: clock(740, true), input: input(4060, second) });
-  assert.equal(coordinator.getObstacleOutcomes().every(isObstacleOutcome), true);
-  assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => [entry.eventId, entry.result, entry.consequenceApplied]), [["a-wall", "contact", true], ["b-wall", "contact", false]]);
+  assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => entry.result), ["avoided"]);
+  assert.equal(coordinator.getScorePartitions().length, 0);
+  assert.equal(coordinator.getJudgements().length, 0);
+}
+
+// Repeated display advances preserve sustained aggregate occupancy; only a measured leave/re-entry starts another consequence.
+{
+  const flow = variant("flow_grid_v2", null);
+  const geometry = { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 };
+  const wall = canonicalFlowEvent("sustained-wall", 600, { start: 1.2, end: 2.4, type: "obstacle", geometry, gridMask: [1] }, 1200);
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "sustained-wall" });
+  readyPlaying(coordinator, [wall], flow);
+  const send = (frameId, measured, timeline, x) => { const sample = evidence(frameId, measured, []); const nose = sample.anchors.find((entry) => entry.anchor === "nose"); nose.x = x; nose.y = 0; coordinator.advance({ timestampMs: measured, clock: clock(timeline, true), input: input(measured, sample) }); return sample; };
+  send("sustained-before", 3500, 500, 0.125);
+  const inside = send("sustained-inside", 3650, 650, 0.5);
   assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 1);
-  assert.equal(coordinator.getJudgements().length, 0, "obstacle contact never emits note judgement truth");
+  for (const offset of [16, 32, 48]) coordinator.advance({ timestampMs: 3650 + offset, clock: clock(650 + offset, true), input: input(3650, inside) });
+  send("sustained-inside-fresh", 3700, 700, 0.5);
+  assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 1, "repeats and fresh inside samples cannot repeat the overlap consequence");
+  send("sustained-leave", 3800, 800, 0.875);
+  send("sustained-reenter", 3900, 900, 0.5);
+  assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 2, "measured leave and re-entry deterministically create a new episode");
+  const final = send("sustained-after", 4250, 1250, 0.875);
+  assert.ok(final);
+  assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => entry.result), ["contact"]);
+  const partition = coordinator.getScorePartitions()[0];
+  assert.deepEqual([partition.hits, partition.misses, partition.score, partition.obstacleContacts], [0, 0, 0, 2]);
+  assert.equal(coordinator.getJudgements().length, 0);
+}
+
+// Every invalid or discontinuous boundary still severs the sparse interpolation chain.
+{
+  const flow = variant("flow_grid_v2", null);
+  const geometry = { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 };
+  const wall = () => canonicalFlowEvent("boundary-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", geometry, gridMask: [1] }, 725);
+  const setNose = (sample, x) => { const nose = sample.anchors.find((entry) => entry.anchor === "nose"); nose.x = x; nose.y = 0; return sample; };
+  const assertSevered = (label, insert, secondTimestampMs = 4060, secondCalibrationId = "cal-1") => {
+    const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `boundary-${label}` });
+    readyPlaying(coordinator, [wall()], flow);
+    const first = setNose(evidence("boundary-before", 4000, []), 0.125);
+    coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, first) });
+    insert(coordinator, first);
+    const second = setNose(evidence("boundary-after", secondTimestampMs, []), 0.875);
+    second.calibrationId = secondCalibrationId;
+    for (const anchorEntry of second.anchors) anchorEntry.calibrationId = secondCalibrationId;
+    coordinator.advance({ timestampMs: secondTimestampMs, clock: clock(740, true), input: input(secondTimestampMs, second, { calibrationId: secondCalibrationId }) });
+    assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => entry.result), ["unevaluated_tracking"], `${label} must prevent clipping across the boundary`);
+    assert.equal(coordinator.getScorePartitions().length, 0, `${label} uncertainty is nonpenalizing`);
+    assert.equal(coordinator.getJudgements().length, 0, `${label} cannot create note truth`);
+  };
+  assertSevered("invalid-fresh", (coordinator) => { const invalid = setNose(evidence("boundary-invalid", 4010, []), 0.5); invalid.anchors.find((entry) => entry.anchor === "nose").confidence = 0.49; coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4010, invalid) }); });
+  assertSevered("invalid-duplicate", (coordinator) => { const invalid = setNose(evidence("boundary-before", 4000, []), 0.125); invalid.anchors.find((entry) => entry.anchor === "nose").confidence = 0.49; coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4000, invalid) }); });
+  assertSevered("conflicting-duplicate", (coordinator) => { const conflicting = setNose(evidence("boundary-before", 4000, []), 0.5); coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4000, conflicting) }); });
+  assertSevered("stale-duplicate", (coordinator, first) => coordinator.advance({ timestampMs: 4151, clock: clock(700, true), input: input(4000, first) }), 4160);
+  assertSevered("measurement-rollback", (coordinator) => coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(3990, setNose(evidence("boundary-rollback", 3990, []), 0.125)) }));
+  assertSevered("gap-over-150ms", () => {}, 4160);
+  assertSevered("calibration-change", (coordinator) => { const changed = setNose(evidence("boundary-calibration", 4010, []), 0.125); changed.calibrationId = "cal-2"; for (const anchorEntry of changed.anchors) anchorEntry.calibrationId = "cal-2"; coordinator.advance({ timestampMs: 4010, clock: clock(730, true), input: input(4010, changed, { calibrationId: "cal-2" }) }); }, 4060, "cal-2");
+
+  const lost = createAeroGameplaySessionCoordinator({ sessionId: "boundary-tracking-loss" });
+  readyPlaying(lost, [wall()], flow);
+  lost.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, setNose(evidence("lost-before", 4000, []), 0.125)) });
+  lost.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4010, null, { paused: true, fresh: true }) });
+  const recovered = setNose(evidence("lost-after", 7030, []), 0.875); recovered.calibrationId = "cal-2"; for (const anchorEntry of recovered.anchors) anchorEntry.calibrationId = "cal-2";
+  lost.advance({ timestampMs: 4020, clock: clock(680, false), input: input(4020, null, { calibrationId: "cal-2" }) });
+  lost.advance({ timestampMs: 5020, clock: clock(680, false) }); lost.advance({ timestampMs: 6020, clock: clock(680, false) }); lost.advance({ timestampMs: 7020, clock: clock(680, false) });
+  lost.advance({ timestampMs: 7030, clock: clock(740, true), input: input(7030, recovered, { calibrationId: "cal-2" }) });
+  assert.deepEqual(lost.getObstacleOutcomes().map((entry) => entry.result), ["unevaluated_tracking"], "tracking loss severs continuity through recovery");
+  assert.equal(lost.getScorePartitions().length, 0);
 }
 
 // Same-frame guard/punch overlap is exclusive, while disjoint squat+punch is concurrent.

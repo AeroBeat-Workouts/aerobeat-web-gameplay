@@ -512,6 +512,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     lastEvidenceFrameId = null;
     freshCalibrationRequired = true;
     safetyReady = false;
+    previousNoseSample = null;
+    occupiedObstacleIds.clear();
   }
 
   function hasRequiredLease() {
@@ -581,12 +583,27 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const obstacles = events.filter((event) => event.type === "obstacle" && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
-    const sample = latestEvidence && latestEvidence.measuredSourceFrameId !== lastEvidenceFrameId ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
+    const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
     if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
+    const prior = previousNoseSample;
+    if (sample.sourceFrameId === lastEvidenceFrameId) {
+      const identicalRepeat = prior !== null && prior.sourceFrameId === sample.sourceFrameId && prior.calibrationId === sample.calibrationId && prior.measurementTimestampMs === sample.measurementTimestampMs && prior.sx === sample.sx && prior.sy === sample.sy;
+      if (identicalRepeat) return;
+      previousNoseSample = null;
+      occupiedObstacleIds.clear();
+      finalizeObstacles(obstacles);
+      return;
+    }
     lastEvidenceFrameId = sample.sourceFrameId;
     latestEvidenceTimelineMs = sample.songTimeMs;
-    const prior = previousNoseSample;
-    const continuous = prior !== null && prior.calibrationId === sample.calibrationId && prior.sourceFrameId !== sample.sourceFrameId && sample.measurementTimestampMs > prior.measurementTimestampMs && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs > prior.songTimeMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
+    if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
+      previousNoseSample = null;
+      occupiedObstacleIds.clear();
+      finalizeObstacles(obstacles);
+      return;
+    }
+    const continuous = prior !== null && prior.calibrationId === sample.calibrationId && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
+    if (prior !== null && !continuous) occupiedObstacleIds.clear();
     /** @type {{timelineMs:number,kind:"enter"|"exit",eventId:string}[]} */ const boundaries = [];
     for (const obstacle of obstacles) {
       const eventId = String(obstacle.eventId);
