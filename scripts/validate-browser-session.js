@@ -8,12 +8,13 @@ import { chromium } from "playwright";
 
 const gameplayRoot = resolve(".");
 const contractsRoot = resolve("../aerobeat-web-contracts");
+const hashRoot = resolve("../aerobeat-web-hash");
 const server = createServer(async (request, response) => {
   try {
     const path = request.url === "/" ? null : request.url?.split("?")[0] ?? null;
     if (path === null) {
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js"}}</script><script type="module">
+      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
         import { createAeroGameplaySessionCoordinator, createAeroPrototypeProfileRegistry } from "/gameplay/src/index.js";
         const HASH = "a".repeat(64);
         const runtime = createAeroGameplaySessionCoordinator({ sessionId: "browser" });
@@ -75,7 +76,7 @@ const server = createServer(async (request, response) => {
       </script>`);
       return;
     }
-    const mapping = path.startsWith("/contracts/") ? [contractsRoot, path.slice(11)] : path.startsWith("/gameplay/") ? [gameplayRoot, path.slice(10)] : null;
+    const mapping = path.startsWith("/contracts/") ? [contractsRoot, path.slice(11)] : path.startsWith("/gameplay/") ? [gameplayRoot, path.slice(10)] : path.startsWith("/hash/") ? [hashRoot, path.slice(6)] : null;
     if (!mapping) { response.statusCode = 404; response.end(); return; }
     const root = mapping[0];
     const file = resolve(root, mapping[1]);

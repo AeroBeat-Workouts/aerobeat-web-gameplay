@@ -37,7 +37,7 @@ Exports:
 
 - `createAeroGameplaySessionCoordinator(options)`
 - `createAeroPrototypeProfileRegistry(options)`
-- `canonicalPrototypeProfileJson(value)` / `sha256PrototypeProfileHex(text)`
+- `canonicalPrototypeProfileJson(value)` / synchronous `sha256PrototypeProfileHex(text)` (backed by shared incremental `@aerobeat/web-hash` `Sha256`)
 - `aeroGameplaySessionCapabilities`
 - `aeroGameplayPackageId`
 - `aeroGameplaySessionServiceId`
@@ -66,7 +66,7 @@ Profiles use exactly three ownership classes:
 - `between_run_ruleset`: selection requires an explicit idle/paused/between-run session state and supplies immutable scoring settings plus its full tuning identity to score partitions;
 - `converter_regeneration`: selecting a profile never mutates current chart truth. The registry reports a pending hash and `regenerationRequired` until `select` receives an explicitly matching `regeneratedPackageProfileHash` from newly generated package provenance. The active identity and outer telemetry carry the same derived regeneration value.
 
-Exports are exact `aerobeat/prototype_profile_bundle` v1 records. Profile `contentHash` is bare lowercase SHA-256 over canonical schema/version/ID/version/class/settings; `bundleHash` is `sha256:`-prefixed over the canonical bundle body. Imports require the registry's exact bundle version and atomically replace only the validated profile set; incompatible versions reject without mutation and reset restores constructor defaults. Every public profile string and bundle version is individually capped at 256 characters. Imports reject missing or extra fields, accessors, classes, bytes, malformed settings, duplicate IDs, and hash mismatches. Defaults include visual default/compact, scoring locked/prototype-wide, and converter canonical/prototype-reach; all are labeled experimental.
+Exports are exact `aerobeat/prototype_profile_bundle` v1 records. Profile `contentHash` is bare lowercase SHA-256 over canonical schema/version/ID/version/class/settings; `bundleHash` is `sha256:`-prefixed over the canonical bundle body. The shared incremental `Sha256` owner preserves registry construction and the public helper as synchronous operations. Imports require the registry's exact bundle version and atomically replace only the validated profile set; incompatible versions reject without mutation and reset restores constructor defaults. Every public profile string and bundle version is individually capped at 256 characters. Imports reject missing or extra fields, accessors, classes, bytes, malformed settings, duplicate IDs, and hash mismatches. Defaults include visual default/compact, scoring locked/prototype-wide, and converter canonical/prototype-reach; all are labeled experimental.
 
 `configureContent` and `applyFutureContent` accept optional exact `{comboBonusPerHit, hitPoints, missPenalty}` scoring settings. Locked defaults preserve one point per hit and zero miss penalty. Finite fractional prototype scores remain JSON-safe. Every partition includes the complete profile hash, immutable settings, and deterministic settings identity. Paused swaps retain each preserved event's original profile and settings; replacements use the selected profile.
 

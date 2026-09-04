@@ -42,5 +42,8 @@
   "devDependencies": {
     "@aerobeat/web-contracts": "file:../aerobeat-web-contracts",
     "playwright": "^1.55.0"
+  },
+  "dependencies": {
+    "@aerobeat/web-hash": "file:../aerobeat-web-hash"
   }
 }
