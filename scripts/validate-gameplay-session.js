@@ -361,6 +361,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const spatial = variant("boxing_spatial_grid_v1", "cut_family_source_height_v1");
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "boxing-diagonal-target" });
   assert.throws(() => coordinator.configureContent(config([event("diagonal-hook", 500, "hook_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up-left" } })], spatial)), /Spatial entry direction is invalid/u);
+  const sentinel=createAeroGameplaySessionCoordinator({sessionId:"boxing-source-sentinel"});sentinel.configureContent(config([event("sentinel-hook",500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20],sourceCell:-1,entryDirection:"up"}})],spatial));assert.equal(sentinel.getSnapshot().selectedVariant.rulesetId,"boxing_spatial_grid_v1","authoring's explicit -1 source-cell sentinel must survive gameplay validation");const invalidSentinel=createAeroGameplaySessionCoordinator({sessionId:"boxing-invalid-source-sentinel"});assert.throws(()=>invalidSentinel.configureContent(config([event("invalid-sentinel-hook",500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20],sourceCell:-2,entryDirection:"up"}})],spatial)),/source cell/u);
 }
 
 // Flow wrong-direction evidence misses, while non-note source events are explicitly ignored.

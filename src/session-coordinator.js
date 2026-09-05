@@ -958,7 +958,7 @@ function validateEventForVariant(event, selectedVariant) {
         const target = requireRecord(event.spatialTarget, "spatial_target_invalid");
         requireGridCell(target.targetCell, "spatial_target_invalid");
         if (!Array.isArray(target.acceptedSubcells) || target.acceptedSubcells.length > 48 || target.acceptedSubcells.some((entry) => !Number.isInteger(entry) || entry < 0 || entry > 47)) throw gameplayError("spatial_target_invalid", "Spatial accepted subcells are invalid");
-        if (target.sourceCell !== undefined) requireGridCell(target.sourceCell, "spatial_target_invalid");
+        if (target.sourceCell !== undefined && (!Number.isInteger(target.sourceCell) || Number(target.sourceCell) < -1 || Number(target.sourceCell) > 11)) throw gameplayError("spatial_target_invalid", "Spatial source cell must be the explicit -1 sentinel or a 4x3 grid cell");
         if (target.entryDirection !== undefined && cardinalDirectionName(target.entryDirection) === null) throw gameplayError("spatial_target_invalid", "Spatial entry direction is invalid");
       } else if (action === "guard" || action === "crossed_guard") {
         const target = requireRecord(event.guardTarget, "guard_target_invalid");
