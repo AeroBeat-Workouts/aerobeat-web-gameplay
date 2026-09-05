@@ -219,7 +219,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function pause(atTimestampMs, reason = "manual") {
     assertOpen();
     advanceTimestamp(atTimestampMs);
-    if (state === "destroyed") return snapshot;
+    if (state === "destroyed" || state === "completed") return snapshot;
     cancelCountdown();
     state = "paused_manual";
     pauseReason = boundedReason(reason);
@@ -318,7 +318,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    */
   function synchronizePausedClock(frame) {
     assertConfigured();
-    if (state !== "paused_manual") throw gameplayError("session_state_invalid", "Paused clock synchronization requires a manual pause");
+    if (state !== "paused_manual" && state !== "completed") throw gameplayError("session_state_invalid", "Paused clock synchronization requires a manual pause or completed session");
+    const enteredCompleted = state === "completed";
     const safeFrame = requireDataRecordFields(frame, "paused_clock_frame_invalid", ["timestampMs", "clock"]);
     const nextTimestampMs = requireNonNegativeNumber(safeFrame.timestampMs, "timestamp_invalid");
     if (nextTimestampMs < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back");
@@ -326,6 +327,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (clock.playing) throw gameplayError("paused_clock_not_frozen", "Paused clock synchronization requires a stopped audio clock");
     timestampMs = nextTimestampMs;
     timelinePositionMs = clock.positionMs;
+    if (enteredCompleted) { state = "paused_manual"; pauseReason = "explicit_seek"; }
     previousNoseSample = null; occupiedObstacleIds.clear();
     publish(null);
     return snapshot;

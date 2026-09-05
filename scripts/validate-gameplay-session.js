@@ -107,6 +107,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 2000);
   assert.deepEqual(coordinator.getSnapshot().judgements, []);
   assert.deepEqual(coordinator.getSnapshot().scorePartitions, []);
+  coordinator.pause(450, "menu");
+  assert.equal(coordinator.getSnapshot().session.state, "completed", "ordinary pause cannot destroy terminal completion truth");
+  coordinator.synchronizePausedClock({ timestampMs: 451, clock: clock(1500, false, 2000) });
+  assert.deepEqual({ state: coordinator.getSnapshot().session.state, position: coordinator.getSnapshot().session.timelinePositionMs, reason: coordinator.getSnapshot().session.pauseReason }, { state: "paused_manual", position: 1500, reason: "explicit_seek" });
   const completedGeneration = coordinator.getSnapshot().generation;
   assert.equal(coordinator.requestStart(500, request).accepted, true);
   assert.equal(coordinator.getSnapshot().generation, completedGeneration + 1);
