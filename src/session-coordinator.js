@@ -934,7 +934,7 @@ function normalizeEvents(value, selectedVariant) {
     }
     return event;
   });
-  if (result.filter((event) => event.type === "obstacle").length > maximumObstaclesPerChart) throw gameplayError("event_obstacle_limit_exceeded", "Flow obstacle count exceeds the gameplay limit");
+  if (result.filter((event) => event.type === "obstacle" || event.type === "squat" || event.type === "weave_left" || event.type === "weave_right").length > maximumObstaclesPerChart) throw gameplayError("event_obstacle_limit_exceeded", "Obstacle count exceeds the gameplay limit");
   result.sort(eventOrder);
   return Object.freeze(result);
 }
@@ -952,6 +952,7 @@ function validateEventForVariant(event, selectedVariant) {
   } else {
     const action = expectedAction(event);
     if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
+    if (action === "squat" || action === "weave_left" || action === "weave_right") validateBoxingObstacle(event);
     if (selectedVariant.rulesetId === "boxing_spatial_grid_v1") {
       if (PUNCH_ACTIONS.includes(action)) {
         const target = requireRecord(event.spatialTarget, "spatial_target_invalid");
@@ -974,6 +975,22 @@ function validateEventForVariant(event, selectedVariant) {
     if (new Set(sourceIds).size !== sourceIds.length) throw gameplayError("event_lineage_invalid", "Event lineage IDs must be unique");
   }
 }
+
+/** @param {DataRecord} event */
+function validateBoxingObstacle(event) {
+  validateFlowInterval(event, "event_boxing_obstacle_invalid");
+  if (!isObstacleSourceGeometry(event.sourceGeometry) || !isObstacleGameplayGeometry(event.gameplayGeometry) || !isObstacleGridMask(event.gridMask, /** @type {import("@aerobeat/web-contracts/obstacle-contracts").AeroObstacleGameplayGeometry} */ (event.gameplayGeometry))) throw gameplayError("event_boxing_obstacle_invalid", "Boxing obstacle source evidence, normalized gameplay geometry, and derived mask must agree");
+  if (!sameNumberArray(event.blockedCells, event.gridMask) || obstacleActionForCells(/** @type {readonly number[]} */ (event.gridMask)) !== event.type) throw gameplayError("event_boxing_obstacle_invalid", "Boxing action and blocked cells must exactly match the normalized derived mask");
+  const checkpoint = requireRecord(event.checkpoint, "event_boxing_obstacle_invalid");
+  const blocked = /** @type {readonly number[]} */ (event.gridMask);
+  const expectedSafeCells = Array.from({ length: 12 }, (_, cell) => cell).filter((cell) => !blocked.includes(cell));
+  if (checkpoint.kind !== "instantaneous" || !sameNumberArray(checkpoint.noseSafeCells, expectedSafeCells)) throw gameplayError("event_boxing_obstacle_invalid", "Boxing checkpoint must retain the exact instantaneous normalized safe-cell complement");
+}
+
+/** @param {readonly number[]} cells */
+function obstacleActionForCells(cells) { let left=0,right=0; for(const cell of cells) cell%4<=1?left+=1:right+=1; return left>right?"weave_right":right>left?"weave_left":"squat"; }
+/** @param {unknown} left @param {unknown} right */
+function sameNumberArray(left, right) { return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => Number.isInteger(value) && value === right[index]); }
 
 /** @param {DataRecord} event @param {string} type */
 function validateFlowNonNote(event, type) {

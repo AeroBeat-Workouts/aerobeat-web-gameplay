@@ -15,7 +15,7 @@ assert.deepEqual(fixture.modifierIds, ["any_punch", "cross_body", "crossed_guard
 
 function variant(candidate, modifierIds = []) { return { variantId: candidate.id, chartId: candidate.chartId ?? `chart-${candidate.id}`, mode: candidate.mode, rulesetId: candidate.rulesetId, recipeId: candidate.recipeId, modifierIds, ranked: false, mapHash: hash(), scoreIdentityHash: hash(), provenance: { baseVariantId: candidate.id } }; }
 function hash() { return { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }; }
-function event(candidate, eventId, centerTimestampMs, type, extra = {}) { return { schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: candidate.id, chartId: candidate.chartId ?? `chart-${candidate.id}`, centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra }; }
+function event(candidate, eventId, centerTimestampMs, type, extra = {}) { const base={ schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: candidate.id, chartId: candidate.chartId ?? `chart-${candidate.id}`, centerTimestampMs, sourceEventIds: [`source-${eventId}`], type };if(!["squat","weave_left","weave_right"].includes(type))return{...base,...extra};const geometry=type==="squat"?{x:0,y:2,width:4,height:1}:type==="weave_left"?{x:3,y:0,width:1,height:3}:{x:0,y:0,width:1,height:3};const gridMask=Array.from({length:geometry.width*geometry.height},(_,index)=>(geometry.y+Math.floor(index/geometry.width))*4+geometry.x+index%geometry.width),noseSafeCells=Array.from({length:12},(_,cell)=>cell).filter((cell)=>!gridMask.includes(cell));return{...base,intervalStartTimestampMs:centerTimestampMs,intervalEndTimestampMs:centerTimestampMs+200,sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",...geometry},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",...geometry},gridMask,blockedCells:[...gridMask],checkpoint:{kind:"instantaneous",freshnessMs:150,timingWindowMs:180,noseSafeCells},...extra}; }
 function anchor(name, measured, overrides = {}) { const defaults = { nose: [1,2], left_shoulder: [4,16], right_shoulder: [7,23], left_elbow: [4,16], right_elbow: [7,23], left_wrist: [5,20], right_wrist: [5,20] }; const [cell, subcell] = defaults[name]; return { schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: 0.5, y: 0.5, cell, subcell, ...overrides }; }
 function evidence(frameId, measured, actions, entries = []) { return { schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: actions, anchors: ["nose","left_shoulder","right_shoulder","left_elbow","right_elbow","left_wrist","right_wrist"].map((name) => anchor(name, measured)), entries }; }
 function input(measured, latestEvidence, options = {}) { return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] }; }
@@ -67,7 +67,7 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "crossed-disjoint" });
   const candidate = fixture.candidateMatrix.find((entry) => entry.id === "spatial-row");
-  ready(coordinator, config(candidate, [event(candidate,"a-crossed",1000,"guard",{guardTarget:{leftCell:5,rightCell:5,crossed:true}}),event(candidate,"b-squat",1500,"squat",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(candidate,"c-hook",1500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20]}})]));
+  ready(coordinator, config(candidate, [event(candidate,"a-crossed",1000,"guard",{guardTarget:{leftCell:5,rightCell:5,crossed:true}}),event(candidate,"b-squat",1500,"squat"),event(candidate,"c-hook",1500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20]}})]));
   coordinator.advance({ timestampMs: 4000, clock: clock(1000,true), input: input(4000,evidence("crossed",4000,["crossed_guard"])) });
   coordinator.advance({ timestampMs: 4500, clock: clock(1500,true), input: input(4500,evidence("disjoint",4500,["squat","hook_left"])) });
   assert.deepEqual(coordinator.getJudgements().map((item)=>item.result), ["hit","hit","hit"]);
@@ -112,7 +112,7 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   const candidate = fixture.candidateMatrix.find((entry) => entry.id === "semantic-row");
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "swap-shadow" });
   const shadowCandidate = { ...variant(candidate), variantId:"shadow", chartId:"chart-shadow", resolvedEvents:[{...event({id:"shadow"},"shadow-hit",1000,"hook_left"),chartId:"chart-shadow"}] };
-  ready(coordinator, config(candidate, [event(candidate,"past",1000,"hook_right"),event(candidate,"old-future",3000,"squat",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(candidate,"replaceable-future",4000,"hook_right")], { shadowVariants:[shadowCandidate] }));
+  ready(coordinator, config(candidate, [event(candidate,"past",1000,"hook_right"),event(candidate,"old-future",3000,"squat"),event(candidate,"replaceable-future",4000,"hook_right")], { shadowVariants:[shadowCandidate] }));
   coordinator.advance({ timestampMs:4000,clock:clock(1000,true),input:input(4000,evidence("shadow-frame",4000,["hook_left"])) });
   assert.equal(coordinator.getSnapshot().shadowJudgements[0].result,"hit");
   assert.equal(coordinator.getScorePartitions().reduce((sum,item)=>sum+item.hits,0),0);
@@ -120,7 +120,7 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   coordinator.setActiveEventIds(["old-future"]);
   coordinator.pause(4300);
   const next = {...candidate,chartId:"chart-semantic-row-revised",recipeId:"cut_family_source_height_v1"};
-  coordinator.applyFutureContent(config(next,[event(next,"old-future",3000,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"replacement",3000,"weave_left",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}}),event(next,"stale-replacement",900,"hook_left"),event(next,"replaceable-future",3500,"weave_right",{checkpoint:{kind:"instantaneous",noseSafeCells:[1]}})], { scoringProfileId:"aero.scoring.locked" }));
+  coordinator.applyFutureContent(config(next,[event(next,"old-future",3000,"weave_right"),event(next,"replacement",3000,"weave_left"),event(next,"stale-replacement",900,"hook_left"),event(next,"replaceable-future",3500,"weave_right")], { scoringProfileId:"aero.scoring.locked" }));
   assert.equal(coordinator.getSnapshot().judgedEventIds.includes("past"),true);
   assert.equal(coordinator.getSnapshot().selectedVariant.recipeId,"cut_family_source_height_v1");
   coordinator.resume(4400);

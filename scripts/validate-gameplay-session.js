@@ -15,7 +15,12 @@ function variant(rulesetId = "boxing_semantic_track_v1", recipeId = "row_family_
 }
 
 function event(eventId, centerTimestampMs, type, extra = {}) {
-  return { schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra };
+  const base = { schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: "variant", chartId: "chart-variant", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type };
+  if (!["squat","weave_left","weave_right"].includes(type)) return { ...base, ...extra };
+  const geometry = type === "squat" ? { x:0,y:2,width:4,height:1 } : type === "weave_left" ? { x:3,y:0,width:1,height:3 } : { x:0,y:0,width:1,height:3 };
+  const gridMask = Array.from({length:geometry.width*geometry.height},(_,index)=>(geometry.y+Math.floor(index/geometry.width))*4+geometry.x+index%geometry.width);
+  const noseSafeCells = Array.from({length:12},(_,cell)=>cell).filter((cell)=>!gridMask.includes(cell));
+  return { ...base, intervalStartTimestampMs:centerTimestampMs, intervalEndTimestampMs:centerTimestampMs+200, sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",...geometry}, gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",...geometry}, gridMask, blockedCells:[...gridMask], checkpoint:{kind:"instantaneous",freshnessMs:150,timingWindowMs:180,noseSafeCells}, ...extra };
 }
 
 function canonicalFlowEvent(eventId, centerTimestampMs, authoredBeat, endTimestampMs) {
@@ -511,9 +516,15 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.deepEqual(overlap.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["hit", []], ["miss", ["blocked_overlap"]]]);
 
   const disjoint = createAeroGameplaySessionCoordinator({ sessionId: "disjoint" });
-  readyPlaying(disjoint, [event("a-squat", 1000, "squat", { checkpoint: { kind: "instantaneous", noseSafeCells: [1] } }), event("b-hook", 1000, "hook_left")]);
+  readyPlaying(disjoint, [event("a-squat", 1000, "squat"), event("b-hook", 1000, "hook_left")]);
   disjoint.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-disjoint", 4000, ["squat", "hook_left"])) });
   assert.deepEqual(disjoint.getJudgements().map((entry) => entry.result), ["hit", "hit"]);
+}
+
+// Semantic Track scores defensive action only; Spatial Grid additionally checks the instantaneous calibrated nose-safe cell.
+{
+  const semantic=createAeroGameplaySessionCoordinator({sessionId:"semantic-obstacle"});readyPlaying(semantic,[event("semantic-weave",1000,"weave_right")]);const semanticSample=evidence("semantic-obstacle-frame",4000,["weave_right"]);semanticSample.anchors=semanticSample.anchors.map((entry)=>entry.anchor==="nose"?{...entry,cell:0,subcell:0}:entry);semantic.advance({timestampMs:4000,clock:clock(1000,true),input:input(4000,semanticSample)});assert.equal(semantic.getJudgements()[0].result,"hit","Semantic Track obstacle judgement must remain action-only");
+  const spatial=createAeroGameplaySessionCoordinator({sessionId:"spatial-obstacle"});readyPlaying(spatial,[event("spatial-weave",1000,"weave_right")],variant("boxing_spatial_grid_v1"));const spatialSample=evidence("spatial-obstacle-frame",4000,["weave_right"]);spatialSample.anchors=spatialSample.anchors.map((entry)=>entry.anchor==="nose"?{...entry,cell:0,subcell:0}:entry);spatial.advance({timestampMs:4000,clock:clock(1000,true),input:input(4000,spatialSample)});const spatialExpired=evidence("spatial-obstacle-expired",4181,["weave_right"]);spatialExpired.anchors=spatialExpired.anchors.map((entry)=>entry.anchor==="nose"?{...entry,cell:0,subcell:0}:entry);spatial.advance({timestampMs:4181,clock:clock(1181,true),input:input(4181,spatialExpired)});assert.deepEqual([spatial.getJudgements()[0].result,spatial.getJudgements()[0].diagnostics],["miss",["wrong_cell"]],"Spatial Grid obstacle judgement must require the calibrated instantaneous nose-safe checkpoint");
 }
 
 // Wrong evidence never consumes the later positive action in the same timing window.
