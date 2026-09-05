@@ -14,7 +14,7 @@ const server = createServer(async (request, response) => {
     const path = request.url === "/" ? null : request.url?.split("?")[0] ?? null;
     if (path === null) {
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-contracts/flow-obstacle-contracts":"/contracts/src/flow-obstacle-contracts.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
+      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-contracts/obstacle-contracts":"/contracts/src/obstacle-contracts.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
         import { createAeroGameplaySessionCoordinator, createAeroPrototypeProfileRegistry } from "/gameplay/src/index.js";
         const HASH = "a".repeat(64);
         const runtime = createAeroGameplaySessionCoordinator({ sessionId: "browser" });
@@ -47,10 +47,10 @@ const server = createServer(async (request, response) => {
         runtime.advance({ timestampMs: 12_000, clock: clock(0, false) });
         recoverySequence.push(runtime.getSnapshot().session.state);
         const flowVariant = { ...variant, variantId: "browser-flow", chartId: "browser-flow-chart", mode: "flow", rulesetId: "flow_grid_v2", recipeId: null };
-        const flowEvent = (eventId, centerTimestampMs, authoredBeat, endTimestampMs) => ({ schema: "aerobeat/resolved_content_event", version: 2, eventId, variantId: flowVariant.variantId, chartId: flowVariant.chartId, centerTimestampMs, ...(endTimestampMs === undefined ? {} : { intervalStartTimestampMs: centerTimestampMs, intervalEndTimestampMs: endTimestampMs }), authoredBeat });
+        const flowEvent = (eventId, centerTimestampMs, authoredBeat, endTimestampMs) => ({ schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: flowVariant.variantId, chartId: flowVariant.chartId, centerTimestampMs, ...(endTimestampMs === undefined ? {} : { intervalStartTimestampMs: centerTimestampMs, intervalEndTimestampMs: endTimestampMs }), authoredBeat });
         const flowEvents = [
           flowEvent("browser-bomb", 500, { start: 1, type: "bomb", placement: 11 }),
-          flowEvent("browser-obstacle", 600, { start: 1.2, end: 2, type: "obstacle", geometry: { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 1, width: 2, height: 2 }, gridMask: [1,2,5,6] }, 1000),
+          flowEvent("browser-obstacle", 600, { start: 1.2, end: 2, type: "obstacle", sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",x:1,y:1,width:2,height:2},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:2,height:2},gridMask:[1,2,5,6] }, 1000),
           flowEvent("browser-arc", 700, { start: 1.4, end: 2.2, type: "arc", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 }, 1100),
           flowEvent("browser-burst", 800, { start: 1.6, end: 2.4, type: "burst", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 3 }, 1200)
         ];
@@ -58,7 +58,7 @@ const server = createServer(async (request, response) => {
         flowRuntime.configureContent({ packageId: "browser-flow-package", selectedVariant: flowVariant, resolvedEvents: flowEvents });
         const beforeMalformedFlow = JSON.stringify(flowRuntime.getSnapshot());
         let malformedFlowRejected = false;
-        try { flowRuntime.configureContent({ packageId: "browser-flow-package", selectedVariant: flowVariant, resolvedEvents: [flowEvent("bad-obstacle", 500, { start: 1, end: 2, type: "obstacle", geometry: { schema: "aerobeat/flow_obstacle_geometry", version: 1, coordinateSpace: "beatsaber_lane_layer", x: 1, y: 2, width: 1, height: 3 }, gridMask: [1,5,9] }, 1000)] }); } catch { malformedFlowRejected = true; }
+        try { flowRuntime.configureContent({ packageId: "browser-flow-package", selectedVariant: flowVariant, resolvedEvents: [flowEvent("bad-obstacle", 500, { start: 1, end: 2, type: "obstacle", sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"beatsaber_lane_layer",x:1,y:0,width:1,height:3},gridMask:[1,5,9] }, 1000)] }); } catch { malformedFlowRejected = true; }
         const malformedFlowTransactional = beforeMalformedFlow === JSON.stringify(flowRuntime.getSnapshot());
         flowRuntime.advance({ timestampMs: 0, clock: clock(0, false), input: input("flow-cal") });
         flowRuntime.requestStart(0);

@@ -7,7 +7,7 @@ export const maximumObstacleSampleGapMs = 150;
 
 /**
  * Extract the only collision authority: a valid measured nose anchor. Coordinates
- * are converted from top-left normalized athlete space to Beat Saber lane/layer space.
+ * are converted from top-left normalized athlete space to canonical grid-world coordinates.
  * @param {DataRecord} evidence @param {number} timelinePositionMs @param {number} frameTimestampMs
  * @returns {NoseSample | null}
  */
@@ -24,8 +24,8 @@ export function measuredNoseSample(evidence, timelinePositionMs, frameTimestampM
 
 /** @param {DataRecord} obstacle @param {NoseSample} sample */
 export function pointContactsObstacle(obstacle, sample) {
-  const geometry = /** @type {DataRecord} */ (obstacle.geometry);
-  return sample.songTimeMs >= Number(obstacle.intervalStartTimestampMs) && sample.songTimeMs <= Number(obstacle.intervalEndTimestampMs) && sample.sx >= Number(geometry.x) - 0.5 && sample.sx <= Number(geometry.x) + Number(geometry.width) - 0.5 && sample.sy >= Number(geometry.y) - 0.5 && sample.sy <= Number(geometry.y) + Number(geometry.height) - 0.5;
+  const geometry = /** @type {DataRecord} */ (obstacle.gameplayGeometry);
+  return sample.songTimeMs >= Number(obstacle.intervalStartTimestampMs) && sample.songTimeMs <= Number(obstacle.intervalEndTimestampMs) && sample.sx >= Number(geometry.x) - 0.5 && sample.sx <= Number(geometry.x) + Number(geometry.width) - 0.5 && sample.sy >= 2.5 - Number(geometry.y) - Number(geometry.height) && sample.sy <= 2.5 - Number(geometry.y);
 }
 
 /**
@@ -37,12 +37,12 @@ export function pointContactsObstacle(obstacle, sample) {
 export function clipNoseSegment(obstacle, first, second) {
   const dt = second.songTimeMs - first.songTimeMs;
   if (!(dt > 0)) return null;
-  const geometry = /** @type {DataRecord} */ (obstacle.geometry);
+  const geometry = /** @type {DataRecord} */ (obstacle.gameplayGeometry);
   let low = 0; let high = 1;
   for (const [origin, delta, minimum, maximum] of [
     [first.songTimeMs, dt, Number(obstacle.intervalStartTimestampMs), Number(obstacle.intervalEndTimestampMs)],
     [first.sx, second.sx - first.sx, Number(geometry.x) - 0.5, Number(geometry.x) + Number(geometry.width) - 0.5],
-    [first.sy, second.sy - first.sy, Number(geometry.y) - 0.5, Number(geometry.y) + Number(geometry.height) - 0.5]
+    [first.sy, second.sy - first.sy, 2.5 - Number(geometry.y) - Number(geometry.height), 2.5 - Number(geometry.y)]
   ]) {
     if (delta === 0) { if (origin < minimum || origin > maximum) return null; continue; }
     const a = (minimum - origin) / delta; const b = (maximum - origin) / delta;

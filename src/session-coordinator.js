@@ -12,7 +12,7 @@ import {
   readinessStates,
   rulesetIds
 } from "@aerobeat/web-contracts";
-import { isFlowObstacleGeometry, isFlowObstacleGridMask, maximumFlowObstaclesPerChart } from "@aerobeat/web-contracts/flow-obstacle-contracts";
+import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import {
   cloneGameplayData,
@@ -915,7 +915,7 @@ function normalizeEvents(value, selectedVariant) {
   const lineageOwners = new Set();
   const result = value.map((entry) => {
     const envelope = requireRecord(entry, "content_event_invalid");
-    if (envelope.schema !== "aerobeat/resolved_content_event" || envelope.version !== 2) throw gameplayError("content_event_invalid", "Resolved content events must use version 2");
+    if (envelope.schema !== "aerobeat/resolved_content_event" || envelope.version !== 3) throw gameplayError("content_event_invalid", "Resolved content events must use version 3");
     const authoredBeat = envelope.authoredBeat === undefined ? null : requireRecord(envelope.authoredBeat, "authored_beat_invalid");
     if (authoredBeat !== null && ["centerTimestampMs", "intervalStartTimestampMs", "intervalEndTimestampMs", "endTimestampMs"].some((key) => Object.hasOwn(authoredBeat, key))) throw gameplayError("authored_beat_invalid", "Authored beats cannot own resolved timestamps");
     const eventId = requireString(envelope.eventId, "event_id_invalid");
@@ -934,7 +934,7 @@ function normalizeEvents(value, selectedVariant) {
     }
     return event;
   });
-  if (result.filter((event) => event.type === "obstacle").length > maximumFlowObstaclesPerChart) throw gameplayError("event_obstacle_limit_exceeded", "Flow obstacle count exceeds the gameplay limit");
+  if (result.filter((event) => event.type === "obstacle").length > maximumObstaclesPerChart) throw gameplayError("event_obstacle_limit_exceeded", "Flow obstacle count exceeds the gameplay limit");
   result.sort(eventOrder);
   return Object.freeze(result);
 }
@@ -980,7 +980,7 @@ function validateFlowNonNote(event, type) {
   if (type === "bomb") { requireGridCell(event.placement, "event_placement_invalid"); return; }
   if (type === "obstacle") {
     validateFlowInterval(event, "event_obstacle_invalid");
-    if (!isFlowObstacleGeometry(event.geometry) || !isFlowObstacleGridMask(event.gridMask, /** @type {import("@aerobeat/web-contracts/flow-obstacle-contracts").AeroFlowObstacleGeometry} */ (event.geometry))) throw gameplayError("event_obstacle_invalid", "Flow obstacle source geometry and derived mask must agree");
+    if (!isObstacleSourceGeometry(event.sourceGeometry) || !isObstacleGameplayGeometry(event.gameplayGeometry) || !isObstacleGridMask(event.gridMask, /** @type {import("@aerobeat/web-contracts/obstacle-contracts").AeroObstacleGameplayGeometry} */ (event.gameplayGeometry))) throw gameplayError("event_obstacle_invalid", "Obstacle source evidence, normalized gameplay geometry, and derived mask must agree");
     return;
   }
   if (type === "arc") {
