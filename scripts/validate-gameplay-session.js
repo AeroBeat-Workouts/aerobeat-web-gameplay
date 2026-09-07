@@ -127,6 +127,32 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
 }
 
+// Purpose-aware configuration never publishes Play calibration for Test and preserves an active Visual Test across exact ruleset replacement.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "purpose-aware-visual-test", instanceId: "game-a" });
+  const publications = [];
+  coordinator.subscribe((snapshot) => publications.push({ state: snapshot.session.state, purpose: snapshot.session.purpose, rulesetId: snapshot.session.rulesetId, timelinePositionMs: snapshot.session.timelinePositionMs }));
+  publications.length = 0;
+  const visualConfiguration = { purpose: "visual_test" };
+  coordinator.configureContent(config([], variant("flow_grid_v2", null, "visual-flow")), visualConfiguration);
+  assert.deepEqual(publications, [{ state: "idle", purpose: "visual_test", rulesetId: "flow_grid_v2", timelinePositionMs: 0 }]);
+  coordinator.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-a", generation: 1, state: "owned", resources: ["audio"] });
+  coordinator.requestStart(0, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" });
+  coordinator.advance({ timestampMs: 400, clock: clock(400, true, 2000) });
+  publications.length = 0;
+  coordinator.configureContent(config([], variant("boxing_spatial_grid_v1", "row_family_balanced_height_v1", "visual-grid")), visualConfiguration);
+  assert.deepEqual(publications, [{ state: "playing", purpose: "visual_test", rulesetId: "boxing_spatial_grid_v1", timelinePositionMs: 400 }]);
+  assert.equal(coordinator.getSnapshot().session.calibrationId, null);
+  assert.equal(coordinator.getSnapshot().session.ranked, false);
+  assert.throws(() => coordinator.configureContent(config([]), { purpose: "visual_test", extra: true }), /unknown or symbolic fields/u);
+  assert.throws(() => coordinator.configureContent(config([]), { purpose: "invalid" }), /purpose is invalid/u);
+  const accessorOptions = {};
+  let accessorCalls = 0;
+  Object.defineProperty(accessorOptions, "purpose", { enumerable: true, get() { accessorCalls += 1; return "visual_test"; } });
+  assert.throws(() => coordinator.configureContent(config([]), accessorOptions), /accessors or hidden fields/u);
+  assert.equal(accessorCalls, 0);
+}
+
 // Explicit Play restart remains calibration-gated while the legacy one-argument request stays compatible.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "explicit-play" });

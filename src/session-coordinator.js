@@ -136,9 +136,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   });
   return service;
 
-  /** @param {GameplayContentConfiguration} configuration */
-  function configureContent(configuration) {
+  /** @param {GameplayContentConfiguration} configuration @param {unknown} [options] */
+  function configureContent(configuration, options) {
     assertOpen();
+    const nextPurpose = normalizeContentConfigurationPurpose(options);
+    const preserveVisualTest = nextPurpose === "visual_test" && sessionPurpose === "visual_test" && (state === "playing" || state === "paused_manual");
+    const preservedVisualTestState = state;
+    const preservedVisualTestPauseReason = pauseReason;
+    const preservedVisualTestTimelinePositionMs = timelinePositionMs;
     const source = requireRecord(configuration, "content_configuration_invalid", 1500000);
     const nextPackageId = requireString(source.packageId, "content_package_invalid");
     const nextVariant = normalizeVariant(source.selectedVariant);
@@ -157,9 +162,19 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
-    sessionPurpose = "play";
-    state = "calibrating";
-    pauseReason = "calibration_required";
+    sessionPurpose = nextPurpose;
+    if (nextPurpose === "visual_test") {
+      state = preserveVisualTest ? preservedVisualTestState : "idle";
+      pauseReason = preserveVisualTest ? preservedVisualTestPauseReason : null;
+      if (preserveVisualTest) timelinePositionMs = preservedVisualTestTimelinePositionMs;
+      calibrationId = null;
+      invalidatedCalibrationId = null;
+      safetyReady = false;
+      freshCalibrationRequired = true;
+    } else {
+      state = "calibrating";
+      pauseReason = "calibration_required";
+    }
     generation += 1;
     publish(null);
     return snapshot;
@@ -826,6 +841,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function profileForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).profileIdentity); }
   /** @param {DataRecord} event @returns {DataRecord} */
   function scoringSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).scoringSettings); }
+  /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
+  function normalizeContentConfigurationPurpose(value) {
+    if (value === undefined) return "play";
+    const source = requireDataRecordFields(value, "content_configuration_options_invalid", ["purpose"]);
+    if (source.purpose !== "play" && source.purpose !== "visual_test") throw gameplayError("content_configuration_purpose_invalid", "Content configuration purpose is invalid");
+    return source.purpose;
+  }
   /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
   function normalizeStartPurpose(value) {
     if (value === undefined) return "play";
