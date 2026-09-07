@@ -16,7 +16,7 @@ assert.equal(content.state, "ready");
 assert.equal(content.variants.length, 5);
 const boxingVariant = content.variants.find((entry) => entry.rulesetId === "boxing_spatial_grid_v1" && entry.recipeId === "cut_family_source_height_v1");
 assert.ok(boxingVariant);
-runtime.selectVariant(boxingVariant.variantId, { modifierIds: [] });
+await runtime.selectVariant(boxingVariant.variantId, { modifierIds: [] });
 content = runtime.getSnapshot();
 
 const gameplay = createAeroGameplaySessionCoordinator({ sessionId: "public-integration" });
@@ -38,7 +38,7 @@ assert.doesNotThrow(() => JSON.parse(JSON.stringify(gameplay.getSnapshot())));
 
 const flowVariant = content.variants.find((entry) => entry.rulesetId === "flow_grid_v2");
 assert.ok(flowVariant);
-runtime.selectVariant(flowVariant.variantId, { modifierIds: [] });
+await runtime.selectVariant(flowVariant.variantId, { modifierIds: [] });
 const flowContent = runtime.getSnapshot();
 const flowObstacle = flowContent.resolvedEvents.find((entry) => entry.authoredBeat?.type === "obstacle");
 assert.deepEqual(JSON.parse(JSON.stringify({ centerTimestampMs: flowObstacle?.centerTimestampMs, intervalEndTimestampMs: flowObstacle?.intervalEndTimestampMs, sourceGeometry: flowObstacle?.authoredBeat?.sourceGeometry, gameplayGeometry: flowObstacle?.authoredBeat?.gameplayGeometry, gridMask: flowObstacle?.authoredBeat?.gridMask })), { centerTimestampMs: 1000, intervalEndTimestampMs: 1500, sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",x:0,y:1,width:2,height:2},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:0,y:0,width:2,height:2},gridMask:[0,1,4,5] }, "content runtime exposes source evidence and canonical obstacle geometry");
@@ -68,19 +68,21 @@ async function makePackage(audioHash) {
     const contentHash = hashJson({ beats, recipeId, rulesetId, sourceHash });
     charts.push({ schemaId: "aerobeat.chart.boxing.v1", schemaVersion: 1, recordVersion: 1, chartId: `chart-${token}`, chartName: token, mode: "boxing", difficulty: "Expert", prototype: { contractId: "aerobeat.boxing.prototype.v1", recipeId, recipeVersion: "1.0.0", rulesetId, rulesetVersion: "1.0.0", sourceHash, recipeHash: `sha256:${"1".repeat(64)}`, rulesetHash: `sha256:${"2".repeat(64)}`, contentHash: `sha256:${contentHash}`, modifiers: [], regenerationRequiredFor: [] }, beats });
   }
-  charts.push({ schemaId: "aerobeat.chart.flow.v3", schemaVersion: 3, recordVersion: 2, rulesetId: "flow_grid_v2", chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", beats: [
+  const flowBeats = [
     { start: 1, type: "note", hand: "left", placement: 4, direction: 1 },
     { start: 1.5, type: "bomb", placement: 3 },
     { start:2,end:3,type:"obstacle",sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",x:0,y:1,width:2,height:2},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:0,y:0,width:2,height:2},gridMask:[0,1,4,5] },
     { start: 3, end: 4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 },
     { start: 4, end: 4.5, type: "burst", hand: "right", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 3 }
-  ] });
+  ];
+  const flowContentHash = `sha256:${hashJson({ beats: flowBeats, rulesetId: "flow_grid_v2", notePalette: null })}`;
+  charts.push({ schemaId: "aerobeat.chart.flow.v4", schemaVersion: 4, recordVersion: 2, rulesetId: "flow_grid_v2", chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", notePalette: null, contentHash: flowContentHash, beats: flowBeats });
   return {
-    schemaId: "aerobeat.song-package.v3", schemaVersion: 3, packageVersion: "3.0.0", packageId: "gameplay-public-package", songId: "gameplay-public-song", songName: "Gameplay Public Integration",
-    source: { provider: "local", sourceId: "gameplay-public", sourceVersionHash: "public-version", difficulty: "Expert", sourceDifficultyPath: "Expert.dat", sourceHash, obstacleContract: "normalized_obstacle_v2" },
+    schemaId: "aerobeat.song-package.v4", schemaVersion: 4, packageVersion: "4.0.0", packageId: "gameplay-public-package", songId: "gameplay-public-song", songName: "Gameplay Public Integration", notePalette: null,
+    source: { provider: "local", sourceId: "gameplay-public", sourceVersionHash: "public-version", difficulty: "Expert", sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, sourceHash, obstacleContract: "normalized_obstacle_v2" },
     song: { schemaId: "aerobeat.song.v1", schemaVersion: 1, recordVersion: 1, songId: "gameplay-public-song", songName: "Gameplay Public Integration", durationSec: 10, audio: { filePath: "song.ogg", contentHash: `sha256:${audioHash}` }, timing: { anchorMs: 0, tempoSegments: [{ startBeat: 0, bpm: 120 }], stopSegments: [], timeSignatureSegments: [{ startBeat: 0, numerator: 4, denominator: 4 }] } },
     charts,
     sets: charts.map((chart, index) => ({ schemaId: "aerobeat.set.v1", schemaVersion: 1, recordVersion: 1, setId: `set-${index}`, setName: chart.chartName, songId: "gameplay-public-song", chartId: chart.chartId })),
-    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: {}, presentationSuggestion: null
+    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, flow: [{ notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
   };
 }
