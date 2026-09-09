@@ -1,10 +1,18 @@
 // @ts-check
 
+import { Sha256 } from "@aerobeat/web-hash";
+
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
 /** @typedef {"left_wrist" | "right_wrist"} WristName */
 /** @typedef {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,sourceIdentity:string,calibrationId:string,sx:number,sy:number}>} ColliderSample */
 
+export const maximumColliderSampleFreshnessMs = 150;
 export const maximumColliderSampleGapMs = 150;
+export const flowColliderSettingsBounds = Object.freeze({
+  colliderRadius: Object.freeze({ minimum: 0, maximum: 0.5 }),
+  directionToleranceDegrees: Object.freeze({ minimum: 0, maximum: 90 }),
+  timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 })
+});
 export const defaultFlowColliderSettings = Object.freeze({
   schema: "aerobeat/flow_collider_settings",
   version: 1,
@@ -14,6 +22,32 @@ export const defaultFlowColliderSettings = Object.freeze({
   directionToleranceDegrees: 45,
   timingWindowMs: 180
 });
+
+const SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs"]);
+
+/**
+ * Construct one exact immutable settings record. Omission selects defaults; supplied
+ * values must provide every field as own enumerable data with no extras/accessors.
+ * @param {unknown} [value]
+ */
+export function createFlowColliderSettings(value = defaultFlowColliderSettings) {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new TypeError("Flow Collider settings must be a plain record");
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== SETTING_KEYS.length || keys.some((key) => typeof key !== "string" || !SETTING_KEYS.includes(key))) throw new TypeError("Flow Collider settings require every exact field and no extras");
+  /** @type {Record<string, unknown>} */ const record = {};
+  for (const key of SETTING_KEYS) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Flow Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
+  if (record.schema !== "aerobeat/flow_collider_settings" || record.version !== 1 || record.algorithm !== "swept_athlete_plane_v1" || typeof record.enforceAuthoredDirection !== "boolean") throw new TypeError("Flow Collider settings require the exact v1 algorithm contract");
+  const colliderRadius = boundedSetting(record.colliderRadius, flowColliderSettingsBounds.colliderRadius, "collider radius");
+  const directionToleranceDegrees = boundedSetting(record.directionToleranceDegrees, flowColliderSettingsBounds.directionToleranceDegrees, "direction tolerance");
+  const timingWindowMs = boundedSetting(record.timingWindowMs, flowColliderSettingsBounds.timingWindowMs, "timing window");
+  return Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs });
+}
+
+/** @param {unknown} value @param {Readonly<{minimum:number,maximum:number}>} bounds @param {string} label */
+function boundedSetting(value, bounds, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < bounds.minimum || value > bounds.maximum) throw new RangeError(`Flow Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
+
+/** @param {unknown} settings */
+export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); return `sha256:${new Sha256().update(JSON.stringify(SETTING_KEYS.map((key) => exact[key]))).digestHex()}`; }
 
 const TARGET_HALF_EXTENT = 0.375;
 const MINIMUM_DIRECTION_TRAVEL = 0.05;
@@ -36,7 +70,7 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
   const point = /** @type {DataRecord} */ (anchor);
   if (point.valid !== true || typeof point.confidence !== "number" || point.confidence < 0.5 || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1 || point.calibrationId !== evidence.calibrationId || point.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
   const ageMs = frameTimestampMs - evidence.measurementTimestampMs;
-  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maximumColliderSampleGapMs) return null;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= maximumColliderSampleFreshnessMs) return null;
   return Object.freeze({ songTimeMs: timelinePositionMs - ageMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * point.x - 0.5, sy: 2.5 - 3 * point.y });
 }
 

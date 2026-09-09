@@ -3,6 +3,7 @@
 import { serviceIds } from "@aerobeat/web-contracts";
 
 export { createAeroGameplaySessionCoordinator } from "./session-coordinator.js";
+export { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsBounds, flowColliderSettingsIdentity, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs } from "./flow-collider-collision.js";
 export { canonicalPrototypeProfileJson, createAeroPrototypeProfileRegistry, sha256PrototypeProfileHex } from "./prototype-profile-registry.js";
 
 /** @type {"aero.gameplay"} */

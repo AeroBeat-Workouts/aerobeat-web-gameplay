@@ -1,6 +1,6 @@
 // @ts-check
 import assert from "node:assert/strict";
-import { createAeroGameplaySessionCoordinator } from "../src/index.js";
+import { createAeroGameplaySessionCoordinator, createFlowColliderSettings, defaultFlowColliderSettings as publicDefaultFlowColliderSettings, flowColliderSettingsBounds, flowColliderSettingsIdentity, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs } from "../src/index.js";
 import { clipWristSegmentToTarget, defaultFlowColliderSettings, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget, targetCenterForPlacement } from "../src/flow-collider-collision.js";
 
 const HASH="a".repeat(64);
@@ -16,6 +16,7 @@ const config=(events,colliderSettings=settings())=>({packageId:"package",selecte
 const clock=(ms,playing)=>({contextTimeSeconds:ms/1000,positionSeconds:ms/1000,playing});
 function ready(events,colliderSettings=settings()){const c=createAeroGameplaySessionCoordinator({sessionId:"collider-test",countdownStepMs:1});c.configureContent(config(events,colliderSettings));c.advance({timestampMs:0,clock:clock(0,false),input:input(0,null)});assert.equal(c.requestStart(0).accepted,true);c.advance({timestampMs:1,clock:clock(0,false)});c.advance({timestampMs:2,clock:clock(0,false)});c.advance({timestampMs:3,clock:clock(0,false)});assert.equal(c.getSnapshot().session.state,"playing");return c;}
 function send(c,wallMs,songMs,left,right,nose,sourceIdentity="camera-a",frameId=`f-${wallMs}-${songMs}`){const sample=evidence(frameId,wallMs,left,right,nose);c.advance({timestampMs:wallMs,clock:clock(songMs,true),input:input(wallMs,sample,{sourceIdentity})});return sample;}
+function invalidateWrist(sample,name){const wrist=sample.anchors.find((entry)=>entry.anchor===name);wrist.valid=false;wrist.x=null;wrist.y=null;wrist.cell=null;wrist.subcell=null;return sample;}
 
 // Pure canonical footprint: inside, exact tangent, outside, and swept tunnelling.
 {
@@ -27,16 +28,17 @@ function send(c,wallMs,songMs,left,right,nose,sourceIdentity="camera-a",frameId=
   assert.equal(pointContactsFlowTarget(event,sample(1180.001,1,1),.125,180),false);
   assert.equal(pointContactsFlowTarget(event,sample(1000,1.500001,1),.125,180),false);
   assert.ok(clipWristSegmentToTarget(event,sample(900,-.5,1,900,"a"),sample(1000,2.5,1,1000,"b"),.125,180));
-  assert.equal(clipWristSegmentToTarget(event,sample(900,-.5,1,900,"a"),sample(1051,2.5,1,1051,"b"),.125,180),null,">150ms gap cannot tunnel");
-  assert.ok(clipWristSegmentToTarget(event,sample(850,-.5,1,850,"a"),sample(1000,2.5,1,1000,"b"),.125,180),"150ms gap remains continuous");
+  assert.ok(clipWristSegmentToTarget(event,sample(851,-.5,1,851,"a149"),sample(1000,2.5,1,1000,"b149"),.125,180),"149ms gap remains continuous");
+  assert.ok(clipWristSegmentToTarget(event,sample(850,-.5,1,850,"a150"),sample(1000,2.5,1,1000,"b150"),.125,180),"150ms gap remains continuous");
+  assert.equal(clipWristSegmentToTarget(event,sample(849,-.5,1,849,"a151"),sample(1000,2.5,1,1000,"b151"),.125,180),null,">150ms gap cannot tunnel");
 }
 
 // Measured-only extraction rejects stale/future/invalid/bounds/calibration and source omissions.
 {
   const sample=evidence("frame",1000,[1,1]); const wrapped={sourceIdentity:"camera-a"};
   assert.ok(measuredColliderSample(sample,wrapped,"left_wrist",1000,1000));
-  assert.ok(measuredColliderSample(sample,wrapped,"left_wrist",1150,1150));
-  assert.equal(measuredColliderSample(sample,wrapped,"left_wrist",1151,1151),null);
+  assert.ok(measuredColliderSample(sample,wrapped,"left_wrist",1149.999,1149.999));
+  assert.equal(measuredColliderSample(sample,wrapped,"left_wrist",1150,1150),null);
   assert.equal(measuredColliderSample(sample,wrapped,"left_wrist",999,999),null);
   assert.equal(measuredColliderSample({...sample,provenance:"predicted"},wrapped,"left_wrist",1000,1000),null);
   assert.equal(measuredColliderSample(sample,{},"left_wrist",1000,1000),null);
@@ -53,6 +55,7 @@ function send(c,wallMs,songMs,left,right,nose,sourceIdentity="camera-a",frameId=
   assert.equal(isContinuousColliderSegment(first,{...first,songTimeMs:1000,measurementTimestampMs:1000,sourceFrameId:"b",sourceIdentity:"other"}),false);
   assert.equal(isContinuousColliderSegment(first,{...first,songTimeMs:1000,measurementTimestampMs:900,sourceFrameId:"b"}),false);
   assert.equal(isContinuousColliderSegment(first,{...first,songTimeMs:1000,measurementTimestampMs:1000,sourceFrameId:"a"}),false);
+  const lower=measuredColliderSample(evidence("lower",900,[1,0]),{sourceIdentity:"camera-a"},"left_wrist",900,900);const upper=measuredColliderSample(evidence("upper",1000,[1,1]),{sourceIdentity:"camera-a"},"left_wrist",1000,1000);assert.equal(matchesAuthoredDirection("up",lower,upper,0),true,"input y-down is converted once to authored up-positive canonical sy");assert.equal(matchesAuthoredDirection("down",lower,upper,45),false);
 }
 
 // Default overlap-only permits a stationary wrist and ignores the authored arrow.
@@ -61,6 +64,15 @@ function send(c,wallMs,songMs,left,right,nose,sourceIdentity="camera-a",frameId=
   send(c,1000,1000,[1,1],[3,1],[3,2]);
   assert.deepEqual(c.getJudgements().map(j=>[j.eventId,j.result,j.timingOffsetMs]),[["stationary","hit",0]]);
   assert.equal(c.getScorePartitions()[0].ranked,false);assert.equal(c.getScorePartitions()[0].localOnly,true);assert.match(c.getScorePartitions()[0].flowColliderSettingsIdentity,/^sha256:[a-f0-9]{64}$/u);
+}
+
+// Each wrist is evaluated independently for owned notes and either-wrist bombs.
+{
+  for(const [owner,invalid] of [["left","right_wrist"],["right","left_wrist"]]){
+    const placement=owner==="left"?5:6;const left=owner==="left"?[1,1]:[-.4,1];const right=owner==="right"?[2,1]:[3.4,1];
+    const noteRun=ready([beat(`independent-${owner}`,1000,"note",{hand:owner,placement})]);const noteSample=invalidateWrist(evidence(`independent-${owner}`,1000,left,right,[3,2]),invalid);noteRun.advance({timestampMs:1000,clock:clock(1000,true),input:input(1000,noteSample)});assert.equal(noteRun.getJudgements()[0].result,"hit",`${owner} note scores with other wrist invalid`);
+    const bombRun=ready([beat(`bomb-${owner}`,1000,"bomb",{placement})]);const bombSample=invalidateWrist(evidence(`bomb-${owner}`,1000,left,right,[3,2]),invalid);bombRun.advance({timestampMs:1000,clock:clock(1000,true),input:input(1000,bombSample)});assert.equal(bombRun.getHazardOutcomes()[0].result,"contact",`${owner} wrist detonates with other wrist invalid`);
+  }
 }
 
 // Optional direction is run-locked, affects identity, and misses only after strict late bound.
@@ -91,6 +103,8 @@ function send(c,wallMs,songMs,left,right,nose,sourceIdentity="camera-a",frameId=
 {
   const c=ready([beat("wall-note",1000,"note",{hand:"left",placement:5}),wall("wall-a"),wall("wall-b")]);send(c,900,900,[-.5,1],[3,1],[0,1]);send(c,1000,1000,[1,1],[3,1],[2,1]);assert.equal(c.getScorePartitions()[0].hits,1);assert.equal(c.getScorePartitions()[0].combo,0);assert.equal(c.getScorePartitions()[0].obstacleContacts,1);send(c,1100,1100,[1,1],[3,1],[2,1]);assert.deepEqual(c.getHazardOutcomes().filter(o=>o.kind==="wall").map(o=>[o.eventId,o.result,o.consequenceApplied]),[["wall-a","contact",true],["wall-b","contact",false]]);
   const wristsOnly=ready([wall("wall-a")]);send(wristsOnly,900,900,[1,1],[1,1],[0,1]);send(wristsOnly,1000,1000,[1,1],[1,1],[0,1]);send(wristsOnly,1100,1100,[1,1],[1,1],[0,1]);assert.equal(wristsOnly.getHazardOutcomes()[0].result,"avoided");
+  const freshNose=ready([wall("wall-a")]);const freshSample=evidence("fresh-nose",1000,[-.4,1],[3.4,1],[1,1]);freshNose.advance({timestampMs:1149.999,clock:clock(1149.999,true),input:input(1000,freshSample)});assert.equal(freshNose.getHazardOutcomes()[0].result,"contact","nose age below 150ms remains fresh");
+  const staleNose=ready([wall("wall-a")]);const staleSample=evidence("stale-nose",1000,[-.4,1],[3.4,1],[1,1]);staleNose.advance({timestampMs:1150,clock:clock(1150,true),input:input(1000,staleSample)});assert.notEqual(staleNose.getHazardOutcomes()[0]?.result,"contact","nose age exactly 150ms is stale");
 }
 
 // Complete dual-wrist passage avoids a bomb; a gap is explicitly unevaluated.
@@ -103,6 +117,13 @@ function send(c,wallMs,songMs,left,right,nose,sourceIdentity="camera-a",frameId=
 {
   for(const kind of ["duplicate","rollback","source"]){const c=ready([beat(kind,1000,"note",{hand:"left",placement:5})]);send(c,900,900,[-.5,1],[3,1],[3,2],"camera-a","baseline");if(kind==="duplicate")send(c,1000,1000,[2,1],[3,1],[3,2],"camera-a","baseline");else if(kind==="rollback"){const rollback=evidence("rollback",899,[2,1],[3,1],[3,2]);c.advance({timestampMs:1000,clock:clock(1000,true),input:input(899,rollback)});}else send(c,1000,1000,[2,1],[3,1],[3,2],"camera-b","changed");assert.equal(c.getJudgements().length,0,kind);}
   const c=ready([beat("reset",1000,"note",{hand:"left",placement:5})]);send(c,900,900,[-.5,1],[3,1],[3,2]);c.reset(901);assert.equal(c.getSnapshot().session.state,"calibrating");
+}
+
+// Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
+{
+  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300}});
+  assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
+  assert.throws(()=>createFlowColliderSettings({...publicDefaultFlowColliderSettings,extra:true}),/every exact field/u);const accessor={...publicDefaultFlowColliderSettings};Object.defineProperty(accessor,"colliderRadius",{enumerable:true,get(){throw new Error("must not execute");}});assert.throws(()=>createFlowColliderSettings(accessor),/accessors/u);
 }
 
 // Bounded settings reject malformed/ranked input without mutation; Flow Grid keeps its old matcher and identity.

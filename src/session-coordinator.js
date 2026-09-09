@@ -13,9 +13,8 @@ import {
   rulesetIds
 } from "@aerobeat/web-contracts";
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
-import { Sha256 } from "@aerobeat/web-hash";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
-import { clipWristSegmentToTarget, defaultFlowColliderSettings, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget } from "./flow-collider-collision.js";
+import { clipWristSegmentToTarget, createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget } from "./flow-collider-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -633,7 +632,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
-    if (!sample || sample.calibrationId !== calibrationId || !lastInput || (variant.rulesetId === FLOW_COLLIDER_RULESET && typeof lastInput.sourceIdentity !== "string")) { previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput || (variant.rulesetId === FLOW_COLLIDER_RULESET && (typeof lastInput.sourceIdentity !== "string" || timestampMs - sample.measurementTimestampMs >= maximumColliderSampleFreshnessMs))) { previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
     if (variant.rulesetId === FLOW_COLLIDER_RULESET && lastObstacleSourceIdentity !== null && lastObstacleSourceIdentity !== lastInput.sourceIdentity) { previousNoseSample = null; occupiedObstacleIds.clear(); lastObstacleSourceIdentity = String(lastInput.sourceIdentity); finalizeObstacles(obstacles); return; }
     if (variant.rulesetId === FLOW_COLLIDER_RULESET) lastObstacleSourceIdentity = String(lastInput.sourceIdentity);
     const prior = previousNoseSample;
@@ -729,8 +728,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!variant || variant.rulesetId !== FLOW_COLLIDER_RULESET || !latestEvidence || !lastInput) { finalizeColliderEvents(); return; }
     const left = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "left_wrist", timelinePositionMs, timestampMs);
     const right = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right_wrist", timelinePositionMs, timestampMs);
-    if (!left || !right || left.calibrationId !== calibrationId || right.calibrationId !== calibrationId) { clearColliderSamples(); finalizeColliderEvents(); return; }
-    const frame = Object.freeze({ frameId: left.sourceFrameId, measurementTimestampMs: left.measurementTimestampMs, calibrationId: left.calibrationId, sourceIdentity: left.sourceIdentity });
+    const validSample = left ?? right;
+    if (!validSample || validSample.calibrationId !== calibrationId) { clearColliderSamples(); finalizeColliderEvents(); return; }
+    const frame = Object.freeze({ frameId: validSample.sourceFrameId, measurementTimestampMs: validSample.measurementTimestampMs, calibrationId: validSample.calibrationId, sourceIdentity: validSample.sourceIdentity });
     if (lastColliderFrame?.frameId === frame.frameId) {
       if (lastColliderFrame.measurementTimestampMs === frame.measurementTimestampMs && lastColliderFrame.calibrationId === frame.calibrationId && lastColliderFrame.sourceIdentity === frame.sourceIdentity) { finalizeColliderEvents(); return; }
       clearColliderSamples(); finalizeColliderEvents(); return;
@@ -738,13 +738,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
       clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; finalizeColliderEvents(); return;
     }
-    const priorLeft = previousLeftWristSample; const priorRight = previousRightWristSample;
+    const priorLeft = left === null ? null : previousLeftWristSample; const priorRight = right === null ? null : previousRightWristSample;
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
     for (const event of events) {
       if (judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
       const eventSettings = flowColliderSettingsForEvent(event);
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
+      if (current === null) continue;
       const segmentContact = clipWristSegmentToTarget(event, prior, current, Number(eventSettings.colliderRadius), Number(eventSettings.timingWindowMs));
       const pointContact = segmentContact === null && pointContactsFlowTarget(event, current, Number(eventSettings.colliderRadius), Number(eventSettings.timingWindowMs));
       if (!segmentContact && !pointContact) continue;
@@ -766,16 +767,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     finalizeColliderEvents();
   }
 
-  /** @param {ColliderSample} left @param {ColliderSample} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight */
+  /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight */
   function evaluateColliderBombs(left, right, priorLeft, priorRight) {
     for (const bomb of events.filter((event) => event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
       const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const radius = Number(settings.colliderRadius); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = Number(bomb.centerTimestampMs) + windowMs;
       let tracker = bombStates.get(eventId) ?? { leftCoverage: Object.freeze([]), rightCoverage: Object.freeze([]), contactTimelinePositionMs: null, consequenceApplied: false };
-      const leftContinuous = isContinuousColliderSegment(priorLeft, left); const rightContinuous = isContinuousColliderSegment(priorRight, right);
-      if (leftContinuous && priorLeft) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
-      if (rightContinuous && priorRight) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
-      const leftContact = clipWristSegmentToTarget(bomb, priorLeft, left, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, left, radius, windowMs) ? left.songTimeMs : null);
-      const rightContact = clipWristSegmentToTarget(bomb, priorRight, right, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, right, radius, windowMs) ? right.songTimeMs : null);
+      const leftContinuous = left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = right !== null && isContinuousColliderSegment(priorRight, right);
+      if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
+      if (rightContinuous && priorRight && right) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
+      const leftContact = left === null ? null : clipWristSegmentToTarget(bomb, priorLeft, left, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, left, radius, windowMs) ? left.songTimeMs : null);
+      const rightContact = right === null ? null : clipWristSegmentToTarget(bomb, priorRight, right, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, right, radius, windowMs) ? right.songTimeMs : null);
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };
@@ -807,7 +808,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!latestEvidence || !lastInput) return Object.freeze(["no_input"]);
     if (latestEvidence.calibrationId !== calibrationId) return Object.freeze(["calibration_mismatch"]);
     const age = timestampMs - latestEvidence.measurementTimestampMs;
-    if (age < 0 || age > prototypeJudgementDefaults.checkpointFreshnessMs) return Object.freeze(["stale_input"]);
+    if (age < 0 || age >= maximumColliderSampleFreshnessMs) return Object.freeze(["stale_input"]);
     return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
   }
 
@@ -1231,19 +1232,9 @@ function normalizeFlowColliderSettings(value, selectedVariant) {
     if (value !== undefined) throw gameplayError("flow_collider_settings_invalid", "Flow Collider settings require the Flow Colliders ruleset");
     return defaultFlowColliderSettings;
   }
-  if (value === undefined) return defaultFlowColliderSettings;
-  const record = requireDataRecordFields(value, "flow_collider_settings_invalid", ["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs"]);
-  if (Reflect.ownKeys(record).length !== 7 || record.schema !== "aerobeat/flow_collider_settings" || record.version !== 1 || record.algorithm !== "swept_athlete_plane_v1") throw gameplayError("flow_collider_settings_invalid", "Flow Collider settings require the exact v1 algorithm contract");
-  const colliderRadius = boundedColliderNumber(record.colliderRadius, 0, 0.5, "collider radius");
-  const directionToleranceDegrees = boundedColliderNumber(record.directionToleranceDegrees, 0, 90, "direction tolerance");
-  const timingWindowMs = boundedColliderNumber(record.timingWindowMs, 50, 300, "timing window");
-  if (typeof record.enforceAuthoredDirection !== "boolean") throw gameplayError("flow_collider_settings_invalid", "Direction enforcement must be boolean");
-  return Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs });
+  try { return createFlowColliderSettings(value); }
+  catch (error) { throw gameplayError("flow_collider_settings_invalid", error instanceof Error ? error.message : "Flow Collider settings are invalid"); }
 }
-/** @param {unknown} value @param {number} minimum @param {number} maximum @param {string} label */
-function boundedColliderNumber(value, minimum, maximum, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) throw gameplayError("flow_collider_settings_invalid", `Flow Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
-/** @param {DataRecord} settings */
-function flowColliderSettingsIdentity(settings) { return `sha256:${new Sha256().update(JSON.stringify([settings.schema, settings.version, settings.algorithm, settings.colliderRadius, settings.enforceAuthoredDirection, settings.directionToleranceDegrees, settings.timingWindowMs])).digestHex()}`; }
 
 /** @param {unknown} value @returns {readonly DataRecord[]} */
 function normalizeShadowVariants(value) {
