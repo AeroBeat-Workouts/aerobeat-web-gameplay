@@ -126,6 +126,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let previousLeftWristSample = /** @type {ColliderSample | null} */ (null);
   let previousRightWristSample = /** @type {ColliderSample | null} */ (null);
   let lastColliderFrame = /** @type {Readonly<{frameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string}> | null} */ (null);
+  let leftWristBaselineRequired = false;
+  let rightWristBaselineRequired = false;
+  let noseBaselineRequired = false;
   let pendingHazardBreak = false;
   let pendingBombContacts = 0;
   let pendingObstacleContacts = 0;
@@ -527,10 +530,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     freshCalibrationRequired = normalized.upstreamFreshRequired === true || nextCalibrationId === null || recoveryIdMatches;
     safetyReady = (readiness === "ready" || readiness === "countdown") && !trackingPaused && !freshCalibrationRequired;
     if (nextCalibrationId !== calibrationId) {
+      const priorCalibrationId = calibrationId;
       calibrationId = nextCalibrationId;
       latestEvidence = null;
       lastEvidenceFrameId = null;
-      clearContinuousCollisionHistory();
+      clearContinuousCollisionHistory(priorCalibrationId !== null);
     }
     if (safetyReady && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId) invalidatedCalibrationId = null;
     if (normalized.candidate !== null) latestEvidence = /** @type {AeroGameplayEvidenceSnapshot} */ (normalized.candidate);
@@ -561,10 +565,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     lastEvidenceFrameId = null;
     freshCalibrationRequired = true;
     safetyReady = false;
-    previousNoseSample = null;
-    lastObstacleSourceIdentity = null;
-    occupiedObstacleIds.clear();
-    clearColliderSamples();
+    clearContinuousCollisionHistory();
   }
 
   function hasRequiredLease() {
@@ -651,6 +652,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     lastEvidenceFrameId = sample.sourceFrameId;
     latestEvidenceTimelineMs = sample.songTimeMs;
+    if (variant.rulesetId === FLOW_COLLIDER_RULESET && noseBaselineRequired) { noseBaselineRequired = false; previousNoseSample = sample; finalizeObstacles(obstacles); return; }
     if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
@@ -741,16 +743,17 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       clearColliderSamples(); finalizeColliderEvents(); return;
     }
     if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
-      clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; finalizeColliderEvents(); return;
+      clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeColliderEvents(); return;
     }
-    const priorLeft = left === null ? null : previousLeftWristSample; const priorRight = right === null ? null : previousRightWristSample;
+    const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
+    const priorLeft = left === null || seedLeftOnly ? null : previousLeftWristSample; const priorRight = right === null || seedRightOnly ? null : previousRightWristSample;
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
     for (const event of events) {
       if (judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
       const eventSettings = flowColliderSettingsForEvent(event);
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
-      if (current === null) continue;
+      if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
       const segmentContact = clipWristSegmentToTarget(event, prior, current, Number(eventSettings.colliderRadius), Number(eventSettings.timingWindowMs));
       const pointContact = segmentContact === null && pointContactsFlowTarget(event, current, Number(eventSettings.colliderRadius), Number(eventSettings.timingWindowMs));
       if (!segmentContact && !pointContact) continue;
@@ -767,21 +770,21 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
     for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
-    evaluateColliderBombs(left, right, priorLeft, priorRight);
-    previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame;
+    evaluateColliderBombs(left, right, priorLeft, priorRight, !seedLeftOnly, !seedRightOnly);
+    previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
     finalizeColliderEvents();
   }
 
-  /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight */
-  function evaluateColliderBombs(left, right, priorLeft, priorRight) {
+  /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
+  function evaluateColliderBombs(left, right, priorLeft, priorRight, evaluateLeft, evaluateRight) {
     for (const bomb of events.filter((event) => event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
       const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const radius = Number(settings.colliderRadius); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = Number(bomb.centerTimestampMs) + windowMs;
       let tracker = bombStates.get(eventId) ?? { leftCoverage: Object.freeze([]), rightCoverage: Object.freeze([]), contactTimelinePositionMs: null, consequenceApplied: false };
-      const leftContinuous = left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = right !== null && isContinuousColliderSegment(priorRight, right);
+      const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
       if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
       if (rightContinuous && priorRight && right) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
-      const leftContact = left === null ? null : clipWristSegmentToTarget(bomb, priorLeft, left, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, left, radius, windowMs) ? left.songTimeMs : null);
-      const rightContact = right === null ? null : clipWristSegmentToTarget(bomb, priorRight, right, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, right, radius, windowMs) ? right.songTimeMs : null);
+      const leftContact = !evaluateLeft || left === null ? null : clipWristSegmentToTarget(bomb, priorLeft, left, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, left, radius, windowMs) ? left.songTimeMs : null);
+      const rightContact = !evaluateRight || right === null ? null : clipWristSegmentToTarget(bomb, priorRight, right, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, right, radius, windowMs) ? right.songTimeMs : null);
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };
@@ -818,7 +821,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; }
-  function clearContinuousCollisionHistory() { clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); }
+  /** @param {boolean} [requireRecoveryBaselines] */
+  function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
+    clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear();
+    if (requireRecoveryBaselines && variant?.rulesetId === FLOW_COLLIDER_RULESET) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
+  }
+  /** @param {ColliderSample | null} left @param {ColliderSample | null} right */
+  function satisfyWristRecoveryBaselines(left, right) { if (left !== null) leftWristBaselineRequired = false; if (right !== null) rightWristBaselineRequired = false; }
 
   function applyPendingColliderHazards() {
     if (!pendingHazardBreak || !variant) return;
@@ -968,7 +977,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */

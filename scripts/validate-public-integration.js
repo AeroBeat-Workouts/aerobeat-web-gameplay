@@ -80,10 +80,10 @@ async function makePackage(audioHash) {
     charts.push({ schemaId: "aerobeat.chart.boxing.v1", schemaVersion: 1, recordVersion: 1, chartId: `chart-${token}`, chartName: token, mode: "boxing", difficulty: "Expert", prototype: { contractId: "aerobeat.boxing.prototype.v1", recipeId, recipeVersion: "1.0.0", rulesetId, rulesetVersion: "1.0.0", sourceHash, recipeHash: `sha256:${"1".repeat(64)}`, rulesetHash: `sha256:${"2".repeat(64)}`, contentHash: `sha256:${contentHash}`, modifiers: [], regenerationRequiredFor: [] }, beats });
   }
   const flowBeats = [
-    { start: 1, type: "note", hand: "left", placement: 4, direction: 1 },
+    { start: 1, type: "note", hand: "left", placement: 4, requiresDirection: true, angleOffset: 0, direction: 1 },
     { start: 1.5, type: "bomb", placement: 3 },
     { start:2,end:3,type:"obstacle",sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",x:0,y:1,width:2,height:2},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:0,y:0,width:2,height:2},gridMask:[0,1,4,5] },
-    { start: 3, end: 4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8 },
+    { start: 3, end: 4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8, headCurveMultiplier: 1, tailCurveMultiplier: 1, midAnchorMode: 0 },
     { start: 4, end: 4.5, type: "burst", hand: "right", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 3 }
   ];
   const rulesetVariants = ["flow_grid_v2", "flow_colliders_v1"];
@@ -95,6 +95,6 @@ async function makePackage(audioHash) {
     song: { schemaId: "aerobeat.song.v1", schemaVersion: 1, recordVersion: 1, songId: "gameplay-public-song", songName: "Gameplay Public Integration", durationSec: 10, audio: { filePath: "song.ogg", contentHash: `sha256:${audioHash}` }, timing: { anchorMs: 0, tempoSegments: [{ startBeat: 0, bpm: 120 }], stopSegments: [], timeSignatureSegments: [{ startBeat: 0, numerator: 4, denominator: 4 }] } },
     charts,
     sets: charts.map((chart, index) => ({ schemaId: "aerobeat.set.v1", schemaVersion: 1, recordVersion: 1, setId: `set-${index}`, setName: chart.chartName, songId: "gameplay-public-song", chartId: chart.chartId })),
-    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, spawnTiming: structuredClone(spawnTiming), boxing: charts.filter((chart) => chart.mode === "boxing").map((chart) => ({ chartId: chart.chartId, spawnTiming: structuredClone(spawnTiming) })), flow: [{ obstacleContract: "normalized_obstacle_v2", rulesetId: "flow_grid_v2", rulesetVariants: ["flow_grid_v2", "flow_colliders_v1"], sourceHash, sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, spawnTiming: structuredClone(spawnTiming), notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
+    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, spawnTiming: structuredClone(spawnTiming), boxing: charts.filter((chart) => chart.mode === "boxing").map((chart) => ({ chartId: chart.chartId, spawnTiming: structuredClone(spawnTiming) })), flow: [{ difficulty: "Expert", events: [], obstacleContract: "normalized_obstacle_v2", rulesetId: "flow_grid_v2", rulesetVariants: ["flow_grid_v2", "flow_colliders_v1"], sourceHash, sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, spawnTiming: structuredClone(spawnTiming), notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
   };
 }
