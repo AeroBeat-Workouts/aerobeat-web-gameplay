@@ -8,6 +8,7 @@ import { createAeroBodyGridService } from "../../aerobeat-web-input/src/index.js
 import { createAeroGameplaySessionCoordinator } from "../src/index.js";
 
 const HASH = "a".repeat(64);
+const spawnTiming = Object.freeze({ schema:"aerobeat/beatsaber_spawn_timing",version:1,algorithm:"beatsaber_core_hjd_v1",bpm:120,noteJumpMovementSpeed:10,noteJumpStartBeatOffset:1,maxHalfJumpDistance:17.999,startHalfJumpDurationBeats:4,minimumHalfJumpDurationBeats:.25,halfJumpDurationBeats:3,reactionTimeMs:1500,jumpDistanceMeters:30 });
 const audioBytes = new TextEncoder().encode("gameplay-public-integration-audio");
 const runtime = createAeroContentRuntime();
 await runtime.loadPackage({ package: await makePackage(hashBytes(audioBytes)), assets: [{ path: "song.ogg", bytes: audioBytes }] });
@@ -78,11 +79,11 @@ async function makePackage(audioHash) {
   const flowContentHash = `sha256:${hashJson({ beats: flowBeats, rulesetId: "flow_grid_v2", notePalette: null })}`;
   charts.push({ schemaId: "aerobeat.chart.flow.v4", schemaVersion: 4, recordVersion: 2, rulesetId: "flow_grid_v2", chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", notePalette: null, contentHash: flowContentHash, beats: flowBeats });
   return {
-    schemaId: "aerobeat.song-package.v4", schemaVersion: 4, packageVersion: "4.0.0", packageId: "gameplay-public-package", songId: "gameplay-public-song", songName: "Gameplay Public Integration", notePalette: null,
-    source: { provider: "local", sourceId: "gameplay-public", sourceVersionHash: "public-version", difficulty: "Expert", sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, sourceHash, obstacleContract: "normalized_obstacle_v2" },
+    schemaId: "aerobeat.song-package.v5", schemaVersion: 5, packageVersion: "5.0.0", packageId: "gameplay-public-package", songId: "gameplay-public-song", songName: "Gameplay Public Integration", notePalette: null,
+    source: { provider: "local", sourceId: "gameplay-public", sourceVersionHash: "public-version", difficulty: "Expert", sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, sourceHash, spawnTiming: structuredClone(spawnTiming), obstacleContract: "normalized_obstacle_v2" },
     song: { schemaId: "aerobeat.song.v1", schemaVersion: 1, recordVersion: 1, songId: "gameplay-public-song", songName: "Gameplay Public Integration", durationSec: 10, audio: { filePath: "song.ogg", contentHash: `sha256:${audioHash}` }, timing: { anchorMs: 0, tempoSegments: [{ startBeat: 0, bpm: 120 }], stopSegments: [], timeSignatureSegments: [{ startBeat: 0, numerator: 4, denominator: 4 }] } },
     charts,
     sets: charts.map((chart, index) => ({ schemaId: "aerobeat.set.v1", schemaVersion: 1, recordVersion: 1, setId: `set-${index}`, setName: chart.chartName, songId: "gameplay-public-song", chartId: chart.chartId })),
-    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, flow: [{ notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
+    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, spawnTiming: structuredClone(spawnTiming), boxing: charts.filter((chart) => chart.mode === "boxing").map((chart) => ({ chartId: chart.chartId, spawnTiming: structuredClone(spawnTiming) })), flow: [{ obstacleContract: "normalized_obstacle_v2", sourceHash, sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, spawnTiming: structuredClone(spawnTiming), notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
   };
 }
