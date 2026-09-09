@@ -257,7 +257,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     cancelCountdown();
     state = "paused_manual";
     pauseReason = boundedReason(reason);
-    previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); clearColliderSamples();
+    clearContinuousCollisionHistory();
     publish(null);
     return snapshot;
   }
@@ -267,6 +267,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     assertConfigured();
     if (state !== "paused_manual" && state !== "paused_tracking") throw gameplayError("session_state_invalid", "Resume requires a paused session");
     advanceTimestamp(atTimestampMs);
+    clearContinuousCollisionHistory();
     if (!hasRequiredLease()) {
       state = "paused_manual";
       pauseReason = "media_lease_unavailable";
@@ -320,10 +321,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         } else {
           state = "paused_manual";
           pauseReason = "audio_clock_not_playing";
+          clearContinuousCollisionHistory();
         }
       } else if (clock.positionMs < previousTimelinePositionMs) {
         state = "paused_manual";
         pauseReason = "audio_clock_rollback";
+        clearContinuousCollisionHistory();
       } else {
         timelinePositionMs = clock.positionMs;
         if (sessionPurpose === "play") {
@@ -368,7 +371,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     timestampMs = nextTimestampMs;
     timelinePositionMs = clock.positionMs;
     if (enteredCompleted) { state = "paused_manual"; pauseReason = "explicit_seek"; }
-    previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); clearColliderSamples();
+    clearContinuousCollisionHistory();
     publish(null);
     return snapshot;
   }
@@ -527,7 +530,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       calibrationId = nextCalibrationId;
       latestEvidence = null;
       lastEvidenceFrameId = null;
-      previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); clearColliderSamples();
+      clearContinuousCollisionHistory();
     }
     if (safetyReady && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId) invalidatedCalibrationId = null;
     if (normalized.candidate !== null) latestEvidence = /** @type {AeroGameplayEvidenceSnapshot} */ (normalized.candidate);
@@ -575,6 +578,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       cancelCountdown();
       state = "paused_manual";
       pauseReason = "media_lease_unavailable";
+      clearContinuousCollisionHistory();
     }
   }
 
@@ -601,6 +605,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       cancelCountdown();
       state = "paused_manual";
       pauseReason = "countdown_audio_not_frozen";
+      clearContinuousCollisionHistory();
       return;
     }
     if (timestampMs - countdownStepStartedAtMs < countdownStepMs) {
@@ -813,6 +818,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; }
+  function clearContinuousCollisionHistory() { clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); }
 
   function applyPendingColliderHazards() {
     if (!pendingHazardBreak || !variant) return;

@@ -113,6 +113,26 @@ function invalidateWrist(sample,name){const wrist=sample.anchors.find((entry)=>e
   assert.equal(run(true),"avoided");assert.equal(run(false),"unevaluated_tracking");
 }
 
+// Audio rollback severs wrist/nose continuity before resume; only a genuine post-resume segment may score.
+{
+  const c=ready([beat("rollback-note",1000,"note",{hand:"left",placement:5}),wall("rollback-wall")]);
+  send(c,900,900,[-.5,1],[3,1],[0,1],"camera-a","pre-rollback");
+  c.advance({timestampMs:950,clock:clock(800,true)});assert.deepEqual([c.getSnapshot().session.state,c.getSnapshot().session.pauseReason],["paused_manual","audio_clock_rollback"]);
+  assert.equal(c.resume(951).accepted,true);c.advance({timestampMs:952,clock:clock(900,false)});c.advance({timestampMs:953,clock:clock(900,false)});c.advance({timestampMs:954,clock:clock(900,false)});assert.equal(c.getSnapshot().session.state,"playing");
+  send(c,1000,1000,[2,1],[3,1],[2,1],"camera-a","first-after-rollback");assert.equal(c.getJudgements().length,0,"first post-rollback frame only seeds wrist history");assert.equal(c.getHazardOutcomes().length,0,"first post-rollback nose frame cannot bridge wall contact");
+  send(c,1050,1050,[1,1],[3,1],[2,1],"camera-a","genuine-after-rollback");assert.equal(c.getJudgements()[0].result,"hit","later same-generation post-resume segment scores normally");send(c,1100,1100,[1,1],[3,1],[2,1],"camera-a","wall-final");assert.notEqual(c.getHazardOutcomes().find((outcome)=>outcome.kind==="wall")?.result,"contact");
+}
+
+// A stopped audio clock also severs continuity before manual recovery.
+{
+  const c=ready([beat("stopped-clock-note",1000,"note",{hand:"left",placement:5})]);send(c,900,900,[-.5,1],[3,1],[3,2],"camera-a","pre-stop");c.advance({timestampMs:950,clock:clock(900,false)});assert.deepEqual([c.getSnapshot().session.state,c.getSnapshot().session.pauseReason],["paused_manual","audio_clock_not_playing"]);assert.equal(c.resume(951).accepted,true);c.advance({timestampMs:952,clock:clock(900,false)});c.advance({timestampMs:953,clock:clock(900,false)});c.advance({timestampMs:954,clock:clock(900,false)});send(c,1000,1000,[2,1],[3,1],[3,2],"camera-a","first-after-stop");assert.equal(c.getJudgements().length,0);
+}
+
+// A normal uninterrupted same-generation segment at the inclusive 150ms gap remains valid.
+{
+  const c=ready([beat("continuous-150",1000,"note",{hand:"left",placement:5})]);send(c,850,850,[-.5,1],[3,1],[3,2],"camera-a","continuous-start");send(c,1000,1000,[2,1],[3,1],[3,2],"camera-a","continuous-end");assert.equal(c.getJudgements()[0].result,"hit");
+}
+
 // Duplicate, rollback, source change, and lifecycle reset cannot fabricate a sweep.
 {
   for(const kind of ["duplicate","rollback","source"]){const c=ready([beat(kind,1000,"note",{hand:"left",placement:5})]);send(c,900,900,[-.5,1],[3,1],[3,2],"camera-a","baseline");if(kind==="duplicate")send(c,1000,1000,[2,1],[3,1],[3,2],"camera-a","baseline");else if(kind==="rollback"){const rollback=evidence("rollback",899,[2,1],[3,1],[3,2]);c.advance({timestampMs:1000,clock:clock(1000,true),input:input(899,rollback)});}else send(c,1000,1000,[2,1],[3,1],[3,2],"camera-b","changed");assert.equal(c.getJudgements().length,0,kind);}
