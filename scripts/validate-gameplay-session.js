@@ -11,7 +11,7 @@ import {
 const HASH = "a".repeat(64);
 
 function variant(rulesetId = "boxing_semantic_track_v1", recipeId = "row_family_balanced_height_v1", id = "variant") {
-  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_grid_v2" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_grid_v2" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { baseVariantId: id } };
+  return { variantId: id, chartId: `chart-${id}`, mode: rulesetId === "flow_colliders_v1" || rulesetId === "flow_grid_v2" ? "flow" : "boxing", rulesetId, recipeId: rulesetId === "flow_colliders_v1" || rulesetId === "flow_grid_v2" ? null : recipeId, modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { baseVariantId: id } };
 }
 
 function event(eventId, centerTimestampMs, type, extra = {}) {
@@ -134,8 +134,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.subscribe((snapshot) => publications.push({ state: snapshot.session.state, purpose: snapshot.session.purpose, rulesetId: snapshot.session.rulesetId, timelinePositionMs: snapshot.session.timelinePositionMs }));
   publications.length = 0;
   const visualConfiguration = { purpose: "visual_test" };
-  coordinator.configureContent(config([], variant("flow_grid_v2", null, "visual-flow")), visualConfiguration);
-  assert.deepEqual(publications, [{ state: "idle", purpose: "visual_test", rulesetId: "flow_grid_v2", timelinePositionMs: 0 }]);
+  coordinator.configureContent(config([], variant("flow_colliders_v1", null, "visual-flow")), visualConfiguration);
+  assert.deepEqual(publications, [{ state: "idle", purpose: "visual_test", rulesetId: "flow_colliders_v1", timelinePositionMs: 0 }]);
   coordinator.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-a", generation: 1, state: "owned", resources: ["audio"] });
   coordinator.requestStart(0, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" });
   coordinator.advance({ timestampMs: 400, clock: clock(400, true, 2000) });
@@ -343,50 +343,11 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getJudgements()[0].result, "hit");
 }
 
-// Flow maps every Beat Saber arrow direction 0..7 into exact eight-way measured evidence.
+// The retired Flow Grid ruleset is no longer an accepted variant input: historical reads are enforced at the authoring/content boundary.
 {
-  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
-  const directionCases = [[0,"up"],[1,"down"],[2,"left"],[3,"right"],[4,"up-left"],[5,"up-right"],[6,"down-left"],[7,"down-right"]];
-  for (const [numericDirection, measuredDirection] of directionCases) {
-    const hit = createAeroGameplaySessionCoordinator({ sessionId: `flow-hit-${numericDirection}` });
-    readyPlaying(hit, [event(`flow-${numericDirection}`, 500, "note", { hand: "left", placement: 5, direction: numericDirection })], flow);
-    const hitSample = evidence(`frame-flow-${numericDirection}`, 3500, []);
-    hitSample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: measuredDirection, provenance: "measured" }];
-    hit.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, hitSample) });
-    assert.deepEqual(hit.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["hit", []]]);
-
-    const miss = createAeroGameplaySessionCoordinator({ sessionId: `flow-miss-${numericDirection}` });
-    readyPlaying(miss, [event(`flow-wrong-${numericDirection}`, 500, "note", { hand: "left", placement: 5, direction: numericDirection })], flow);
-    const missSample = evidence(`frame-flow-wrong-${numericDirection}`, 3500, []);
-    const wrongDirection = directionCases[(numericDirection + 1) % directionCases.length][1];
-    missSample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: wrongDirection, provenance: "measured" }];
-    miss.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, missSample) });
-    assert.deepEqual(miss.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["miss", ["wrong_direction"]]]);
-  }
-}
-
-// Beat Saber dot direction 8 is represented by an omitted direction and needs cell entry only.
-{
-  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-dot" });
-  readyPlaying(coordinator, [event("flow-dot", 500, "note", { hand: "left", placement: 5 })], flow);
-  const dotSample = evidence("frame-flow-dot", 3500, []);
-  dotSample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: "down-right", provenance: "measured" }];
-  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, dotSample) });
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["hit", []]]);
-
-  const noEntry = createAeroGameplaySessionCoordinator({ sessionId: "flow-dot-no-entry" });
-  readyPlaying(noEntry, [event("flow-dot-no-entry", 500, "note", { hand: "left", placement: 5 })], flow);
-  noEntry.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, evidence("frame-flow-dot-no-entry", 3500, [])) });
-  assert.deepEqual(noEntry.getJudgements().map((entry) => [entry.result, entry.diagnostics]), [["miss", ["no_input"]]]);
-
-  for (const invalidDirection of [-1, 8, 9, 1.5, "UP", "up_left", "diagonal", null]) {
-    const invalid = createAeroGameplaySessionCoordinator({ sessionId: `flow-invalid-${String(invalidDirection)}` });
-    assert.throws(() => invalid.configureContent(config([event("invalid-flow", 500, "note", { hand: "left", placement: 5, direction: invalidDirection })], flow)), /Flow note direction is unsupported/u);
-  }
-}
-
-// Boxing spatial targets remain cardinal-only even though measured evidence is eight-way.
+  const gridCoordinator = createAeroGameplaySessionCoordinator({ sessionId: "retired-grid-input" });
+  assert.throws(() => gridCoordinator.configureContent(config([event("grid-retired", 500, "note", { hand: "left", placement: 5 })], variant("flow_grid_v2"))), /Variant ruleset is unsupported/u);
+}// Boxing spatial targets remain cardinal-only even though measured evidence is eight-way.
 {
   const spatial = variant("boxing_spatial_grid_v1", "cut_family_source_height_v1");
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "boxing-diagonal-target" });
@@ -394,21 +355,36 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const sentinel=createAeroGameplaySessionCoordinator({sessionId:"boxing-source-sentinel"});sentinel.configureContent(config([event("sentinel-hook",500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20],sourceCell:-1,entryDirection:"up"}})],spatial));assert.equal(sentinel.getSnapshot().selectedVariant.rulesetId,"boxing_spatial_grid_v1","authoring's explicit -1 source-cell sentinel must survive gameplay validation");const invalidSentinel=createAeroGameplaySessionCoordinator({sessionId:"boxing-invalid-source-sentinel"});assert.throws(()=>invalidSentinel.configureContent(config([event("invalid-sentinel-hook",500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20],sourceCell:-2,entryDirection:"up"}})],spatial)),/source cell/u);
 }
 
-// Flow wrong-direction evidence misses, while non-note source events are explicitly ignored.
+// Non-note Flow source events remain explicitly ignored under the swept colliders ruleset.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-diagnostics" });
-  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
+  const flow = variant("flow_colliders_v1");
   readyPlaying(coordinator, [event("wrong-flow", 500, "note", { hand: "left", placement: 5, direction: "up" }), event("flow-bomb", 900, "bomb", { placement: 6 })], flow);
   const sample = evidence("frame-flow-wrong", 3500, []);
   sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 1, toCell: 5, direction: "down", provenance: "measured" }];
   coordinator.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, sample) });
   coordinator.advance({ timestampMs: 3700, clock: clock(900, true), input: input(3700, null) });
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.diagnostics]), [["wrong-flow", "miss", ["wrong_direction"]], ["flow-bomb", "ignored", []]]);
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["wrong-flow", "miss"]], "unscored expired note commits; the bomb settles separately as a flow hazard outcome");
 }
+// Bombs and walls settle exclusively through flow hazard outcomes under the swept colliders ruleset.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-hazard-settlement" });
+  readyPlaying(coordinator, [event("hazard-bomb", 500, "bomb", { placement: 6 }), canonicalFlowEvent("hazard-wall", 800, { start: 2, end: 4, type: "obstacle", sourceGeometry: { schema: "aerobeat/obstacle_source_geometry", version: 1, coordinateSpace: "beatsaber_v3_obstacle_rect", kind: "v3_rect", x: 0, y: 0, width: 4, height: 1 }, gameplayGeometry: { schema: "aerobeat/obstacle_gameplay_geometry", version: 1, coordinateSpace: "aerobeat_top_left_grid", x: 0, y: 0, width: 4, height: 1 }, gridMask: [0, 1, 2, 3] }, 1200)], variant("flow_colliders_v1"));
+  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, evidence("frame-hazard", 3500, [])) });
+  for (const [wallMs, songMs] of [[4200, 800], [5000, 1250]]) {
+    const sample = evidence(`frame-hazard-${songMs}`, wallMs, []);
 
+    coordinator.advance({ timestampMs: wallMs, clock: clock(songMs, true), input: input(wallMs, sample) });
+  }
+  coordinator.advance({ timestampMs: 6000, clock: clock(1400, true), input: input(6000, null) });
+  const hazards = coordinator.getHazardOutcomes();
+  assert.equal(hazards.some((outcome) => outcome.kind === "bomb"), true, "bomb contact avoided or contacted settles as a hazard outcome");
+  assert.equal(hazards.some((outcome) => outcome.kind === "wall"), true, "wall interval settles as a hazard outcome");
+  assert.deepEqual(coordinator.getJudgements(), [], "bombs and walls never produce synthetic note judgements");
+}
 // Source-geometry Flow obstacles validate transactionally; obstacle truth is separate from note judgements.
 {
-  const flow = variant("flow_grid_v2", "row_family_balanced_height_v1");
+  const flow = variant("flow_colliders_v1", "row_family_balanced_height_v1");
   const sourceGeometry={schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3};const gameplayGeometry={schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3};
   const valid = [
     canonicalFlowEvent("canonical-bomb", 500, { start: 1, type: "bomb", placement: 11 }),
@@ -419,8 +395,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-canonical-non-notes" });
   readyPlaying(coordinator, valid, flow);
   coordinator.advance({ timestampMs: 5000, clock: clock(1300, true), input: input(5000, null) });
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["canonical-bomb", "ignored"], ["canonical-arc", "ignored"], ["canonical-burst", "ignored"]]);
-  assert.equal(coordinator.getObstacleOutcomes()[0].result, "unevaluated_tracking");
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["canonical-arc", "ignored"], ["canonical-burst", "ignored"]], "bombs no longer receive ignored judgements; arcs and bursts remain non-scoring");
+  assert.equal(coordinator.getHazardOutcomes().some((outcome) => outcome.kind === "bomb"), true, "the swept bomb settles through a flow hazard outcome");
+  assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "swept wall contact settles as a flow hazard outcome, not an obstacle outcome");
 
   const stable = createAeroGameplaySessionCoordinator({ sessionId: "flow-invalid-non-note-transaction" });
   stable.configureContent(config([event("stable-bomb", 500, "bomb", { placement: 4 })], flow));
@@ -433,81 +410,41 @@ function readyPlaying(coordinator, events, selected = variant()) {
   for (const candidate of invalid) { assert.throws(() => stable.configureContent(config([candidate], flow))); assert.equal(JSON.stringify(stable.getSnapshot()), before); }
 }
 
-// Sparse 15 fps endpoints retain analytical 25 ms wall collision across one or many display-rate repeats.
 {
-  const flow = variant("flow_grid_v2", null);
-  const sourceGeometry={schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3};const gameplayGeometry={schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3};
-  const walls = [canonicalFlowEvent("a-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", sourceGeometry,gameplayGeometry,gridMask:[1,5,9] }, 725), canonicalFlowEvent("b-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", sourceGeometry,gameplayGeometry,gridMask:[1,5,9] }, 725)];
-  const setNose = (sample, x, y = 0) => { const nose = sample.anchors.find((entry) => entry.anchor === "nose"); nose.x = x; nose.y = y; return sample; };
-  for (const repeatOffsets of [[16], [10, 20, 30, 40, 50]]) {
-    const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `continuous-wall-${repeatOffsets.length}` });
-    readyPlaying(coordinator, [event("combo-note", 500, "note", { hand: "left", placement: 5 }), ...walls], flow);
-    const note = evidence(`combo-frame-${repeatOffsets.length}`, 3500, []);
-    note.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 9, toCell: 5, direction: "down-right", provenance: "measured" }];
-    coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, note) });
-    const first = setNose(evidence(`wall-before-${repeatOffsets.length}`, 3680, []), 0.125);
-    coordinator.advance({ timestampMs: 3680, clock: clock(680, true), input: input(3680, first) });
-    for (const offset of repeatOffsets) coordinator.advance({ timestampMs: 3680 + offset, clock: clock(680 + offset, true), input: input(3680, first) });
-    const second = setNose(evidence(`wall-after-${repeatOffsets.length}`, 3740, []), 0.875);
-    coordinator.advance({ timestampMs: 3740, clock: clock(740, true), input: input(3740, second) });
-    assert.equal(coordinator.getObstacleOutcomes().every(isObstacleOutcome), true);
-    assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => [entry.eventId, entry.result, entry.consequenceApplied]), [["a-wall", "contact", true], ["b-wall", "contact", false]]);
-    const partition = coordinator.getScorePartitions()[0];
-    assert.deepEqual([partition.hits, partition.misses, partition.score, partition.maxCombo, partition.combo, partition.obstacleContacts], [1, 0, 1, 1, 0, 1], "overlapping walls reset one combo with zero score delta and unchanged note counts");
-    assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["combo-note", "hit"]], "obstacles never add or rewrite note judgements");
+  // The sparse/repeated-frame swept wall-collision contract is owned by validate-flow-collider-collision.
+  // Here only the cross-variant boundary is pinned: flow-mode obstacles settle as flow hazard outcomes,
+  // never as legacy obstacle outcomes or synthetic note judgements.
+  const flow = variant("flow_colliders_v1");
+  const geometry = { sourceGeometry: { schema: "aerobeat/obstacle_source_geometry", version: 1, coordinateSpace: "beatsaber_v3_obstacle_rect", kind: "v3_rect", x: 1, y: 0, width: 1, height: 3 }, gameplayGeometry: { schema: "aerobeat/obstacle_gameplay_geometry", version: 1, coordinateSpace: "aerobeat_top_left_grid", x: 1, y: 0, width: 1, height: 3 } };
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "wall-settlement-boundary" });
+  readyPlaying(coordinator, [canonicalFlowEvent("a-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", ...geometry, gridMask: [1, 5, 9] }, 725)], flow);
+  for (const offset of [16, 32, 48]) {
+    const sample = evidence(`frame-${offset}`, 3600 + offset, []);
+    sample.anchors.find((entry) => entry.anchor === "nose").x = 0.125;
+    coordinator.advance({ timestampMs: 3600 + offset, clock: clock(690 + offset / 4, true), input: input(3600 + offset, sample) });
   }
-}
-
-// Repeated valid frames also preserve complete measured avoidance coverage without creating score truth.
+  coordinator.advance({ timestampMs: 5000, clock: clock(900, true), input: input(5000, null) });
+  assert.deepEqual(coordinator.getObstacleOutcomes(), [], "flow walls never emit legacy obstacle outcomes under the colliders ruleset");
+  assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "the wall interval settles exactly once through a flow hazard outcome");
+  assert.equal(coordinator.getJudgements().length, 0, "walls and bombs never produce synthetic note judgements");
+}// Every invalid or discontinuous boundary still severs the sparse interpolation chain.
 {
-  const flow = variant("flow_grid_v2", null);
-  const sourceGeometry={schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3};const gameplayGeometry={schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3};
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "repeated-wall-avoidance" });
-  readyPlaying(coordinator, [canonicalFlowEvent("avoided-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", sourceGeometry,gameplayGeometry,gridMask:[1,5,9] }, 725)], flow);
-  const first = evidence("avoid-before", 4000, []); const firstNose = first.anchors.find((entry) => entry.anchor === "nose"); firstNose.x = 0.125; firstNose.y = 0.5;
-  coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, first) });
-  for (const offset of [10, 20, 30, 40, 50]) coordinator.advance({ timestampMs: 4000 + offset, clock: clock(680 + offset, true), input: input(4000, first) });
-  const second = evidence("avoid-after", 4060, []); const secondNose = second.anchors.find((entry) => entry.anchor === "nose"); secondNose.x = 0.125; secondNose.y = 0.5;
-  coordinator.advance({ timestampMs: 4060, clock: clock(740, true), input: input(4060, second) });
-  assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => entry.result), ["avoided"]);
-  assert.equal(coordinator.getScorePartitions().length, 0);
-  assert.equal(coordinator.getJudgements().length, 0);
-}
-
-// Repeated display advances preserve sustained aggregate occupancy; only a measured leave/re-entry starts another consequence.
-{
-  const flow = variant("flow_grid_v2", null);
-  const sourceGeometry={schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3};const gameplayGeometry={schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3};
-  const wall = canonicalFlowEvent("sustained-wall", 600, { start: 1.2, end: 2.4, type: "obstacle", sourceGeometry,gameplayGeometry,gridMask:[1,5,9] }, 1200);
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "sustained-wall" });
-  readyPlaying(coordinator, [wall], flow);
-  const send = (frameId, measured, timeline, x) => { const sample = evidence(frameId, measured, []); const nose = sample.anchors.find((entry) => entry.anchor === "nose"); nose.x = x; nose.y = 0; coordinator.advance({ timestampMs: measured, clock: clock(timeline, true), input: input(measured, sample) }); return sample; };
-  send("sustained-before", 3500, 500, 0.125);
-  const inside = send("sustained-inside", 3650, 650, 0.5);
-  assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 1);
-  for (const offset of [16, 32, 48]) coordinator.advance({ timestampMs: 3650 + offset, clock: clock(650 + offset, true), input: input(3650, inside) });
-  send("sustained-inside-fresh", 3700, 700, 0.5);
-  assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 1, "repeats and fresh inside samples cannot repeat the overlap consequence");
-  send("sustained-leave", 3800, 800, 0.875);
-  send("sustained-reenter", 3900, 900, 0.5);
-  assert.equal(coordinator.getScorePartitions()[0].obstacleContacts, 2, "measured leave and re-entry deterministically create a new episode");
-  const final = send("sustained-after", 4250, 1250, 0.875);
-  assert.ok(final);
-  assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => entry.result), ["contact"]);
-  const partition = coordinator.getScorePartitions()[0];
-  assert.deepEqual([partition.hits, partition.misses, partition.score, partition.obstacleContacts], [0, 0, 0, 2]);
-  assert.equal(coordinator.getJudgements().length, 0);
-}
-
-// Every invalid or discontinuous boundary still severs the sparse interpolation chain.
-{
-  const flow = variant("flow_grid_v2", null);
+  const flow = variant("flow_colliders_v1");
   const sourceGeometry={schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3};const gameplayGeometry={schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3};
   const wall = () => canonicalFlowEvent("boundary-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", sourceGeometry,gameplayGeometry,gridMask:[1,5,9] }, 725);
   const setNose = (sample, x) => { const nose = sample.anchors.find((entry) => entry.anchor === "nose"); nose.x = x; nose.y = 0; return sample; };
   const assertSevered = (label, insert, secondTimestampMs = 4060, secondCalibrationId = "cal-1") => {
     const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `boundary-${label}` });
     readyPlaying(coordinator, [wall()], flow);
+    const outsideBefore = setNose(evidence(`boundary-outside-${label}`, 3750, []), 0.125);
+    outsideBefore.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
+    coordinator.advance({ timestampMs: 3750, clock: clock(640, true), input: input(3750, outsideBefore) });
+    const insideSample = setNose(evidence(`boundary-inside-${label}`, 3850, []), 0.4);
+    insideSample.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
+    coordinator.advance({ timestampMs: 3850, clock: clock(705, true), input: input(3850, insideSample) });
+    const holdInside = setNose(evidence(`boundary-hold-${label}`, 3950, []), 0.4);
+    holdInside.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
+    coordinator.advance({ timestampMs: 3950, clock: clock(760, true), input: input(3950, holdInside) });
     const first = setNose(evidence("boundary-before", 4000, []), 0.125);
     coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, first) });
     insert(coordinator, first);
@@ -515,7 +452,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     second.calibrationId = secondCalibrationId;
     for (const anchorEntry of second.anchors) anchorEntry.calibrationId = secondCalibrationId;
     coordinator.advance({ timestampMs: secondTimestampMs, clock: clock(740, true), input: input(secondTimestampMs, second, { calibrationId: secondCalibrationId }) });
-    assert.deepEqual(coordinator.getObstacleOutcomes().map((entry) => entry.result), ["unevaluated_tracking"], `${label} must prevent clipping across the boundary`);
+    assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, `${label} must settle the wall exactly once; severs prevent clipping but never duplicate or suppress a settled interval`);
     assert.equal(coordinator.getScorePartitions().length, 0, `${label} uncertainty is nonpenalizing`);
     assert.equal(coordinator.getJudgements().length, 0, `${label} cannot create note truth`);
   };
@@ -529,13 +466,22 @@ function readyPlaying(coordinator, events, selected = variant()) {
 
   const lost = createAeroGameplaySessionCoordinator({ sessionId: "boundary-tracking-loss" });
   readyPlaying(lost, [wall()], flow);
+  const lostOutside = setNose(evidence("lost-outside", 3750, []), 0.125);
+  lostOutside.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
+  lost.advance({ timestampMs: 3750, clock: clock(640, true), input: input(3750, lostOutside) });
+  const lostInside = setNose(evidence("lost-inside", 3850, []), 0.4);
+  lostInside.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
+  lost.advance({ timestampMs: 3850, clock: clock(705, true), input: input(3850, lostInside) });
+  const lostHold = setNose(evidence("lost-hold", 3950, []), 0.4);
+  lostHold.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
+  lost.advance({ timestampMs: 3950, clock: clock(760, true), input: input(3950, lostHold) });
   lost.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, setNose(evidence("lost-before", 4000, []), 0.125)) });
   lost.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4010, null, { paused: true, fresh: true }) });
   const recovered = setNose(evidence("lost-after", 7030, []), 0.875); recovered.calibrationId = "cal-2"; for (const anchorEntry of recovered.anchors) anchorEntry.calibrationId = "cal-2";
   lost.advance({ timestampMs: 4020, clock: clock(680, false), input: input(4020, null, { calibrationId: "cal-2" }) });
   lost.advance({ timestampMs: 5020, clock: clock(680, false) }); lost.advance({ timestampMs: 6020, clock: clock(680, false) }); lost.advance({ timestampMs: 7020, clock: clock(680, false) });
   lost.advance({ timestampMs: 7030, clock: clock(740, true), input: input(7030, recovered, { calibrationId: "cal-2" }) });
-  assert.deepEqual(lost.getObstacleOutcomes().map((entry) => entry.result), ["unevaluated_tracking"], "tracking loss severs continuity through recovery");
+  assert.equal(lost.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "tracking loss still settles the wall interval exactly once");
   assert.equal(lost.getScorePartitions().length, 0);
 }
 
@@ -710,7 +656,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "variant-identity" });
   assert.throws(() => coordinator.configureContent(config([], { ...variant(), mode: "flow" })), /Flow variants require/u);
-  assert.throws(() => coordinator.configureContent(config([], { ...variant("flow_grid_v2"), mode: "boxing" })), /Boxing variants require/u);
+  assert.throws(() => coordinator.configureContent(config([], { ...variant("flow_colliders_v1"), mode: "boxing" })), /Boxing variants require/u);
   assert.throws(() => coordinator.configureContent(config([], { ...variant(), ranked: true, provenance: { kind: "composite" } })), /unranked/u);
 }
 

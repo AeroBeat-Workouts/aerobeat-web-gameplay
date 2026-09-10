@@ -14,8 +14,8 @@ const runtime = createAeroContentRuntime();
 await runtime.loadPackage({ package: await makePackage(hashBytes(audioBytes)), assets: [{ path: "song.ogg", bytes: audioBytes }] });
 let content = runtime.getSnapshot();
 assert.equal(content.state, "ready");
-assert.equal(content.variants.length, 6);
-assert.deepEqual(content.variants.filter((entry) => entry.mode === "flow").map((entry) => [entry.rulesetId, entry.ranked, entry.localOnly]), [["flow_grid_v2", true, false], ["flow_colliders_v1", false, true]], "v6 exposes exact ordered shared-beat Flow ruleset identities");
+assert.equal(content.variants.length, 5);
+assert.deepEqual(content.variants.filter((entry) => entry.mode === "flow").map((entry) => [entry.rulesetId, entry.ranked, entry.localOnly]), [["flow_colliders_v1", true, false]], "v6 exposes the sole Flow (colliders) ruleset identity");
 const boxingVariant = content.variants.find((entry) => entry.rulesetId === "boxing_spatial_grid_v1" && entry.recipeId === "cut_family_source_height_v1");
 assert.ok(boxingVariant);
 await runtime.selectVariant(boxingVariant.variantId, { modifierIds: [] });
@@ -38,7 +38,7 @@ assert.equal(gameplay.getSnapshot().selectedVariant.variantId, content.selectedV
 assert.equal(Object.isFrozen(gameplay.getSnapshot()), true);
 assert.doesNotThrow(() => JSON.parse(JSON.stringify(gameplay.getSnapshot())));
 
-const flowVariant = content.variants.find((entry) => entry.rulesetId === "flow_grid_v2");
+const flowVariant = content.variants.find((entry) => entry.rulesetId === "flow_colliders_v1");
 assert.ok(flowVariant);
 await runtime.selectVariant(flowVariant.variantId, { modifierIds: [] });
 const flowContent = runtime.getSnapshot();
@@ -46,22 +46,22 @@ const flowObstacle = flowContent.resolvedEvents.find((entry) => entry.authoredBe
 assert.deepEqual(JSON.parse(JSON.stringify({ centerTimestampMs: flowObstacle?.centerTimestampMs, intervalEndTimestampMs: flowObstacle?.intervalEndTimestampMs, sourceGeometry: flowObstacle?.authoredBeat?.sourceGeometry, gameplayGeometry: flowObstacle?.authoredBeat?.gameplayGeometry, gridMask: flowObstacle?.authoredBeat?.gridMask })), { centerTimestampMs: 1000, intervalEndTimestampMs: 1500, sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",x:0,y:1,width:2,height:2},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:0,y:0,width:2,height:2},gridMask:[0,1,4,5] }, "content runtime exposes source evidence and canonical obstacle geometry");
 const flowGameplay = createAeroGameplaySessionCoordinator({ sessionId: "public-flow-non-notes" });
 assert.doesNotThrow(() => flowGameplay.configureContent({ packageId: flowContent.packageId, selectedVariant: flowContent.selectedVariant, resolvedEvents: flowContent.resolvedEvents, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "public-flow", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false } }), "gameplay accepts canonical content-runtime Flow bombs/obstacles/arcs/bursts transactionally");
-assert.equal(flowGameplay.getSnapshot().selectedVariant.rulesetId, "flow_grid_v2");
+assert.equal(flowGameplay.getSnapshot().selectedVariant.rulesetId, "flow_colliders_v1");
 
 const colliderVariant = content.variants.find((entry) => entry.rulesetId === "flow_colliders_v1");
 assert.ok(colliderVariant);
 await runtime.selectVariant(colliderVariant.variantId, { modifierIds: [] });
 const colliderContent = runtime.getSnapshot();
 const colliderGameplay = createAeroGameplaySessionCoordinator({ sessionId: "public-flow-colliders" });
-assert.doesNotThrow(() => colliderGameplay.configureContent({ packageId: colliderContent.packageId, selectedVariant: colliderContent.selectedVariant, resolvedEvents: colliderContent.resolvedEvents, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "public-collider", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false } }), "gameplay consumes the explicit v6 Flow Colliders identity over the shared authored beats");
-assert.deepEqual([colliderGameplay.getSnapshot().selectedVariant.rulesetId, colliderGameplay.getSnapshot().selectedVariant.ranked, colliderGameplay.getSnapshot().selectedVariant.localOnly], ["flow_colliders_v1", false, true]);
+assert.doesNotThrow(() => colliderGameplay.configureContent({ packageId: colliderContent.packageId, selectedVariant: colliderContent.selectedVariant, resolvedEvents: colliderContent.resolvedEvents, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "public-collider", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false } }), "gameplay consumes the sole v6 Flow (colliders) identity over the shared authored beats");
+assert.deepEqual([colliderGameplay.getSnapshot().selectedVariant.rulesetId, colliderGameplay.getSnapshot().selectedVariant.ranked, colliderGameplay.getSnapshot().selectedVariant.localOnly], ["flow_colliders_v1", true, false]);
 
 bodyGrid.destroy();
 colliderGameplay.destroy();
 flowGameplay.destroy();
 gameplay.destroy();
 runtime.destroy();
-console.log("Gameplay public integration passed with exact v6 ordered Flow Grid/Colliders identities and canonical non-note intervals.");
+console.log("Gameplay public integration passed with the sole v6 Flow (colliders) identity and canonical non-note intervals.");
 
 /** @param {Uint8Array} bytes */
 function hashBytes(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
@@ -86,15 +86,15 @@ async function makePackage(audioHash) {
     { start: 3, end: 4, type: "arc", hand: "left", startPlacement: 8, endPlacement: 3, startDirection: 0, endDirection: 8, headCurveMultiplier: 1, tailCurveMultiplier: 1, midAnchorMode: 0 },
     { start: 4, end: 4.5, type: "burst", hand: "right", placement: 10, tailPlacement: 2, direction: 8, checkpointCount: 3 }
   ];
-  const rulesetVariants = ["flow_grid_v2", "flow_colliders_v1"];
-  const flowContentHash = `sha256:${hashJson({ beats: flowBeats, rulesetId: "flow_grid_v2", rulesetVariants, notePalette: null })}`;
-  charts.push({ schemaId: "aerobeat.chart.flow.v5", schemaVersion: 5, recordVersion: 2, rulesetId: "flow_grid_v2", rulesetVariants, chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", notePalette: null, contentHash: flowContentHash, beats: flowBeats });
+  const rulesetVariants = ["flow_colliders_v1"];
+  const flowContentHash = `sha256:${hashJson({ beats: flowBeats, rulesetId: "flow_colliders_v1", rulesetVariants, notePalette: null })}`;
+  charts.push({ schemaId: "aerobeat.chart.flow.v5", schemaVersion: 5, recordVersion: 2, rulesetId: "flow_colliders_v1", rulesetVariants, chartId: "chart-flow", chartName: "Flow", mode: "flow", difficulty: "Expert", notePalette: null, contentHash: flowContentHash, beats: flowBeats });
   return {
     schemaId: "aerobeat.song-package.v6", schemaVersion: 6, packageVersion: "6.0.0", packageId: "gameplay-public-package", songId: "gameplay-public-song", songName: "Gameplay Public Integration", notePalette: null,
     source: { provider: "local", sourceId: "gameplay-public", sourceVersionHash: "public-version", difficulty: "Expert", sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, sourceHash, spawnTiming: structuredClone(spawnTiming), obstacleContract: "normalized_obstacle_v2" },
     song: { schemaId: "aerobeat.song.v1", schemaVersion: 1, recordVersion: 1, songId: "gameplay-public-song", songName: "Gameplay Public Integration", durationSec: 10, audio: { filePath: "song.ogg", contentHash: `sha256:${audioHash}` }, timing: { anchorMs: 0, tempoSegments: [{ startBeat: 0, bpm: 120 }], stopSegments: [], timeSignatureSegments: [{ startBeat: 0, numerator: 4, denominator: 4 }] } },
     charts,
     sets: charts.map((chart, index) => ({ schemaId: "aerobeat.set.v1", schemaVersion: 1, recordVersion: 1, setId: `set-${index}`, setName: chart.chartName, songId: "gameplay-public-song", chartId: chart.chartId })),
-    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, spawnTiming: structuredClone(spawnTiming), boxing: charts.filter((chart) => chart.mode === "boxing").map((chart) => ({ chartId: chart.chartId, spawnTiming: structuredClone(spawnTiming) })), flow: [{ difficulty: "Expert", events: [], obstacleContract: "normalized_obstacle_v2", rulesetId: "flow_grid_v2", rulesetVariants: ["flow_grid_v2", "flow_colliders_v1"], sourceHash, sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, spawnTiming: structuredClone(spawnTiming), notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
+    recipeDefinitions: [], rulesetDefinitions: [], conversionTrace: { notePalette: null, spawnTiming: structuredClone(spawnTiming), boxing: charts.filter((chart) => chart.mode === "boxing").map((chart) => ({ chartId: chart.chartId, spawnTiming: structuredClone(spawnTiming) })), flow: [{ difficulty: "Expert", events: [], obstacleContract: "normalized_obstacle_v2", rulesetId: "flow_colliders_v1", rulesetVariants, sourceHash, sourceInfoFormat: "v2", sourceInfoVersion: "2.1.0", sourceInfoHash: `sha256:${"3".repeat(64)}`, sourceDifficultyPath: "Expert.dat", sourceBeatmapFormat: "v3", sourceBeatmapVersion: "3.3.0", sourceDifficultyHash: `sha256:${"4".repeat(64)}`, spawnTiming: structuredClone(spawnTiming), notePalette: null, contentHash: flowContentHash }] }, presentationSuggestion: null
   };
 }

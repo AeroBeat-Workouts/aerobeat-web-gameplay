@@ -6,7 +6,7 @@ import { clipWristSegmentToTarget, defaultFlowColliderSettings, isContinuousColl
 const HASH="a".repeat(64);
 const settings=(overrides={})=>({ ...defaultFlowColliderSettings, ...overrides });
 const variant=(id="collider")=>({variantId:id,chartId:`chart-${id}`,mode:"flow",rulesetId:"flow_colliders_v1",recipeId:null,modifierIds:[],ranked:false,localOnly:true,mapHash:{schema:"aerobeat/content_hash",version:1,algorithm:"sha256",value:HASH},scoreIdentityHash:{schema:"aerobeat/content_hash",version:1,algorithm:"sha256",value:HASH},provenance:{kind:"imported"}});
-const flowGrid=()=>({...variant("grid"),rulesetId:"flow_grid_v2",localOnly:false});
+const flowGrid=()=>({...variant("grid"),localOnly:false});
 const beat=(eventId,centerTimestampMs,type="note",extra={})=>({schema:"aerobeat/resolved_content_event",version:3,eventId,variantId:"collider",chartId:"chart-collider",centerTimestampMs,sourceEventIds:[`source-${eventId}`],type,...extra});
 const wall=(eventId,start=900,end=1100)=>beat(eventId,start,"obstacle",{intervalStartTimestampMs:start,intervalEndTimestampMs:end,sourceGeometry:{schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v3_obstacle_rect",kind:"v3_rect",x:1,y:0,width:1,height:3},gameplayGeometry:{schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3},gridMask:[1,5,9]});
 const anchor=(name,measured,sx,sy)=>({schema:"aerobeat/body_grid_anchor_snapshot",version:1,anchor:name,calibrationId:"cal-1",measurementTimestampMs:measured,valid:true,confidence:1,rawX:0.5,rawY:0.5,x:(sx+0.5)/4,y:(2.5-sy)/3,cell:5,subcell:20});
@@ -178,11 +178,11 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.throws(()=>createFlowColliderSettings({...publicDefaultFlowColliderSettings,extra:true}),/every exact field/u);const accessor={...publicDefaultFlowColliderSettings};Object.defineProperty(accessor,"colliderRadius",{enumerable:true,get(){throw new Error("must not execute");}});assert.throws(()=>createFlowColliderSettings(accessor),/accessors/u);
 }
 
-// Bounded settings reject malformed/ranked input without mutation; Flow Grid keeps its old matcher and identity.
+// Bounded settings reject malformed/ranked input without mutation; the non-collider Flow variant keeps its old matcher and identity.
 {
   const c=createAeroGameplaySessionCoordinator({sessionId:"bounds"});for(const bad of [settings({colliderRadius:-.001}),settings({colliderRadius:.501}),settings({directionToleranceDegrees:91}),settings({timingWindowMs:49}),settings({timingWindowMs:301}),{...settings(),extra:true}])assert.throws(()=>c.configureContent(config([],bad)),/(?:Flow Collider|unknown or symbolic fields)/u);
-  assert.throws(()=>c.configureContent({...config([]),selectedVariant:{...variant(),ranked:true}}),/unranked and local-only/u);
-  const grid=createAeroGameplaySessionCoordinator({sessionId:"grid"});const gridEvent={...beat("grid-note",1000,"note",{hand:"left",placement:5}),variantId:"grid",chartId:"chart-grid"};grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[gridEvent]});assert.equal(grid.getSnapshot().session.rulesetId,"flow_grid_v2");assert.throws(()=>grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[],flowColliderSettings:settings()}),/require the Flow Colliders/u);
+  assert.doesNotThrow(() => c.configureContent({ ...config([]), selectedVariant: { ...variant(), ranked: true } }), "the sole Flow ruleset is now the ranked authored variant and no longer requires unranked local-only truth");
+  const grid=createAeroGameplaySessionCoordinator({sessionId:"grid"});const gridEvent={...beat("grid-note",1000,"note",{hand:"left",placement:5}),variantId:"grid",chartId:"chart-grid"};grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[gridEvent]});assert.equal(grid.getSnapshot().session.rulesetId,"flow_colliders_v1");assert.doesNotThrow(()=>grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[],flowColliderSettings:settings()}),"Flow Collider settings now bind the sole ranked Flow ruleset, not a retired non-collider variant");
 }
 
 // Public collider state exposes only opaque tuning identity and semantic hazard data, never physical evidence/history.

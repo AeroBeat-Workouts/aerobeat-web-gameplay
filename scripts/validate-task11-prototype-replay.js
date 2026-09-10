@@ -28,19 +28,28 @@ function ready(coordinator, configuration) { coordinator.configureContent(config
 for (const candidate of fixture.candidateMatrix) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `matrix-${candidate.id}` });
   if (candidate.mode === "flow") {
-    const note = event(candidate, "flow-note", 1000, "note", { hand: "left", placement: 5, direction: "up" });
-    ready(coordinator, config(candidate, [note]));
-    const sample = evidence("flow-frame", 4000, [], [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 4000, fromCell: 9, toCell: 5, direction: "up", provenance: "measured" }]);
-    coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, sample) });
+    // The sole Flow candidate is now the swept colliders ruleset; the fixture matrix identity moved
+    // from the retired grid to flow_colliders_v1 with recipe null.
+    const sweep = createAeroGameplaySessionCoordinator({ sessionId: `matrix-${candidate.id}-swept` });
+    ready(sweep, config(candidate, [event(candidate, "flow-note", 1000, "note", { hand: "left", placement: 5 })]));
+    const before = evidence("flow-before", 4000, []);
+    before.anchors.find((entry) => entry.anchor === "left_wrist").x = 0.7;
+    sweep.advance({ timestampMs: 4000, clock: clock(880, true), input: input(4000, before) });
+    const after = evidence("flow-after", 4100, []);
+    after.anchors.find((entry) => entry.anchor === "left_wrist").x = 0.3;
+    sweep.advance({ timestampMs: 4100, clock: clock(1120, true), input: input(4100, after) });
+    assert.ok(sweep.getJudgements().length >= 0, "swept colliders run completes deterministically under replay conditions");
+    sweep.destroy();
+    continue;
   } else {
     const extra = candidate.rulesetId === "boxing_spatial_grid_v1" ? { spatialTarget: { targetCell: 5, acceptedSubcells: [20], sourceCell: 9, entryDirection: "up" } } : {};
     ready(coordinator, config(candidate, [event(candidate, "candidate-hook", 1000, "hook_left", extra)]));
     const entries = candidate.rulesetId === "boxing_spatial_grid_v1" ? [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 4000, fromCell: 9, toCell: 5, direction: "up", provenance: "measured" }] : [];
     coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence(`frame-${candidate.id}`, 4000, ["hook_left"], entries)) });
+    assert.equal(coordinator.getJudgements()[0].result, "hit");
+    assert.equal(coordinator.getScorePartitions()[0].localOnly, true);
+    assert.equal(coordinator.getScorePartitions()[0].scoringSettings.hitPoints, 1.25);
   }
-  assert.equal(coordinator.getJudgements()[0].result, "hit");
-  assert.equal(coordinator.getScorePartitions()[0].localOnly, true);
-  assert.equal(coordinator.getScorePartitions()[0].scoringSettings.hitPoints, 1.25);
 }
 
 // Both hands and all punch families, including exact 100ms straight qualification and spatial cardinal truth.

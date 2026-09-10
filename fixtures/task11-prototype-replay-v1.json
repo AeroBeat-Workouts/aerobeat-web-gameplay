@@ -6,7 +6,7 @@
     {
       "id": "flow",
       "mode": "flow",
-      "rulesetId": "flow_grid_v2",
+      "rulesetId": "flow_colliders_v1",
       "recipeId": null
     },
     {
@@ -76,5 +76,5 @@
     "timingWindowBeforeMs": 180,
     "trackingLossMs": 500
   },
-  "fixtureHash": "sha256:71048f48035b3032e37c917d1d6c4e3eacab716d490f9392c1e489eb1e917ad1"
+  "fixtureHash": "sha256:558304773d68cb816d066fab1732dc9e5254d33b7104b5c0b2e926397f79dcf4"
 }

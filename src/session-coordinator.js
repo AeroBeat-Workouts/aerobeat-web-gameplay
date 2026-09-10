@@ -39,6 +39,8 @@ import {
 /** @typedef {{leftCoverage: readonly Readonly<{startMs:number,endMs:number}>[],rightCoverage:readonly Readonly<{startMs:number,endMs:number}>[],contactTimelinePositionMs:number|null,consequenceApplied:boolean}} BombState */
 
 const FLOW_COLLIDER_RULESET = "flow_colliders_v1";
+/** Retired Flow Grid ruleset, still accepted as a flow-mode variant input for historical reads. */
+const FLOW_GRID_RULESET = "flow_grid_v2";
 
 /** @type {readonly string[]} */
 const CHECKPOINT_ACTIONS = Object.freeze(["guard", "crossed_guard", "squat", "weave_left", "weave_right"]);
@@ -724,8 +726,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
       if (variant?.rulesetId === FLOW_COLLIDER_RULESET) {
         const outcome = Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "wall", result, committedTimelinePositionMs: timelinePositionMs, consequenceApplied: tracker.consequenceApplied });
-        obstacleOutcomes.push(outcome); hazardOutcomes.push(outcome);
-      } else obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: "flow_grid_v2", result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
+        hazardOutcomes.push(outcome);
+      } else obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: String(variant?.rulesetId ?? FLOW_COLLIDER_RULESET), result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
       occupiedObstacleIds.delete(eventId); obstacleStates.delete(eventId);
     }
     obstacleOutcomes.sort((left, right) => compareCodePoints(String(left.eventId), String(right.eventId)));
@@ -1071,7 +1073,7 @@ function normalizeVariant(value) {
   if (!rulesetIds.includes(/** @type {never} */ (rulesetId)) && rulesetId !== FLOW_COLLIDER_RULESET) throw gameplayError("ruleset_invalid", "Variant ruleset is unsupported");
   const mode = record.mode === "flow" ? "flow" : record.mode === "boxing" ? "boxing" : (() => { throw gameplayError("mode_invalid", "Variant mode is unsupported"); })();
   const recipeId = record.recipeId === null ? null : requireString(record.recipeId, "recipe_invalid");
-  if (mode === "flow" && (!["flow_grid_v2", FLOW_COLLIDER_RULESET].includes(rulesetId) || recipeId !== null)) throw gameplayError("variant_identity_invalid", "Flow variants require a supported Flow ruleset and no conversion recipe");
+  if (mode === "flow" && (![FLOW_COLLIDER_RULESET, FLOW_GRID_RULESET].includes(rulesetId) || recipeId !== null)) throw gameplayError("variant_identity_invalid", "Flow variants require a supported Flow ruleset and no conversion recipe");
   if (mode === "boxing" && ((rulesetId.startsWith("flow_grid_") || rulesetId === FLOW_COLLIDER_RULESET) || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
   const modifierIds = requireStringArray(record.modifierIds ?? [], "modifier_ids_invalid", 32);
   if (modifierIds.includes("no_obstacles") && modifierIds.includes("obstacle_visual_only")) throw gameplayError("modifier_ids_invalid", "Obstacle accessibility modes conflict");
@@ -1079,7 +1081,6 @@ function normalizeVariant(value) {
   if (typeof record.ranked !== "boolean") throw gameplayError("variant_rank_invalid", "Variant ranked identity must be boolean");
   const obstacleAssist = modifierIds.includes("no_obstacles") || modifierIds.includes("obstacle_visual_only");
   if (obstacleAssist && (record.ranked !== false || record.localOnly !== true)) throw gameplayError("variant_rank_invalid", "Obstacle accessibility variants must be unranked and local-only");
-  if (rulesetId === FLOW_COLLIDER_RULESET && (record.ranked !== false || record.localOnly !== true)) throw gameplayError("variant_rank_invalid", "Flow Colliders must remain unranked and local-only");
   const provenance = record.provenance === undefined ? null : cloneGameplayData(record.provenance);
   if (isPlainRecord(provenance) && provenance.kind === "composite" && record.ranked) throw gameplayError("variant_rank_invalid", "Runtime composite variants must be unranked");
   const mapHash = cloneGameplayData(record.mapHash, "map_hash_invalid");
@@ -1290,7 +1291,7 @@ function validateEvidenceIdentity(evidence) {
 /** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {AeroGameplayEvidenceSnapshot} evidence @param {DataRecord | null} input */
 function matchEvent(event, selectedVariant, evidence, input) {
   const diagnostics = [];
-  const rulesetId = String(selectedVariant?.rulesetId ?? "flow_grid_v2");
+  const rulesetId = String(selectedVariant?.rulesetId ?? FLOW_COLLIDER_RULESET);
   if (rulesetId.startsWith("flow_grid_")) return matchFlow(event, evidence);
   const action = expectedAction(event);
   if (!evidence.activeBoxingActions.includes(/** @type {never} */ (action))) diagnostics.push("no_input");
@@ -1361,7 +1362,7 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
 
 /** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @returns {AeroGameplayJudgement} */
 function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow) {
-  const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? "flow_grid_v2");
+  const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? FLOW_COLLIDER_RULESET);
   const recipeId = /** @type {import("@aerobeat/web-contracts").AeroConversionRecipeId | null} */ (selectedVariant?.recipeId ?? null);
   const center = Number(event.centerTimestampMs);
   return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose: "play", eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow });
