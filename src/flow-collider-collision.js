@@ -18,7 +18,7 @@ export const defaultFlowColliderSettings = Object.freeze({
   version: 1,
   algorithm: "swept_athlete_plane_v1",
   colliderRadius: 0.12,
-  enforceAuthoredDirection: false,
+  enforceAuthoredDirection: true,
   directionToleranceDegrees: 45,
   timingWindowMs: 180
 });
@@ -77,6 +77,35 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
 /** @param {number} placement */
 export function targetCenterForPlacement(placement) {
   return Object.freeze({ x: placement % 4, y: 2 - Math.floor(placement / 4) });
+}
+
+/**
+ * Target-point + entry-cone geometry for a directional Flow Collider note,
+ * for the "Visible tolerance range" debug overlay.
+ *
+ * The accepted-entry sector is every wrist-velocity vector whose angle from
+ * the authored direction unit vector is within `toleranceDegrees` (half-angle),
+ * so the full cone opens 2×`toleranceDegrees` centered on the direction. The
+ * renderer combines `direction` and `toleranceDegrees` to draw the sector arc
+ * around `center`. Vectors are in the same canonical up-positive
+ * athlete-grid space as `matchesAuthoredDirection` (input y-down is already
+ * converted by `measuredColliderSample`), so `up` is `{x:0,y:1}`.
+ *
+ * @param {string} direction One of the eight authored direction names.
+ * @param {number} toleranceDegrees Half-angle of the entry cone, 0..90.
+ * @returns {Readonly<{center:Readonly<{x:number,y:number}>,direction:Readonly<{x:number,y:number}>,toleranceDegrees:number}> | null}
+ *   The geometry for the direction, or `null` when `direction` is not one of
+ *   the eight authored direction names.
+ */
+export function authoredDirectionCone(direction, toleranceDegrees) {
+  const dir = DIRECTIONS[direction];
+  if (!dir) return null;
+  const center = Object.freeze({ x: 0, y: 0 });
+  return Object.freeze({
+    center,
+    direction: Object.freeze({ x: dir[0], y: dir[1] }),
+    toleranceDegrees
+  });
 }
 
 /** @param {DataRecord} event @param {ColliderSample} sample @param {number} radius @param {number} timingWindowMs */

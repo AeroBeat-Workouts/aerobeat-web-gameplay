@@ -57,6 +57,10 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
 {
   const exact = createBoxingColliderSettings(settings());
   assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderRadius", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
+  // 0.0.53: the authored-direction toggle is enforced by default (both flow and
+  // boxing mirrors); directionToleranceDegrees stays at 45.
+  assert.equal(defaultBoxingColliderSettings.enforceAuthoredDirection, true, "boxing default enforces authored direction");
+  assert.equal(defaultBoxingColliderSettings.directionToleranceDegrees, 45, "default tolerance stays 45");
   assert.equal(boxingColliderSettingsIdentity(settings()), boxingColliderSettingsIdentity(createBoxingColliderSettings()));
   assert.notEqual(boxingColliderSettingsIdentity(settings({ topRowReachWU: 0.5 })), boxingColliderSettingsIdentity(settings()));
   assert.notEqual(boxingColliderSettingsIdentity(settings({ bottomRowReachWU: 0.75 })), boxingColliderSettingsIdentity(settings()));
@@ -422,8 +426,12 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   send(rbBottomLow, 900, [3, 0.2], [1, 0.2], [3, 2]);
   send(rbBottomLow, 1000, [3, 0.2], [1, 0.2], [3, 2]);
   send(rbBottomLow, 1181, [3, 0.2], [1, 0.2], [3, 2]);
-  assert.deepEqual(judgementsAt(rbBottomLow).filter(([id]) => id === "rb3"), [["rb3", "miss", ["wrong_collider"]]], "the default bottom row (0.25, Y 0.75) rejects a very-low frame");
-  const rbBottomReached = ready([beat("rb4", 1000, "hook_right", { placement: 9 })], settings({ bottomRowReachWU: 0.5 }));
+  // hook_right is direction-enforced by default (0.0.53), so the stationary
+  // off-plane miss reports wrong_direction rather than wrong_collider.
+  assert.deepEqual(judgementsAt(rbBottomLow).filter(([id]) => id === "rb3"), [["rb3", "miss", ["wrong_direction"]]], "the default bottom row (0.25, Y 0.75) rejects a very-low frame");
+  // The right wrist enters from below (dy +0.3), outside the default "left"-authored
+  // hook tolerance, so this reach test runs overlap-only to keep it direction-neutral.
+  const rbBottomReached = ready([beat("rb4", 1000, "hook_right", { placement: 9 })], settings({ bottomRowReachWU: 0.5, enforceAuthoredDirection: false }));
   send(rbBottomReached, 900, [3, 0.2], [1, 0.2], [3, 2]);
   send(rbBottomReached, 1000, [3, 0.2], [1, 0.5], [3, 2]);
   assert.deepEqual(judgementsAt(rbBottomReached).filter(([id]) => id === "rb4"), [["rb4", "hit", []]], "the reached bottom row (0.5, Y 0.5) accepts the low frame");
@@ -445,7 +453,8 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   // The score identity (a pure hash of the normalized settings) changes with
   // every field; the partition record itself only materialises on the first
   // judgement, so we compare the exported identity function directly.
-  const identityVariants = [settings({ topRowReachWU: 0.5 }), settings({ bottomRowReachWU: 0.5 }), settings({ guardCountMode: "gesture" }), settings({ colliderRadius: 0.2 }), settings({ directionToleranceDegrees: 60 }), settings({ timingWindowMs: 240 }), settings({ enforceAuthoredDirection: true })];
+  // enforceAuthoredDirection now defaults to true, so the identity variant flips it off.
+  const identityVariants = [settings({ topRowReachWU: 0.5 }), settings({ bottomRowReachWU: 0.5 }), settings({ guardCountMode: "gesture" }), settings({ colliderRadius: 0.2 }), settings({ directionToleranceDegrees: 60 }), settings({ timingWindowMs: 240 }), settings({ enforceAuthoredDirection: false })];
   for (const next of identityVariants) {
     assert.notEqual(boxingColliderSettingsIdentity(next), basePartition.boxingColliderSettingsIdentity, `${JSON.stringify(next)} changes the score identity`);
   }
@@ -465,7 +474,9 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.deepEqual(judgementsAt(topFar).filter(([id]) => id === "top-1"), [["top-1", "hit", []]], "top row at 1.0 equals the legacy full-grid Y");
   // Bottom-row cells (8-11) judge at 1-bottomReach: 0.75 @0.25, 0.5 @0.5.
   // hook_right -> RIGHT hand; placement 9 is column 1 (x=1).
-  const bottomRun = ready([beat("bottom", 1000, "hook_right", { placement: 9 })], settings({ bottomRowReachWU: 0.5 }));
+  // The right wrist enters from below (dy +0.1), outside the default "left"-authored
+  // hook tolerance, so this reach test runs overlap-only to keep it direction-neutral.
+  const bottomRun = ready([beat("bottom", 1000, "hook_right", { placement: 9 })], settings({ bottomRowReachWU: 0.5, enforceAuthoredDirection: false }));
   send(bottomRun, 900, [3, 0.2], [1, 0.4], [3, 2]);
   send(bottomRun, 1000, [3, 0.2], [1, 0.5], [3, 2]);
   assert.deepEqual(judgementsAt(bottomRun).filter(([id]) => id === "bottom"), [["bottom", "hit", []]], "bottom row follows bottom reach");

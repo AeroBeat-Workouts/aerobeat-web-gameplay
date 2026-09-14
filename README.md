@@ -37,7 +37,7 @@ Exports:
 
 - `createAeroGameplaySessionCoordinator(options)`
 - `createAeroPrototypeProfileRegistry(options)`
-- `createFlowColliderSettings(value?)`, `defaultFlowColliderSettings`, `flowColliderSettingsBounds`, `flowColliderSettingsIdentity(value)`
+- `createFlowColliderSettings(value?)`, `defaultFlowColliderSettings`, `flowColliderSettingsBounds`, `flowColliderSettingsIdentity(value)`, `authoredDirectionCone(direction, toleranceDegrees)`
 - `maximumColliderSampleFreshnessMs` / `maximumColliderSampleGapMs`
 - `canonicalPrototypeProfileJson(value)` / synchronous `sha256PrototypeProfileHex(text)` (backed by shared incremental `@aerobeat/web-hash` `Sha256`)
 - `aeroGameplaySessionCapabilities`
@@ -89,7 +89,7 @@ The assembly may inject a media-lease snapshot. Normal Play verifies that its `i
 - Positive evidence is consumed only after a complete match. Wrong/no/stale evidence cannot consume an action.
 - One measured frame/action can score once. A guard and punch cannot both consume the same frame only when their inclusive windows overlap; different-category windows that do not overlap are not globally frame-blocked. Squat/weave checkpoints may score concurrently with a disjoint punch.
 - `flow_colliders_v1` is the sole Flow ruleset (the visible `Flow` mode). It clips bounded previous/current measured calibrated wrist segments against a placement-derived logical 0.75 × 0.75 target footprint inflated by the run's private wrist radius in canonical athlete-grid XY. The authored wrist owns left/right notes, either wrist owns bombs, and only the nose owns walls. The complete inclusive timing slab is the green goal area; renderer projection, viewport/DPR, parallax, marker CSS size, PlayCanvas/GLB bounds, raw/provider coordinates, and visual depth never score. The retired Flow Grid ruleset no longer exists; its ID remains accepted only as a flow-mode variant input for historical reads and is never a new default.
-- Flow Colliders defaults to overlap-only. Optional run-locked authored-direction enforcement uses the measured wrist vector and the existing mirrored athlete-coordinate convention for all eight directions. Directionless notes never require motion, so a stationary wrist can be struck by an approaching target.
+- Flow Colliders enforces the authored direction by default: run-locked authored-direction enforcement uses the measured wrist vector and the existing mirrored athlete-coordinate convention for all eight directions. Runs that need the prior overlap-only behavior opt out with an explicit `enforceAuthoredDirection: false`. Directionless notes never require motion, so a stationary wrist can be struck by an approaching target.
 - Flow Collider evidence is measured/current-generation only. A measured sample is fresh only while age is strict `<150ms`; a previous/current segment may span inclusive `<=150ms`. Samples reject stale/future evidence, duplicate or rollback frames, invalid bounds/confidence, source or calibration changes, and larger gaps; a rejected sample cannot bridge history. Each wrist is independent: one fresh valid wrist can score its owned notes and detonate bombs even when the other wrist is invalid. One sweep can resolve every genuinely intersected exact-same-center chord member, but a staggered member requires a later measured contact. Candidate ordering is deterministic and independent of source array order. Manual, tracking, lease, stopped-clock, countdown-clock, and audio-rollback pauses sever private wrist/nose continuity before recovery; each anchor's first later fresh valid frame independently seeds new history without point or swept contact; only its next continuous sample may evaluate.
 - Semantic Track matches calibrated semantic actions.
 - Spatial Grid additionally matches hand wrist target cells/subcells, cardinal source/destination entries, guard wrist targets, and nose-safe checkpoint cells.
@@ -110,13 +110,15 @@ Assembly passes optional exact run configuration as `configureContent({..., flow
   version: 1,
   algorithm: "swept_athlete_plane_v1",
   colliderRadius: 0.12,             // finite 0..0.5 logical units
-  enforceAuthoredDirection: false,  // overlap-only default
+  enforceAuthoredDirection: true,   // enforced by default (overlap-only is an explicit opt-out)
   directionToleranceDegrees: 45,    // finite 0..90
   timingWindowMs: 180               // finite 50..300, symmetric/inclusive
 }
 ```
 
 `createFlowColliderSettings()` supplies the frozen defaults; explicit values require every exact own enumerable data field, no extras/accessors, and the exported `flowColliderSettingsBounds`. Those values are cloned, validated, and locked for the run; a paused future-content swap cannot change them. Assembly must use the same settings when constructing its between-run profile identity. Gameplay additionally puts only an opaque `sha256:` `flowColliderSettingsIdentity` in the local score partition/key; it never republishes the tuning values. Omission selects the defaults above. Supplying this object for another ruleset rejects transactionally.
+
+`authoredDirectionCone(direction, toleranceDegrees)` is the pure geometry for the "Visible tolerance range" debug overlay: it returns the target `center` (combine with `targetCenterForPlacement`), the authored `direction` unit vector in the same canonical up-positive athlete-grid space as the matcher, and the half-angle `toleranceDegrees`. The accepted-entry sector is every wrist-velocity direction within `±toleranceDegrees` of `direction` (full cone opens 2×`toleranceDegrees`); the renderer draws the sector arc itself. Unknown direction names return `null`.
 
 The input boundary remains the current body-grid snapshot. Flow Colliders additionally requires the snapshot's bounded `sourceIdentity` plus measured `latestEvidence` with current-calibration `left_wrist`, `right_wrist`, and `nose` anchors. Anchor `x/y` are the input service's calibrated athlete-bounds-normalized canonical coordinates (`x` right-positive, `y` down-positive), not provider or screen coordinates; gameplay converts once to grid-world `sx=4*x-0.5`, `sy=2.5-3*y`. Thus canonical `sy` is up-positive and authored `up` uses positive `dy`, exactly matching the input service's semantic eight-way labels without a second mirror. Confidence, measurement timestamp, and measured source-frame identity remain required. These fields are private evaluation inputs only. Assembly must forward the connection-owned snapshot unchanged and must not cache, log, persist, project, or message collision history.
 

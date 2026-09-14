@@ -1,7 +1,7 @@
 // @ts-check
 import assert from "node:assert/strict";
 import { createAeroGameplaySessionCoordinator, createFlowColliderSettings, defaultFlowColliderSettings as publicDefaultFlowColliderSettings, flowColliderSettingsBounds, flowColliderSettingsIdentity, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs } from "../src/index.js";
-import { clipWristSegmentToTarget, defaultFlowColliderSettings, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget, targetCenterForPlacement } from "../src/flow-collider-collision.js";
+import { authoredDirectionCone, clipWristSegmentToTarget, defaultFlowColliderSettings, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget, targetCenterForPlacement } from "../src/flow-collider-collision.js";
 
 const HASH="a".repeat(64);
 const settings=(overrides={})=>({ ...defaultFlowColliderSettings, ...overrides });
@@ -61,11 +61,24 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const lower=measuredColliderSample(evidence("lower",900,[1,0]),{sourceIdentity:"camera-a"},"left_wrist",900,900);const upper=measuredColliderSample(evidence("upper",1000,[1,1]),{sourceIdentity:"camera-a"},"left_wrist",1000,1000);assert.equal(matchesAuthoredDirection("up",lower,upper,0),true,"input y-down is converted once to authored up-positive canonical sy");assert.equal(matchesAuthoredDirection("down",lower,upper,45),false);
 }
 
-// Default overlap-only permits a stationary wrist and ignores the authored arrow.
+// authoredDirectionCone: all eight directions, exact tolerance passthrough, up-positive canonical, null on invalid.
 {
-  const c=ready([beat("stationary",1000,"note",{hand:"left",placement:5,direction:"down"})]);
+  const coneVectors={up:{x:0,y:1},down:{x:0,y:-1},left:{x:-1,y:0},right:{x:1,y:0},"up-left":{x:-Math.SQRT1_2,y:Math.SQRT1_2},"up-right":{x:Math.SQRT1_2,y:Math.SQRT1_2},"down-left":{x:-Math.SQRT1_2,y:-Math.SQRT1_2},"down-right":{x:Math.SQRT1_2,y:-Math.SQRT1_2}};
+  for(const [name,vector] of Object.entries(coneVectors)){const cone=authoredDirectionCone(name,45);assert.ok(cone,name);assert.equal(Object.isFrozen(cone),true);assert.deepEqual(cone.center,{x:0,y:0},"center is the origin target point (renderer combines with targetCenterForPlacement)");assert.deepEqual(cone.direction,vector,`${name} unit vector`);assert.equal(Object.isFrozen(cone.direction),true);assert.equal(cone.toleranceDegrees,45,`${name} tolerance passthrough`);}
+  for(const value of [0,17.5,90]){const cone=authoredDirectionCone("up",value);assert.equal(cone.toleranceDegrees,value,"exact tolerance passthrough");assert.deepEqual(cone.direction,coneVectors.up);}
+  for(const invalid of ["UP","Up","up left","","up_left","down up",1,undefined])assert.equal(authoredDirectionCone(invalid,45),null,`invalid direction ${String(invalid)}`);
+}
+
+// Default direction enforcement: an authored-directional note requires the authored direction by default,
+// and an explicit overlap-only override restores stationary-wrist scoring.
+{
+  const enforced=ready([beat("stationary-enforced",1000,"note",{hand:"left",placement:5,direction:"down"})]);
+  send(enforced,1000,1000,[1,1],[3,1],[3,2]);
+  send(enforced,1181,1181,[1,1],[3,1],[3,2]);
+  assert.deepEqual(enforced.getJudgements().map(j=>[j.eventId,j.result,j.diagnostics]),[["stationary-enforced","miss",["wrong_direction"]]],"default enforces the authored direction");
+  const c=ready([beat("stationary",1000,"note",{hand:"left",placement:5,direction:"down"})],settings({enforceAuthoredDirection:false}));
   send(c,1000,1000,[1,1],[3,1],[3,2]);
-  assert.deepEqual(c.getJudgements().map(j=>[j.eventId,j.result,j.timingOffsetMs]),[["stationary","hit",0]]);
+  assert.deepEqual(c.getJudgements().map(j=>[j.eventId,j.result,j.timingOffsetMs]),[["stationary","hit",0]],"explicit overlap-only override still permits a stationary wrist");
   assert.equal(c.getScorePartitions()[0].ranked,false);assert.equal(c.getScorePartitions()[0].localOnly,true);assert.match(c.getScorePartitions()[0].flowColliderSettingsIdentity,/^sha256:[a-f0-9]{64}$/u);
 }
 
@@ -78,7 +91,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   }
 }
 
-// Optional direction is run-locked, affects identity, and misses only after strict late bound.
+// Default-enforced direction with a tightened tolerance is run-locked, affects identity, and misses only after strict late bound.
 {
   const directional=settings({enforceAuthoredDirection:true,directionToleranceDegrees:20});
   const c=ready([beat("directed",1000,"note",{hand:"left",placement:5,direction:"right"})],directional);
