@@ -22,7 +22,10 @@ import { boxingColliderRowY } from "@aerobeat/web-contracts";
 const HASH = "a".repeat(64);
 const settings = (overrides = {}) => ({ ...defaultBoxingColliderSettings, ...overrides });
 const variant = (id = "boxing-collider") => ({ variantId: id, chartId: `chart-${id}`, mode: "boxing", rulesetId: "boxing_collider_v1", recipeId: null, modifierIds: [], ranked: false, localOnly: true, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { kind: "imported" } });
-const beat = (eventId, centerTimestampMs, type, extra = {}) => ({ schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: "boxing-collider", chartId: "chart-boxing-collider", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...extra });
+const beat = (eventId, centerTimestampMs, type, extra = {}) => {
+  const { placement, ...rest } = extra;
+  return { schema: "aerobeat/resolved_content_event", version: 3, eventId, variantId: "boxing-collider", chartId: "chart-boxing-collider", centerTimestampMs, sourceEventIds: [`source-${eventId}`], type, ...(placement !== undefined ? { spatialTarget: { targetCell: placement, acceptedSubcells: [], sourceCell: -1 } } : {}), ...rest };
+};
 const anchor = (name, measured, sx, sy) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: (sx + 0.5) / 4, y: (2.5 - sy) / 3, cell: 5, subcell: 20 });
 const poseAnchor = (name, measured, x, y, overrides = {}) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x, y, cell: 5, subcell: 20, ...overrides });
 const evidence = (frameId, measured, left, right, nose, extras = []) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: [], anchors: [anchor("nose", measured, ...nose), anchor("left_shoulder", measured, 0, 0), anchor("right_shoulder", measured, 3, 0), anchor("left_elbow", measured, 0, 0), anchor("right_elbow", measured, 3, 0), anchor("left_wrist", measured, ...left), anchor("right_wrist", measured, ...right), ...extras], entries: [] });
@@ -246,7 +249,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const okCrossed = createAeroGameplaySessionCoordinator({ sessionId: "ok-crossed", countdownStepMs: 1 });
   assert.doesNotThrow(() => okCrossed.configureContent(config([beat("ok-x", 1000, "guard", { placement: 5, guardTarget: { leftCell: 6, rightCell: 5, crossed: true } })])));
   // Validation rejects non-guard-target punches/guards without placements and invalid cells.
-  assert.throws(() => createAeroGameplaySessionCoordinator({ sessionId: "no-placement" }).configureContent(config([beat("np", 1000, "hook_left", {})])), /4x3 grid cell/u);
+  assert.throws(() => createAeroGameplaySessionCoordinator({ sessionId: "no-placement" }).configureContent(config([beat("np", 1000, "hook_left", {})])), /plain record|4x3 grid cell/u);
   assert.throws(() => createAeroGameplaySessionCoordinator({ sessionId: "bad-cell" }).configureContent(config([beat("bc", 1000, "hook_left", { placement: 42 })])), /4x3 grid cell/u);
 
   // Swept guard contact: wrist arrives across the footprint during the window.

@@ -892,7 +892,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const hand = action.endsWith("_right") ? "right" : "left";
         const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
-        const placement = Number(event.placement);
+        const placement = Number(event.spatialTarget.targetCell);
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
         const contact = clipWristSegmentToBoxingTarget(event, target, prior, current, Number(boxingColliderSettings.colliderRadius), Number(boxingColliderSettings.timingWindowMs));
         const point = contact === null && pointContactsBoxingTarget(target, current, Number(boxingColliderSettings.colliderRadius), Number(boxingColliderSettings.timingWindowMs));
@@ -1277,7 +1277,7 @@ function validateEventForVariant(event, selectedVariant) {
     if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
     if (action === "squat" || action === "weave_left" || action === "weave_right") validateBoxingObstacle(event);
     if (selectedVariant.rulesetId === BOXING_COLLIDER_RULESET) {
-      if (PUNCH_ACTIONS.includes(action)) requireGridCell(event.placement, "event_placement_invalid");
+      if (PUNCH_ACTIONS.includes(action)) { const target = requireRecord(event.spatialTarget, "spatial_target_invalid"); requireGridCell(target.targetCell, "spatial_target_invalid"); }
     else if (action === "guard" || action === "crossed_guard") {
         const target = requireRecord(event.guardTarget, "guard_target_invalid");
         requireGridCell(target.leftCell, "guard_target_invalid");
