@@ -15,6 +15,7 @@ import {
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { clipWristSegmentToTarget, createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget } from "./flow-collider-collision.js";
+import { boxingColliderSettingsIdentity, clipWristSegmentToBoxingTarget, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, pointContactsBoxingTarget, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -41,6 +42,8 @@ import {
 const FLOW_COLLIDER_RULESET = "flow_colliders_v1";
 /** Retired Flow Grid ruleset, still accepted as a flow-mode variant input for historical reads. */
 const FLOW_GRID_RULESET = "flow_grid_v2";
+/** The 0.0.52 collider-scored boxing ruleset; beats are swept 2.5D contacts at reach rows. */
+const BOXING_COLLIDER_RULESET = "boxing_collider_v1";
 
 /** @type {readonly string[]} */
 const CHECKPOINT_ACTIONS = Object.freeze(["guard", "crossed_guard", "squat", "weave_left", "weave_right"]);
@@ -65,6 +68,7 @@ const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "crossed_g
  * @property {DataRecord} [profileIdentity]
  * @property {DataRecord} [scoringSettings]
  * @property {DataRecord} [flowColliderSettings]
+ * @property {DataRecord} [boxingColliderSettings]
  * @property {readonly DataRecord[]} [shadowVariants]
  */
 
@@ -91,6 +95,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let profileIdentity = /** @type {DataRecord} */ (defaultProfileIdentity());
   let scoringSettings = /** @type {DataRecord} */ (defaultScoringSettings());
   let flowColliderSettings = /** @type {DataRecord} */ (defaultFlowColliderSettings);
+  let boxingColliderSettings = /** @type {DataRecord} */ (defaultBoxingColliderSettings);
   let events = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   let contentGeneration = 0;
   let eventTruth = new WeakMap();
@@ -173,9 +178,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextProfileIdentity = source.profileIdentity === undefined ? defaultProfileIdentity() : normalizeProfile(source.profileIdentity);
     const nextScoringSettings = source.scoringSettings === undefined ? defaultScoringSettings() : normalizeScoringSettings(source.scoringSettings);
     const nextFlowColliderSettings = normalizeFlowColliderSettings(source.flowColliderSettings, nextVariant);
+    const nextBoxingColliderSettings = normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
     const nextShadowVariants = source.shadowVariants === undefined ? Object.freeze([]) : normalizeShadowVariants(source.shadowVariants);
     const nextContentGeneration = contentGeneration + 1;
-    const nextEventTruth = bindEventTruth(nextEvents, nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings);
+    const nextEventTruth = bindEventTruth(nextEvents, nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings);
     packageId = nextPackageId;
     variant = nextVariant;
     contentGeneration = nextContentGeneration;
@@ -184,6 +190,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     profileIdentity = nextProfileIdentity;
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
+    boxingColliderSettings = nextBoxingColliderSettings;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
     sessionPurpose = nextPurpose;
@@ -340,6 +347,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
             evaluateFlowColliderNotesAndBombs();
             evaluateFlowObstacles();
             applyPendingColliderHazards();
+          } else if (variant?.rulesetId === BOXING_COLLIDER_RULESET) {
+            evaluateBoxingColliderNotes();
           } else {
             evaluateFlowObstacles();
             judgeLiveEvents();
@@ -394,6 +403,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextScoringSettings = source.scoringSettings === undefined ? scoringSettings : normalizeScoringSettings(source.scoringSettings);
     const nextFlowColliderSettings = source.flowColliderSettings === undefined && nextVariant.rulesetId === FLOW_COLLIDER_RULESET ? flowColliderSettings : normalizeFlowColliderSettings(source.flowColliderSettings, nextVariant);
     if (nextVariant.rulesetId === FLOW_COLLIDER_RULESET && flowColliderSettingsIdentity(nextFlowColliderSettings) !== flowColliderSettingsIdentity(flowColliderSettings)) throw gameplayError("flow_collider_settings_locked", "Flow Collider settings are locked for the complete run");
+    const nextBoxingColliderSettings = source.boxingColliderSettings === undefined && nextVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
+    if (nextVariant.rulesetId === BOXING_COLLIDER_RULESET && boxingColliderSettingsIdentity(nextBoxingColliderSettings) !== boxingColliderSettingsIdentity(boxingColliderSettings)) throw gameplayError("boxing_collider_settings_locked", "Boxing Collider reach and guard settings are locked for the complete run");
     const nextShadowVariants = source.shadowVariants === undefined ? shadowVariants : normalizeShadowVariants(source.shadowVariants);
     const preserve = new Map(events.filter((event) => shouldPreserveEvent(event)).map((event) => [String(event.eventId), event]));
     const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
@@ -416,7 +427,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (!truth) throw gameplayError("event_truth_missing", "Preserved events require immutable content-generation truth");
       nextEventTruth.set(event, truth);
     }
-    for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings));
+    for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings));
     events = Object.freeze(merged);
     variant = nextVariant;
     contentGeneration = nextContentGeneration;
@@ -424,6 +435,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     profileIdentity = nextProfileIdentity;
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
+    boxingColliderSettings = nextBoxingColliderSettings;
     shadowVariants = nextShadowVariants;
     generation += 1;
     publish(null);
@@ -830,7 +842,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear();
-    if (requireRecoveryBaselines && variant?.rulesetId === FLOW_COLLIDER_RULESET) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
+    if (requireRecoveryBaselines && (variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET)) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
   }
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right */
   function satisfyWristRecoveryBaselines(left, right) { if (left !== null) leftWristBaselineRequired = false; if (right !== null) rightWristBaselineRequired = false; }
@@ -840,6 +852,127 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const current = scorePartition(variant, profileIdentity, scoringSettings);
     partitions.set(String(current.partitionId), Object.freeze({ ...current, combo: 0, bombContacts: Number(current.bombContacts ?? 0) + pendingBombContacts, obstacleContacts: Number(current.obstacleContacts ?? 0) + pendingObstacleContacts }));
     pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0;
+  }
+
+  /**
+   * Boxing Collider (boxing_collider_v1) scoring: swept 2.5D wrist contacts at
+   * reach-row targets (shared contracts row mapping), straight/hook/uppercut
+   * hand-attributed, straight ALWAYS overlap-only, uppercut/hook optionally
+   * direction-enforced. Guards run in collision or gesture mode; neither lets
+   * the nose guard; straight 100ms hold semantics do not apply.
+   */
+  function evaluateBoxingColliderNotes() {
+    if (!variant || variant.rulesetId !== BOXING_COLLIDER_RULESET || !latestEvidence || !lastInput) { finalizeBoxingColliderEvents(); return; }
+    // Gesture mode evaluates pure normalized landmarks on every fresh
+    // evidence frame; the collider-sample/recovery plumbing below is
+    // collision-mode only and must not veto a pose Count. Late-window misses
+    // still finalize through the shared path in both modes.
+    if (boxingColliderSettings.guardCountMode === "gesture") { evaluateBoxingColliderGestureFrames(); finalizeBoxingColliderEvents(); return; }
+    const left = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "left_wrist", timelinePositionMs, timestampMs);
+    const right = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right_wrist", timelinePositionMs, timestampMs);
+    const validSample = left ?? right;
+    if (!validSample || validSample.calibrationId !== calibrationId) { clearColliderSamples(); finalizeBoxingColliderEvents(); return; }
+    const frame = Object.freeze({ frameId: validSample.sourceFrameId, measurementTimestampMs: validSample.measurementTimestampMs, calibrationId: validSample.calibrationId, sourceIdentity: validSample.sourceIdentity });
+    if (lastColliderFrame?.frameId === frame.frameId) {
+      if (lastColliderFrame.measurementTimestampMs === frame.measurementTimestampMs && lastColliderFrame.calibrationId === frame.calibrationId && lastColliderFrame.sourceIdentity === frame.sourceIdentity) { finalizeBoxingColliderEvents(); return; }
+      clearColliderSamples(); finalizeBoxingColliderEvents(); return;
+    }
+    if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
+      clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeBoxingColliderEvents(); return;
+    }
+    const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
+    const priorLeft = left === null || seedLeftOnly ? null : previousLeftWristSample; const priorRight = right === null || seedRightOnly ? null : previousRightWristSample;
+    const reach = Object.freeze({ topRowReachWU: Number(boxingColliderSettings.topRowReachWU), bottomRowReachWU: Number(boxingColliderSettings.bottomRowReachWU) });
+    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
+    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean}[]} */ const guardCandidates = [];
+    for (const event of events) {
+      if (judgedIds.has(String(event.eventId))) continue;
+      const action = expectedAction(event);
+      if (PUNCH_ACTIONS.includes(action)) {
+        const hand = action.endsWith("_right") ? "right" : "left";
+        const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
+        if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
+        const placement = Number(event.placement);
+        const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
+        const contact = clipWristSegmentToBoxingTarget(event, target, prior, current, Number(boxingColliderSettings.colliderRadius), Number(boxingColliderSettings.timingWindowMs));
+        const point = contact === null && pointContactsBoxingTarget(target, current, Number(boxingColliderSettings.colliderRadius), Number(boxingColliderSettings.timingWindowMs));
+        if (!contact && !point) continue;
+        if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
+        candidates.push({ event, evidence: current, contactMs: contact?.startMs ?? current.songTimeMs, hand });
+      } else if (action === "guard" || action === "crossed_guard") {
+        const target = /** @type {DataRecord | undefined} */ (event.guardTarget);
+        if (!target) continue;
+        const leftCell = Number(target.leftCell); const rightCell = Number(target.rightCell);
+        const leftTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(leftCell, reach) });
+        const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(rightCell, reach) });
+        const radius = Number(boxingColliderSettings.colliderRadius); const windowMs = Number(boxingColliderSettings.timingWindowMs);
+        const leftContact = left !== null && !seedLeftOnly && (clipWristSegmentToBoxingTarget(event, leftTarget, priorLeft, left, radius, windowMs) !== null || pointContactsBoxingTarget(leftTarget, left, radius, windowMs));
+        const rightContact = right !== null && !seedRightOnly && (clipWristSegmentToBoxingTarget(event, rightTarget, priorRight, right, radius, windowMs) !== null || pointContactsBoxingTarget(rightTarget, right, radius, windowMs));
+        if (!leftContact || !rightContact) continue;
+        guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(left?.songTimeMs ?? 0, right?.songTimeMs ?? 0), leftContact: true, rightContact: true });
+      }
+    }
+    /** @type {typeof candidates} */ const accepted = [];
+    for (const hand of /** @type {const} */ (["left", "right"])) {
+      const ordered = candidates.filter((candidate) => candidate.hand === hand).sort((a, b) => a.contactMs - b.contactMs || Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
+      if (ordered.length === 0) continue;
+      const chordCenter = Number(ordered[0].event.centerTimestampMs);
+      accepted.push(...ordered.filter((candidate) => Number(candidate.event.centerTimestampMs) === chordCenter));
+    }
+    accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
+    for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
+    for (const candidate of guardCandidates) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
+    previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
+    finalizeBoxingColliderEvents();
+  }
+
+  /**
+   * Gesture-mode guard evaluation on one fresh evidence frame: the Godot
+   * guard-gesture port over normalized landmarks, windowed by each guard's
+   * instantaneous-checkpoint timing window. One Count per guard.
+   */
+  function evaluateBoxingColliderGestureFrames() {
+    if (latestEvidence === null || lastInput === null) return;
+    const gesture = guardGestureFromEvidence(/** @type {DataRecord} */ (latestEvidence));
+    if (gesture !== true) return;
+    for (const event of events) {
+      if (judgedIds.has(String(event.eventId))) continue;
+      const action = expectedAction(event);
+      if (action !== "guard" && action !== "crossed_guard") continue;
+      const checkpoint = /** @type {DataRecord | undefined} */ (event.checkpoint);
+      const windowMs = checkpoint !== undefined && typeof checkpoint.timingWindowMs === "number" ? Number(checkpoint.timingWindowMs) : Number(boxingColliderSettings.timingWindowMs);
+      if (latestEvidenceTimelineMs < Number(event.centerTimestampMs) - windowMs || latestEvidenceTimelineMs > Number(event.centerTimestampMs) + windowMs) continue;
+      recordJudgementAt(event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, latestEvidenceTimelineMs);
+    }
+  }
+
+  /** @param {DataRecord} event */
+  function boxingColliderMissDiagnostics(event) {
+    if (!latestEvidence || !lastInput) return Object.freeze(["no_input"]);
+    if (latestEvidence.calibrationId !== calibrationId) return Object.freeze(["calibration_mismatch"]);
+    const age = timestampMs - latestEvidence.measurementTimestampMs;
+    if (age < 0 || age >= maximumColliderSampleFreshnessMs) return Object.freeze(["stale_input"]);
+    const settings = boxingColliderSettingsForEvent(event);
+    const action = expectedAction(event);
+    if (settings.enforceAuthoredDirection === true && (action === "uppercut_left" || action === "uppercut_right" || action === "hook_left" || action === "hook_right")) return Object.freeze(["wrong_direction"]);
+    return Object.freeze(["wrong_collider"]);
+  }
+
+  function finalizeBoxingColliderEvents() {
+    if (!variant || variant.rulesetId !== BOXING_COLLIDER_RULESET) return;
+    for (const event of events) {
+      const eventId = String(event.eventId);
+      if (judgedIds.has(eventId)) continue;
+      const settings = boxingColliderSettingsForEvent(event);
+      const action = expectedAction(event);
+      const late = Number(event.centerTimestampMs) + Number(settings.timingWindowMs);
+      if ((action === "guard" || action === "crossed_guard") && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
+        const guardWindowMs = Number(event.checkpoint.timingWindowMs);
+        if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);
+        continue;
+      }
+      if (timelinePositionMs > late) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);
+    }
   }
 
   function judgeLiveEvents() {
@@ -926,14 +1059,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     else {
       judgements.push(judgement);
       judgedIds.add(String(event.eventId));
-      updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
+      if (eventVariant.rulesetId === BOXING_COLLIDER_RULESET) updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event));
+      else updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
     }
   }
 
-  /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} colliderSettings */
+  /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
   function updateScore(result, scoreVariant, scoreProfile, settings, colliderSettings) {
-    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, colliderSettings);
-    const current = scorePartition(scoreVariant, scoreProfile, settings, colliderSettings);
+    const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
+    const current = scorePartition(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
     const next = { ...current };
     if (result === "hit") { next.hits += 1; next.combo += 1; next.score = finiteScore(next.score + Number(settings.hitPoints) + Math.max(0, next.combo - 1) * Number(settings.comboBonusPerHit)); next.maxCombo = Math.max(next.maxCombo, next.combo); }
     else if (result === "miss") { next.misses += 1; next.score = finiteScore(Math.max(0, next.score - Number(settings.missPenalty))); next.combo = 0; }
@@ -943,9 +1078,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   /** @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
   function scorePartition(scoreVariant, scoreProfile, settings, colliderSettings = flowColliderSettings) {
-    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, colliderSettings);
-    const colliderIdentity = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET ? flowColliderSettingsIdentity(colliderSettings) : null;
-    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ...(colliderIdentity === null ? {} : { flowColliderSettingsIdentity: colliderIdentity, bombContacts: 0 }), ranked: scoreVariant.rulesetId === FLOW_COLLIDER_RULESET ? false : scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
+    const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
+    const colliderIdentity = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET ? flowColliderSettingsIdentity(resolvedColliderSettings) : null;
+    const boxingIdentity = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettingsIdentity(resolvedColliderSettings) : null;
+    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ...(colliderIdentity === null ? {} : { flowColliderSettingsIdentity: colliderIdentity, bombContacts: 0 }), ...(boxingIdentity === null ? {} : { boxingColliderSettingsIdentity: boxingIdentity }), ranked: scoreVariant.rulesetId === FLOW_COLLIDER_RULESET || scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? false : scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
   }
 
   /** @param {DataRecord} event @returns {readonly string[]} */
@@ -1002,6 +1139,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function scoringSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).scoringSettings); }
   /** @param {DataRecord} event @returns {DataRecord} */
   function flowColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).flowColliderSettings ?? defaultFlowColliderSettings); }
+  function boxingColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).boxingColliderSettings ?? defaultBoxingColliderSettings); }
   /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
   function normalizeContentConfigurationPurpose(value) {
     if (value === undefined) return "play";
@@ -1021,15 +1159,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function advanceTimestamp(value) { const next = requireNonNegativeNumber(value, "timestamp_invalid"); if (next < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back"); timestampMs = next; }
 }
 
-/** @param {readonly DataRecord[]} sourceEvents @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings */
-function bindEventTruth(sourceEvents, contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings) {
+/** @param {readonly DataRecord[]} sourceEvents @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings @param {DataRecord} [sourceBoxingColliderSettings] */
+function bindEventTruth(sourceEvents, contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings) {
   const result = new WeakMap();
-  const truth = makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings);
+  const truth = makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings);
   for (const event of sourceEvents) result.set(event, truth);
   return result;
 }
-/** @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings */
-function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings, flowColliderSettings: sourceFlowColliderSettings }); }
+/** @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings @param {DataRecord} [sourceBoxingColliderSettings] */
+function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings, flowColliderSettings: sourceFlowColliderSettings, boxingColliderSettings: sourceBoxingColliderSettings }); }
 
 /** @param {GameplayCoordinatorOptions} options */
 function normalizeOptions(options) {
@@ -1078,7 +1216,7 @@ function normalizeVariant(value) {
   const mode = record.mode === "flow" ? "flow" : record.mode === "boxing" ? "boxing" : (() => { throw gameplayError("mode_invalid", "Variant mode is unsupported"); })();
   const recipeId = record.recipeId === null ? null : requireString(record.recipeId, "recipe_invalid");
   if (mode === "flow" && (![FLOW_COLLIDER_RULESET, FLOW_GRID_RULESET].includes(rulesetId) || recipeId !== null)) throw gameplayError("variant_identity_invalid", "Flow variants require a supported Flow ruleset and no conversion recipe");
-  if (mode === "boxing" && ((rulesetId.startsWith("flow_grid_") || rulesetId === FLOW_COLLIDER_RULESET) || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
+  if (mode === "boxing" && rulesetId !== BOXING_COLLIDER_RULESET && ((rulesetId.startsWith("flow_grid_") || rulesetId === FLOW_COLLIDER_RULESET) || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
   const modifierIds = requireStringArray(record.modifierIds ?? [], "modifier_ids_invalid", 32);
   if (modifierIds.includes("no_obstacles") && modifierIds.includes("obstacle_visual_only")) throw gameplayError("modifier_ids_invalid", "Obstacle accessibility modes conflict");
   if (new Set(modifierIds).size !== modifierIds.length || [...modifierIds].sort(compareCodePoints).some((entry, index) => entry !== modifierIds[index]) || modifierIds.some((entry) => !SUPPORTED_MODIFIERS.includes(entry))) throw gameplayError("modifier_ids_invalid", "Modifier identity must be supported, sorted and unique");
@@ -1138,7 +1276,18 @@ function validateEventForVariant(event, selectedVariant) {
     const action = expectedAction(event);
     if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
     if (action === "squat" || action === "weave_left" || action === "weave_right") validateBoxingObstacle(event);
-    if (selectedVariant.rulesetId === "boxing_spatial_grid_v1") {
+    if (selectedVariant.rulesetId === BOXING_COLLIDER_RULESET) {
+      if (PUNCH_ACTIONS.includes(action)) requireGridCell(event.placement, "event_placement_invalid");
+    else if (action === "guard" || action === "crossed_guard") {
+        const target = requireRecord(event.guardTarget, "guard_target_invalid");
+        requireGridCell(target.leftCell, "guard_target_invalid");
+        requireGridCell(target.rightCell, "guard_target_invalid");
+        if (action === "crossed_guard" && target.crossed !== true) throw gameplayError("guard_target_invalid", "Crossed guards must set the crossed flag on their guard target");
+      } else if (event.checkpoint !== undefined) {
+        const checkpoint = requireRecord(event.checkpoint, "checkpoint_invalid");
+        if (checkpoint.kind !== "instantaneous" || typeof checkpoint.timingWindowMs !== "number") throw gameplayError("checkpoint_invalid", "Boxing Collider checkpoints must be instantaneous with a timing window");
+      }
+    } else if (selectedVariant.rulesetId === "boxing_spatial_grid_v1") {
       if (PUNCH_ACTIONS.includes(action)) {
         const target = requireRecord(event.spatialTarget, "spatial_target_invalid");
         requireGridCell(target.targetCell, "spatial_target_invalid");
@@ -1254,6 +1403,16 @@ function normalizeFlowColliderSettings(value, selectedVariant) {
   }
   try { return createFlowColliderSettings(value); }
   catch (error) { throw gameplayError("flow_collider_settings_invalid", error instanceof Error ? error.message : "Flow Collider settings are invalid"); }
+}
+
+/** @param {unknown} value @param {DataRecord} selectedVariant @returns {DataRecord} */
+function normalizeBoxingColliderSettings(value, selectedVariant) {
+  if (selectedVariant.rulesetId !== BOXING_COLLIDER_RULESET) {
+    if (value !== undefined) throw gameplayError("boxing_collider_settings_invalid", "Boxing Collider settings require the Boxing Colliders ruleset");
+    return defaultBoxingColliderSettings;
+  }
+  try { return createBoxingColliderSettings(value); }
+  catch (error) { throw gameplayError("boxing_collider_settings_invalid", error instanceof Error ? error.message : "Boxing Collider settings are invalid"); }
 }
 
 /** @param {unknown} value @returns {readonly DataRecord[]} */
@@ -1389,7 +1548,7 @@ function scoreSettingsIdentity(settings) { return `scoring-v1:${JSON.stringify(s
 /** @param {number} value */
 function finiteScore(value) { if (!Number.isFinite(value) || value < 0) throw gameplayError("score_value_invalid", "Score arithmetic must remain finite and non-negative"); return Object.is(value, -0) ? 0 : value; }
 /** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
-function scorePartitionKey(variant, profile, settings, colliderSettings = defaultFlowColliderSettings) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings), ...(variant.rulesetId === FLOW_COLLIDER_RULESET ? [flowColliderSettingsIdentity(colliderSettings)] : [])].join("|"); }
+function scorePartitionKey(variant, profile, settings, colliderSettings = defaultFlowColliderSettings) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings), ...(variant.rulesetId === FLOW_COLLIDER_RULESET ? [flowColliderSettingsIdentity(colliderSettings)] : variant.rulesetId === BOXING_COLLIDER_RULESET ? [boxingColliderSettingsIdentity(colliderSettings)] : [])].join("|"); }
 /** @param {DataRecord} variant */
 function publicVariant(variant) { return Object.freeze({ variantId: variant.variantId, chartId: variant.chartId, mode: variant.mode, rulesetId: variant.rulesetId, recipeId: variant.recipeId, modifierIds: variant.modifierIds, ranked: variant.ranked, localOnly: variant.localOnly, mapHash: variant.mapHash, scoreIdentityHash: variant.scoreIdentityHash, provenance: variant.provenance }); }
 /** @param {"three" | "two" | "one" | "complete" | "cancelled"} state @param {AeroCountdownReason | null} reason @param {number | null} value @param {number} timestampMs @param {string | null} calibrationId */
