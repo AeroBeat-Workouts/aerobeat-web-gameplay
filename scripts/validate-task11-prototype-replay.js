@@ -108,8 +108,8 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   ready(coordinator, config(candidate, [event(candidate,"late",9000,"hook_left")]));
   coordinator.advance({ timestampMs: 4000, clock: clock(1000,true), input: input(4000,null,{paused:true,fresh:true}) });
   assert.equal(coordinator.getSnapshot().session.state,"paused_tracking");
-  coordinator.advance({ timestampMs: 4500, clock: clock(0,false), input: input(4500,null,{calibrationId:"cal-1"}) });
-  assert.equal(coordinator.getSnapshot().session.state,"paused_tracking");
+  coordinator.advance({ timestampMs: 4500, clock: clock(0,false), input: input(4500,null,{calibrationId:"cal-1",fresh:true}) });
+  assert.equal(coordinator.getSnapshot().session.state,"paused_tracking","the input service still requires recalibration");
   coordinator.advance({ timestampMs: 5000, clock: clock(0,false), input: input(5000,null,{calibrationId:"cal-2"}) });
   assert.equal(coordinator.getSnapshot().session.state,"countdown");
   coordinator.advance({ timestampMs: 6000, clock: clock(0,false) }); coordinator.advance({ timestampMs: 7000, clock: clock(0,false) }); coordinator.advance({ timestampMs: 8000, clock: clock(0,false) });

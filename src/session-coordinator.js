@@ -528,8 +528,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const readiness = /** @type {string} */ (normalized.readiness);
     const trackingPaused = normalized.trackingPaused === true;
     lastInput = input;
-    const recoveryIdMatches = invalidatedCalibrationId !== null && nextCalibrationId === invalidatedCalibrationId;
-    freshCalibrationRequired = normalized.upstreamFreshRequired === true || nextCalibrationId === null || recoveryIdMatches;
+    // The input service is the authoritative source for whether recalibration
+    // is required. It distinguishes tracking losses (recoverable via partial
+    // auto-recovery, same calibrationId) from source changes (full T-pose,
+    // new calibrationId). The coordinator trusts the upstream signal rather
+    // than re-deriving it from the calibrationId.
+    freshCalibrationRequired = normalized.upstreamFreshRequired === true || nextCalibrationId === null;
     safetyReady = (readiness === "ready" || readiness === "countdown") && !trackingPaused && !freshCalibrationRequired;
     if (nextCalibrationId !== calibrationId) {
       const priorCalibrationId = calibrationId;

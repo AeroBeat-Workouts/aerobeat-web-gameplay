@@ -530,8 +530,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
   coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, null, { paused: true, fresh: true }) });
   assert.equal(coordinator.getSnapshot().session.state, "paused_tracking");
-  coordinator.advance({ timestampMs: 4500, clock: clock(1000, false), input: input(4500, null, { calibrationId: "cal-1" }) });
-  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "the invalidated calibration cannot resume gameplay");
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, false), input: input(4500, null, { calibrationId: "cal-1", fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "the input service still requires recalibration (same calibrationId, not yet recovered)");
   assert.equal(coordinator.getSnapshot().safety.freshCalibrationRequired, true);
   coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, null, { calibrationId: "cal-2" }) });
   assert.equal(coordinator.getSnapshot().session.state, "countdown");
@@ -546,6 +546,44 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 52_000, clock: clock(0, false) });
   assert.equal(coordinator.getSnapshot().session.state, "playing");
   assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
+}
+
+// Partial auto-recovery (same calibrationId, input clears freshCalibrationRequired)
+// resumes the session WITHOUT a new calibrationId via the tracking_resume countdown.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "recovery-resume" });
+  readyPlaying(coordinator, [event("recover", 9000, "hook_left")]);
+  // Tracking loss: input reports paused + fresh.
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, null, { paused: true, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking");
+  // Partial recovery: input clears freshCalibrationRequired, same calibrationId.
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, false), input: input(4500, null, { calibrationId: "cal-1" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown", "partial recovery auto-resumes via tracking_resume countdown");
+  assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+  assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-1", "no new calibrationId was minted by partial recovery");
+  // Countdown completes → playing.
+  coordinator.advance({ timestampMs: 50_000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 50_999, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 51_000, clock: clock(0, false) });
+  coordinator.advance({ timestampMs: 52_000, clock: clock(0, false) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+}
+
+// Invalidation (source change) still requires full T-pose: input keeps
+// freshCalibrationRequired true until a NEW calibrationId is committed.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "source-invalid" });
+  readyPlaying(coordinator, [event("src", 9000, "hook_left")]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, null, { paused: true, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking");
+  // Source change: input keeps fresh=true even with the same calibrationId.
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, false), input: input(4500, null, { calibrationId: "cal-1", fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "source change keeps the session paused");
+  assert.equal(coordinator.getSnapshot().safety.freshCalibrationRequired, true);
+  // Full T-pose completes: new calibrationId, fresh cleared.
+  coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, null, { calibrationId: "cal-2" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown");
+  assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-2", "full T-pose mints a new calibrationId");
 }
 
 // Paused future swap preserves judged and active IDs, replaces only future events.

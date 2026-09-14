@@ -33,7 +33,7 @@ const server = createServer(async (request, response) => {
         states.push(runtime.getSnapshot().session.state);
         runtime.advance({ timestampMs: 3100, clock: clock(100, true), input: input("cal-1", true, true) });
         states.push(runtime.getSnapshot().session.state);
-        runtime.advance({ timestampMs: 3200, clock: clock(100, false), input: input("cal-1") });
+        runtime.advance({ timestampMs: 3200, clock: clock(100, false), input: input("cal-1", false, true) });
         states.push(runtime.getSnapshot().session.state);
         runtime.advance({ timestampMs: 3300, clock: clock(100, false), input: input("cal-2") });
         states.push(runtime.getSnapshot().session.state);
