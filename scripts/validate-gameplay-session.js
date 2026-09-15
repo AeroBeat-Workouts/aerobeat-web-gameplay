@@ -427,7 +427,190 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.deepEqual(coordinator.getObstacleOutcomes(), [], "flow walls never emit legacy obstacle outcomes under the colliders ruleset");
   assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "the wall interval settles exactly once through a flow hazard outcome");
   assert.equal(coordinator.getJudgements().length, 0, "walls and bombs never produce synthetic note judgements");
-}// Every invalid or discontinuous boundary still severs the sparse interpolation chain.
+}
+
+// hazardContact: enter→active+sinceMs exact; exit→inactive+releasedAtMs exact;
+// continuous occupation across obstacle replacement keeps sinceMs; pause clears;
+// non-flow-ruleset / non-play purpose → always inactive.
+{
+  const flow = variant("flow_colliders_v1");
+  const wallGeometry = { sourceGeometry: { schema: "aerobeat/obstacle_source_geometry", version: 1, coordinateSpace: "beatsaber_v3_obstacle_rect", kind: "v3_rect", x: 1, y: 0, width: 1, height: 3 }, gameplayGeometry: { schema: "aerobeat/obstacle_gameplay_geometry", version: 1, coordinateSpace: "aerobeat_top_left_grid", x: 1, y: 0, width: 1, height: 3 }, gridMask: [1, 5, 9] };
+
+  // --- Single wall: enter → active+sinceMs, exit → inactive+releasedAtMs ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-enter-exit" });
+    // Wall 700-800; nose outside→inside→outside
+    readyPlaying(c, [canonicalFlowEvent("hc-wall", 700, { start: 1.4, end: 1.6, type: "obstacle", ...wallGeometry }, 800)], flow);
+    // Baseline: nose outside at timeline 700
+    const base = evidence("hc-base", 3700, []);
+    base.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    base.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    // Enter: nose inside at timeline 750
+    const inside = evidence("hc-in", 3800, []);
+    inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const inInput = input(3800, inside); inInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inInput });
+    // sinceMs is the exact segment-clip entry point
+    const enterHc = c.getSnapshot().hazardContact;
+    assert.equal(enterHc.active, true, "enter: active");
+    assert.equal(enterHc.sinceMs, 722.7272727272727, "enter: exact sinceMs from segment clip");
+    assert.equal(enterHc.releasedAtMs, null, "enter: releasedAtMs null");
+    // Exit: nose outside at timeline 850
+    const outside = evidence("hc-out", 3900, []);
+    outside.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    outside.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const outInput = input(3900, outside); outInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3900, clock: clock(850, true), input: outInput });
+    // releasedAtMs clamped to interval end (800) because exit is beyond the wall
+    const exitHc = c.getSnapshot().hazardContact;
+    assert.equal(exitHc.active, false, "exit: inactive");
+    assert.equal(exitHc.sinceMs, null, "exit: sinceMs null");
+    assert.equal(exitHc.releasedAtMs, 800, "exit: exact releasedAtMs (clamped to interval end)");
+  }
+
+  // --- Continuous occupation across obstacle replacement keeps sinceMs ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-replace" });
+    // Wall A: 700-760, Wall B: 740-800 (overlapping; nose stays inside the combined region)
+    const wallA = canonicalFlowEvent("hc-a", 700, { start: 1.4, end: 1.52, type: "obstacle", ...wallGeometry }, 760);
+    const wallB = canonicalFlowEvent("hc-b", 740, { start: 1.48, end: 1.6, type: "obstacle", ...wallGeometry }, 800);
+    readyPlaying(c, [wallA, wallB], flow);
+    // Baseline: nose outside at timeline 700
+    const base = evidence("hc-replace-base", 3700, []);
+    base.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    base.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    // Enter A at 750
+    const inA = evidence("hc-replace-in", 3800, []);
+    inA.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inA.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const inAInput = input(3800, inA); inAInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inAInput });
+    const enterHc = c.getSnapshot().hazardContact;
+    assert.equal(enterHc.active, true, "enter A: active");
+    assert.equal(enterHc.releasedAtMs, null, "enter A: releasedAtMs null");
+    const enterSinceMs = enterHc.sinceMs;
+    // At 780: A exits (end 760), B still inside (end 800) — set never empty
+    const inB = evidence("hc-replace-b", 3900, []);
+    inB.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inB.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const inBInput = input(3900, inB); inBInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3900, clock: clock(780, true), input: inBInput });
+    const hc = c.getSnapshot().hazardContact;
+    assert.equal(hc.active, true, "still active after replacement");
+    assert.equal(hc.sinceMs, enterSinceMs, "sinceMs stays at original episode start across replacement");
+    assert.equal(hc.releasedAtMs, null, "releasedAtMs stays null — no true empty transition");
+    // Exit B at 820
+    const outB = evidence("hc-replace-out", 4000, []);
+    outB.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    outB.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const outBInput = input(4000, outB); outBInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 4000, clock: clock(820, true), input: outBInput });
+    assert.equal(c.getSnapshot().hazardContact.active, false, "exit B: inactive");
+    assert.equal(c.getSnapshot().hazardContact.sinceMs, null, "exit B: sinceMs null");
+    assert.ok(c.getSnapshot().hazardContact.releasedAtMs !== null, "exit B: releasedAtMs set");
+  }
+
+  // --- Pause clears the state ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-pause" });
+    readyPlaying(c, [canonicalFlowEvent("hc-pause-wall", 700, { start: 1.4, end: 2.0, type: "obstacle", ...wallGeometry }, 2000)], flow);
+    // Baseline: nose outside at timeline 700
+    const base = evidence("hc-pause-base", 3700, []);
+    base.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    base.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    // Enter at 750
+    const inside = evidence("hc-pause-in", 3800, []);
+    inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const pauseInput = input(3800, inside); pauseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: pauseInput });
+    assert.equal(c.getSnapshot().hazardContact.active, true, "active before pause");
+    c.pause(3900);
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "pause clears hazardContact");
+  }
+
+  // --- Non-flow-ruleset → always inactive ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-non-flow" });
+    readyPlaying(c, [event("hc-boxing-squat", 700, "squat")]);
+    const sample = evidence("hc-boxing-frame", 3800, ["squat"]);
+    sample.anchors.find((a) => a.anchor === "nose").cell = 0;
+    sample.anchors.find((a) => a.anchor === "nose").subcell = 0;
+    c.advance({ timestampMs: 3800, clock: clock(700, true), input: input(3800, sample) });
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "boxing squat: hazardContact always inactive");
+  }
+
+  // --- Non-play purpose (visual_test) → always inactive ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-visual", instanceId: "game-a" });
+    const flow = variant("flow_colliders_v1");
+    c.configureContent(config([canonicalFlowEvent("hc-visual-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", ...wallGeometry }, 725)], flow), { purpose: "visual_test" });
+    c.setLeaseSnapshot({ schema: "aerobeat/media_lease_snapshot", version: 1, ownerInstanceId: "game-a", generation: 1, state: "owned", resources: ["audio"] });
+    c.requestStart(0, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" });
+    assert.equal(c.getSnapshot().session.state, "playing");
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "visual_test: hazardContact always inactive");
+  }
+
+  // --- Run end (completion) clears the state ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-completed" });
+    const wall = canonicalFlowEvent("hc-end-wall", 100, { start: 0.2, end: 0.4, type: "obstacle", ...wallGeometry }, 400);
+    readyPlaying(c, [wall], flow);
+    const base = evidence("hc-end-base", 3100, []);
+    base.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    base.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const baseInput = input(3100, base); baseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3100, clock: clock(150, true, 500), input: baseInput });
+    const inside = evidence("hc-end-in", 3200, []);
+    inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const endInput = input(3200, inside); endInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3200, clock: clock(250, true, 500), input: endInput });
+    assert.equal(c.getSnapshot().hazardContact.active, true, "active during play before completion");
+    c.stop(4000);
+    assert.equal(c.getSnapshot().session.state, "completed");
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "stop clears hazardContact");
+  }
+
+  // --- Hostile/missing evidence paths don't corrupt the state ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-hostile" });
+    const wall = canonicalFlowEvent("hc-hostile-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", ...wallGeometry }, 725);
+    readyPlaying(c, [wall], flow);
+    // No input evidence → stays inactive
+    c.advance({ timestampMs: 3800, clock: clock(700, true), input: input(3800, null) });
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "no evidence: hazardContact stays inactive");
+    // Baseline outside at 700
+    const base = evidence("hc-hostile-base", 3900, []);
+    base.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    base.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const baseInput = input(3900, base); baseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3900, clock: clock(700, true), input: baseInput });
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "baseline outside: still inactive");
+    // Enter at 712
+    const inside = evidence("hc-hostile-in", 4000, []);
+    inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const hostileInput = input(4000, inside); hostileInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 4000, clock: clock(712, true), input: hostileInput });
+    assert.equal(c.getSnapshot().hazardContact.active, true, "active after valid enter");
+    // Stale evidence (>150ms gap) severs → inactive
+    const stale = evidence("hc-hostile-stale", 4200, []);
+    stale.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    stale.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const staleInput = input(4200, stale); staleInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 4400, clock: clock(720, true), input: staleInput });
+    assert.equal(c.getSnapshot().hazardContact.active, false, "stale evidence severs: hazardContact inactive");
+  }
+}
+// Every invalid or discontinuous boundary still severs the sparse interpolation chain.
 {
   const flow = variant("flow_colliders_v1");
   const sourceGeometry={schema:"aerobeat/obstacle_source_geometry",version:1,coordinateSpace:"beatsaber_v2_legacy_obstacle",kind:"v2_type_1",x:1,y:2,width:1,height:3};const gameplayGeometry={schema:"aerobeat/obstacle_gameplay_geometry",version:1,coordinateSpace:"aerobeat_top_left_grid",x:1,y:0,width:1,height:3};

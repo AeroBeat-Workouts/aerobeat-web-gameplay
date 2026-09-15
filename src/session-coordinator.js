@@ -125,6 +125,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const obstacleStates = /** @type {Map<string, ObstacleState>} */ (new Map());
   const obstacleOutcomes = /** @type {DataRecord[]} */ ([]);
   const occupiedObstacleIds = new Set();
+  /** Presentation-only hazard contact episode state (flow_colliders_v1 play purpose only). */
+  let hazardContactSinceMs = null;
+  let hazardContactReleasedAtMs = null;
   let previousNoseSample = /** @type {NoseSample | null} */ (null);
   let lastObstacleSourceIdentity = /** @type {string | null} */ (null);
   let obstacleEpisodeOrdinal = 0;
@@ -470,6 +473,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     cancelCountdown();
     state = "completed";
     pauseReason = null;
+    clearContinuousCollisionHistory();
     publish(null);
     return snapshot;
   }
@@ -508,7 +512,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     cancelCountdown();
     latestEvidence = null;
     lastInput = null;
-    clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; bombStates.clear();
+    clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
     pauseReason = null;
     publish(null);
     listeners.clear();
@@ -715,6 +719,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       while (index < ordered.length && ordered[index].timelineMs === timelineMs) group.push(ordered[index++]);
       const entrants = group.filter((entry) => entry.kind === "enter" && !occupiedObstacleIds.has(entry.eventId));
       if (occupiedObstacleIds.size === 0 && entrants.length > 0) {
+        if (variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") hazardContactSinceMs = timelineMs;
         obstacleEpisodeOrdinal += 1; const episodeId = `${sessionId}:g${generation}:obstacle:${obstacleEpisodeOrdinal}`;
         const winner = [...entrants].sort((left, right) => compareCodePoints(left.eventId, right.eventId))[0];
         for (const entry of entrants) { const tracker = obstacleStates.get(entry.eventId); if (tracker && tracker.contactEpisodeId === null) tracker.contactEpisodeId = episodeId; }
@@ -723,6 +728,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       }
       for (const entry of entrants) occupiedObstacleIds.add(entry.eventId);
       for (const entry of group) if (entry.kind === "exit") occupiedObstacleIds.delete(entry.eventId);
+      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") { hazardContactReleasedAtMs = timelineMs; hazardContactSinceMs = null; }
     }
   }
 
@@ -745,6 +751,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         hazardOutcomes.push(outcome);
       } else obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: String(variant?.rulesetId ?? FLOW_COLLIDER_RULESET), result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
       occupiedObstacleIds.delete(eventId); obstacleStates.delete(eventId);
+      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") { hazardContactReleasedAtMs = timelinePositionMs; hazardContactSinceMs = null; }
     }
     obstacleOutcomes.sort((left, right) => compareCodePoints(String(left.eventId), String(right.eventId)));
   }
@@ -841,7 +848,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
-    clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear();
+    clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
     if (requireRecoveryBaselines && (variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET)) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
   }
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right */
@@ -1115,12 +1122,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       selectedVariant: variant ? publicVariant(variant) : null, profileIdentity, scoringSettings,
       activeEventIds: Object.freeze([...activeIds].sort(compareCodePoints)), judgedEventIds: Object.freeze([...judgedIds].sort(compareCodePoints)),
       judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]), obstacleOutcomes: Object.freeze([...obstacleOutcomes]), hazardOutcomes: Object.freeze([...hazardOutcomes]),
+      hazardContact: Object.freeze({ active: occupiedObstacleIds.size > 0, sinceMs: hazardContactSinceMs, releasedAtMs: hazardContactReleasedAtMs }),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
     });
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
