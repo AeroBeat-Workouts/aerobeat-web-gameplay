@@ -352,6 +352,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
             applyPendingColliderHazards();
           } else if (variant?.rulesetId === BOXING_COLLIDER_RULESET) {
             evaluateBoxingColliderNotes();
+            // B12 (0.0.58): boxing obstacle checkpoints (squat / weave_left /
+            // weave_right) carry the SAME normalized nose geometry as Flow
+            // obstacles; evaluate the nose–obstacle collision on the identical
+            // Flow nose path so a real contact produces a
+            // `obstacleOutcomes` entry (rulesetId boxing_collider_v1,
+            // result "contact") the assembly's hazard-contact derivation can
+            // read to set hazardContactActive (red edge vignette).
+            evaluateBoxingObstacles();
           } else {
             evaluateFlowObstacles();
             judgeLiveEvents();
@@ -710,6 +718,89 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     finalizeObstacles(obstacles);
   }
 
+  /**
+   * B12 (0.0.58): boxing_collider_v1 nose–obstacle collision. Boxing obstacle
+   * checkpoints (`squat` / `weave_left` / `weave_right`) carry the same
+   * normalized `gameplayGeometry` / `gridMask` as Flow obstacles. This mirrors
+   * `evaluateFlowObstacles` nose tracking (continuous segment clipping,
+   * occupied-obstacle enter/exit boundaries, and `obstacleOutcomes` emission
+   * with `rulesetId: "boxing_collider_v1"`). It is presentation-only: the
+   * obstacle checkpoint action itself is scored through `tryHit` in
+   * `judgeLiveEvents`, and a head collision applies no boxing score
+   * consequence (no combo break), so the assembly's hazard-contact derivation
+   * (obstacleOutcomes contact -> hazardContactActive) fires the same red edge
+   * vignette as Flow. Finalization runs before the sample-validity gate so an
+   * expired wall closes out even when the current frame has no valid
+   * measurement (mirrors evaluateFlowObstacles' finalize ordering).
+   */
+  function evaluateBoxingObstacles() {
+    if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || sessionPurpose !== "play") return;
+    const obstacles = events.filter((event) => (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
+    if (obstacles.length === 0) return;
+    // Finalize any obstacle whose interval has fully elapsed BEFORE checking
+    // for a fresh nose sample: an expired wall must close out as
+    // unevaluated_tracking even when the current frame carries no valid
+    // measurement (mirrors evaluateFlowObstacles' finalize ordering).
+    for (const obstacle of obstacles) {
+      const eventId = String(obstacle.eventId);
+      if (timelinePositionMs < Number(obstacle.intervalEndTimestampMs)) continue;
+      const tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
+      const result = tracker.contact.length > 0 ? "contact" : coversInterval(tracker.coverage, Number(obstacle.intervalStartTimestampMs), Number(obstacle.intervalEndTimestampMs)) ? "avoided" : "unevaluated_tracking";
+      const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
+      obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: BOXING_COLLIDER_RULESET, result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
+      occupiedObstacleIds.delete(eventId);
+      obstacleStates.delete(eventId);
+      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null) { hazardContactReleasedAtMs = timelinePositionMs; hazardContactSinceMs = null; }
+    }
+    const activeObstacles = obstacles.filter((event) => !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
+    if (activeObstacles.length === 0) return;
+    /** @type {NoseSample | null} */
+    const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); return; }
+    const prior = previousNoseSample;
+    if (sample.sourceFrameId === lastEvidenceFrameId) {
+      const identicalRepeat = prior !== null && prior.sourceFrameId === sample.sourceFrameId && prior.calibrationId === sample.calibrationId && prior.measurementTimestampMs === sample.measurementTimestampMs && prior.sx === sample.sx && prior.sy === sample.sy;
+      if (identicalRepeat) return;
+      previousNoseSample = null;
+      occupiedObstacleIds.clear();
+      return;
+    }
+    lastEvidenceFrameId = sample.sourceFrameId;
+    latestEvidenceTimelineMs = sample.songTimeMs;
+    if (noseBaselineRequired) { noseBaselineRequired = false; previousNoseSample = sample; return; }
+    if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
+      previousNoseSample = null;
+      occupiedObstacleIds.clear();
+      return;
+    }
+    const continuous = prior !== null && prior.calibrationId === sample.calibrationId && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
+    if (prior !== null && !continuous) occupiedObstacleIds.clear();
+    /** @type {{timelineMs:number,kind:"enter"|"exit",eventId:string}[]} */ const boundaries = [];
+    for (const obstacle of activeObstacles) {
+      const eventId = String(obstacle.eventId);
+      let tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
+      if (continuous && prior) {
+        const coverageStart = Math.max(prior.songTimeMs, Number(obstacle.intervalStartTimestampMs));
+        const coverageEnd = Math.min(sample.songTimeMs, Number(obstacle.intervalEndTimestampMs));
+        if (coverageStart <= coverageEnd) tracker = { ...tracker, coverage: addInterval(tracker.coverage, coverageStart, coverageEnd) };
+        const contact = clipNoseSegment(obstacle, prior, sample);
+        if (contact) {
+          tracker = { ...tracker, contact: addInterval(tracker.contact, contact.startMs, contact.endMs), firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs ?? contact.startMs, evidenceFrameId: tracker.evidenceFrameId ?? sample.sourceFrameId, calibrationId: tracker.calibrationId ?? sample.calibrationId };
+          const beganInside = pointContactsObstacle(obstacle, prior);
+          const endedInside = pointContactsObstacle(obstacle, sample);
+          if (!occupiedObstacleIds.has(eventId) && (!beganInside || contact.startMs >= prior.songTimeMs)) boundaries.push({ timelineMs: contact.startMs, kind: "enter", eventId });
+          if (!endedInside) boundaries.push({ timelineMs: contact.endMs, kind: "exit", eventId });
+        } else if (occupiedObstacleIds.has(eventId)) boundaries.push({ timelineMs: prior.songTimeMs, kind: "exit", eventId });
+      } else if (pointContactsObstacle(obstacle, sample)) {
+        tracker = { ...tracker, contact: addInterval(tracker.contact, sample.songTimeMs, sample.songTimeMs), firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs ?? sample.songTimeMs, evidenceFrameId: tracker.evidenceFrameId ?? sample.sourceFrameId, calibrationId: tracker.calibrationId ?? sample.calibrationId };
+        boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId }, { timelineMs: sample.songTimeMs, kind: "exit", eventId });
+      }
+      obstacleStates.set(eventId, tracker);
+    }
+    processObstacleBoundaries(boundaries);
+    previousNoseSample = sample;
+  }
+
   /** @param {readonly {timelineMs:number,kind:"enter"|"exit",eventId:string}[]} boundaries */
   function processObstacleBoundaries(boundaries) {
     const ordered = [...boundaries].sort((left, right) => left.timelineMs - right.timelineMs || (left.kind === right.kind ? compareCodePoints(left.eventId, right.eventId) : left.kind === "enter" ? -1 : 1));
@@ -719,16 +810,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       while (index < ordered.length && ordered[index].timelineMs === timelineMs) group.push(ordered[index++]);
       const entrants = group.filter((entry) => entry.kind === "enter" && !occupiedObstacleIds.has(entry.eventId));
       if (occupiedObstacleIds.size === 0 && entrants.length > 0) {
-        if (variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") hazardContactSinceMs = timelineMs;
+        if ((variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET) && sessionPurpose === "play") hazardContactSinceMs = timelineMs;
         obstacleEpisodeOrdinal += 1; const episodeId = `${sessionId}:g${generation}:obstacle:${obstacleEpisodeOrdinal}`;
         const winner = [...entrants].sort((left, right) => compareCodePoints(left.eventId, right.eventId))[0];
         for (const entry of entrants) { const tracker = obstacleStates.get(entry.eventId); if (tracker && tracker.contactEpisodeId === null) tracker.contactEpisodeId = episodeId; }
-        const tracker = obstacleStates.get(winner.eventId); if (tracker) tracker.consequenceApplied = true;
-        applyObstacleConsequence();
+        // B12 (0.0.58): boxing head collisions are presentation-only — no
+        // score consequence (no combo break), so the outcome carries
+        // consequenceApplied false and applyObstacleConsequence is skipped.
+        if (variant?.rulesetId !== BOXING_COLLIDER_RULESET) { const tracker = obstacleStates.get(winner.eventId); if (tracker) tracker.consequenceApplied = true; applyObstacleConsequence(); }
       }
       for (const entry of entrants) occupiedObstacleIds.add(entry.eventId);
       for (const entry of group) if (entry.kind === "exit") occupiedObstacleIds.delete(entry.eventId);
-      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") { hazardContactReleasedAtMs = timelineMs; hazardContactSinceMs = null; }
+      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && (variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET) && sessionPurpose === "play") { hazardContactReleasedAtMs = timelineMs; hazardContactSinceMs = null; }
     }
   }
 
