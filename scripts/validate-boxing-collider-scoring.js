@@ -581,4 +581,69 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.deepEqual(judgementsAt(spaced), [["spaced-a", "hit", []], ["spaced-b", "hit", []]], "the 360ms chart-side punch spacing remains judgeable per beat");
 }
 
+// --- F3 (0.0.60 W3): opposite-hand strictness proof for collider straights ----------------------
+// Derrick's check: an opposite hand may physically sit inside the other lane's straight box, but the
+// judge reads ONLY the event's own-hand wrist sample, so the opposite hand must never credit the beat.
+// These assertions pass on current code and are the permanent regression guard (no judge code change).
+// Geometry (center row judges at Y 1, default reach, inflated half-extent 0.495):
+//   straight_left  cell 5 -> target (1,1), X slab [0.505, 1.495]
+//   straight_right cell 6 -> target (2,1), X slab [1.505, 2.495]
+// The `send` helper takes judge-world (sx,sy); a "far" point sits outside every straight slab.
+{
+  // 1) Crossing (Derrick's physical repro): a straight_right at cell 6 while the LEFT wrist
+  //    crosses into the right-lane box and the RIGHT wrist (its own hand) stays far away.
+  //    The left wrist in the box must NEVER credit straight_right -> miss, never hit.
+  const crossingR = ready([beat("crossing-right", 1000, "straight_right", { placement: 6 })]);
+  send(crossingR, 900, [0.9, 1], [0.2, 0.3], [3, 2]);   // left in its own lane, right far away
+  send(crossingR, 1000, [1.9, 1], [0.2, 0.3], [3, 2]);  // left crosses into the right-lane box
+  send(crossingR, 1181, [1.9, 1], [0.2, 0.3], [3, 2]);  // finalize past the late bound
+  assert.deepEqual(judgementsAt(crossingR), [["crossing-right", "miss", ["wrong_collider"]]],
+    "opposite (left) hand inside the right-lane box never credits straight_right");
+
+  // 2) Symmetric: a straight_left at cell 5 while the RIGHT wrist crosses into the left-lane
+  //    box and the LEFT wrist (its own hand) stays far away -> miss, never hit.
+  const crossingL = ready([beat("crossing-left", 1000, "straight_left", { placement: 5 })]);
+  send(crossingL, 900, [3.0, 0.3], [2.1, 1], [3, 2]);   // right in its own lane, left far away
+  send(crossingL, 1000, [3.0, 0.3], [1.0, 1], [3, 2]);  // right crosses into the left-lane box
+  send(crossingL, 1181, [3.0, 0.3], [1.0, 1], [3, 2]);  // finalize past the late bound
+  assert.deepEqual(judgementsAt(crossingL), [["crossing-left", "miss", ["wrong_collider"]]],
+    "opposite (right) hand inside the left-lane box never credits straight_left");
+
+  // 3) Simultaneous crossing: both wrists cross into each other's boxes on the same beat, each
+  //    own hand OUT of its own box and the opposite hand IN it. Each beat is judged only by its
+  //    own (absent) hand -> both MISS.
+  // Approach vertically from above (x fixed at 1.9 / 1.0): a straight horizontal cross from the
+  // side would sweep the segment THROUGH the own-hand box and credit it (swept contact is real
+  // production behavior). The vertical drop never enters the own box — it only enters the
+  // opposite box on arrival, which is exactly the crossing Derrick described.
+  const simCross = ready([beat("sim-cross-l", 1000, "straight_left", { placement: 5 }), beat("sim-cross-r", 1000, "straight_right", { placement: 6 })]);
+  send(simCross, 900, [1.9, 2.5], [1.0, 2.5], [3, 2]);  // above the opposite boxes, outside every box
+  send(simCross, 1000, [1.9, 1], [1.0, 1], [3, 2]);     // left dropped into right box, right into left
+  send(simCross, 1181, [1.9, 1], [1.0, 1], [3, 2]);     // finalize
+  assert.deepEqual(
+    judgementsAt(simCross).sort((a, b) => a[0].localeCompare(b[0])),
+    [["sim-cross-l", "miss", ["wrong_collider"]], ["sim-cross-r", "miss", ["wrong_collider"]]],
+    "simultaneous crossing: each beat is judged only by its own (absent) hand");
+
+  // Geometry sanity for the whole block: the crossing points are truly INSIDE the opposite
+  // boxes and the far wrists truly OUTSIDE, so every miss above is hand-strictness, not a
+  // geometry slip. (pointContactsBoxingTarget(target, sample, radius, windowMs).)
+  const tOwnL = { centerTimestampMs: 1000, x: 1, y: 1 };   // straight_left cell 5
+  const tOwnR = { centerTimestampMs: 1000, x: 2, y: 1 };   // straight_right cell 6
+  assert.equal(pointContactsBoxingTarget(tOwnR, { songTimeMs: 1000, sx: 1.9, sy: 1 }, 0.12, 180), true, "crossing left point (1.9,1) is inside the straight_right box");
+  assert.equal(pointContactsBoxingTarget(tOwnL, { songTimeMs: 1000, sx: 1.0, sy: 1 }, 0.12, 180), true, "crossing right point (1.0,1) is inside the straight_left box");
+  assert.equal(pointContactsBoxingTarget(tOwnR, { songTimeMs: 1000, sx: 0.2, sy: 0.3 }, 0.12, 180), false, "scenario-1 far right wrist (0.2,0.3) is outside the straight_right box");
+  assert.equal(pointContactsBoxingTarget(tOwnL, { songTimeMs: 1000, sx: 3.0, sy: 0.3 }, 0.12, 180), false, "scenario-2 far left wrist (3.0,0.3) is outside the straight_left box");
+
+  // 4) Control: the same beat pair with each own hand IN its own box -> both HIT. Proves the
+  //    harness still produces hits (guards against a harness bug that makes everything miss).
+  const simOwn = ready([beat("sim-own-l", 1000, "straight_left", { placement: 5 }), beat("sim-own-r", 1000, "straight_right", { placement: 6 })]);
+  send(simOwn, 900, [0.0, 1], [3.0, 1], [3, 2]);        // neutral: both outside every straight box
+  send(simOwn, 1000, [1.0, 1], [2.0, 1], [3, 2]);       // each own hand in its own box
+  assert.deepEqual(
+    judgementsAt(simOwn).sort((a, b) => a[0].localeCompare(b[0])),
+    [["sim-own-l", "hit", []], ["sim-own-r", "hit", []]],
+    "control: each own hand in its own box still hits (harness produces hits)");
+}
+
 console.log("Boxing Collider deterministic scoring validation passed.");
