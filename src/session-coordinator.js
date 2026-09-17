@@ -113,6 +113,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let latestEvidence = /** @type {AeroGameplayEvidenceSnapshot | null} */ (null);
   let latestEvidenceTimelineMs = 0;
   let lastEvidenceFrameId = null;
+  // F4 (0.0.60): frozen frames reuse one held measuredSourceFrameId every tick,
+  // so the nose path tracks the frozen tick that last advanced the obstacle
+  // contact state (null for measured frames) to detect a strictly increasing
+  // tick (new frame), an equal tick (idempotent re-publish), or a lower tick
+  // (new freeze episode -> re-baseline). Mirrors lastColliderFrame.frozenTickId.
+  let lastEvidenceFrameFrozenTickId = /** @type {number | null} */ (null);
   let leaseSnapshot = /** @type {DataRecord | null} */ (null);
   const judgedIds = new Set();
   let activeIds = new Set();
@@ -564,6 +570,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       calibrationId = nextCalibrationId;
       latestEvidence = null;
       lastEvidenceFrameId = null;
+      lastEvidenceFrameFrozenTickId = null;
       clearContinuousCollisionHistory(priorCalibrationId !== null);
     }
     if (safetyReady && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId) invalidatedCalibrationId = null;
@@ -593,6 +600,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     pauseReason = "tracking_lost_recalibration_required";
     latestEvidence = null;
     lastEvidenceFrameId = null;
+    lastEvidenceFrameFrozenTickId = null;
     freshCalibrationRequired = true;
     safetyReady = false;
     clearContinuousCollisionHistory();
@@ -668,11 +676,29 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
-    if (!sample || sample.calibrationId !== calibrationId || !lastInput || (variant.rulesetId === FLOW_COLLIDER_RULESET && (typeof lastInput.sourceIdentity !== "string" || timestampMs - sample.measurementTimestampMs >= maximumColliderSampleFreshnessMs))) { previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
+    /* F4 (0.0.60): frozen frames hold the last measured nose position, so the
+       held timestamp deliberately ages past the 150ms freshness window while
+       tracking is frozen. Exempt frozen frames from the freshness check (the
+       held pose is scored at the current song position); measured frames keep
+       the exact current gate. */
+    const isFrozen = latestEvidence?.provenance === "frozen";
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput || (variant.rulesetId === FLOW_COLLIDER_RULESET && (typeof lastInput.sourceIdentity !== "string" || (!isFrozen && timestampMs - sample.measurementTimestampMs >= maximumColliderSampleFreshnessMs)))) { previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
     if (variant.rulesetId === FLOW_COLLIDER_RULESET && lastObstacleSourceIdentity !== null && lastObstacleSourceIdentity !== lastInput.sourceIdentity) { previousNoseSample = null; occupiedObstacleIds.clear(); lastObstacleSourceIdentity = String(lastInput.sourceIdentity); finalizeObstacles(obstacles); return; }
     if (variant.rulesetId === FLOW_COLLIDER_RULESET) lastObstacleSourceIdentity = String(lastInput.sourceIdentity);
     const prior = previousNoseSample;
-    if (sample.sourceFrameId === lastEvidenceFrameId) {
+    /* F4 (0.0.60): a frozen frame re-publishes ONE held frame, repeating its
+       sourceFrameId and measurementTimestampMs on every tick, so measured-frame
+       identity would swallow every tick after the first. Frozen frames use
+       (calibrationId, frozenTickId) as their per-tick identity: a strictly
+       increasing frozenTickId is a NEW frame that proceeds to evaluation
+       (contact can fire from the held nose); a repeated tick is an idempotent
+       re-publish, and a lower tick is a new freeze episode that re-baselines
+       without evaluating. Measured frames keep their exact current identity
+       and monotonicity behavior. */
+    const frozenTickId = isFrozen ? /** @type {number} */ (latestEvidence.frozenTickId) : null;
+    const evidenceFrameId = frozenTickId === null ? sample.sourceFrameId : `frozen:${sample.calibrationId}:${frozenTickId}`;
+    const priorFrozenTickId = lastEvidenceFrameFrozenTickId;
+    if (evidenceFrameId === lastEvidenceFrameId) {
       const identicalRepeat = prior !== null && prior.sourceFrameId === sample.sourceFrameId && prior.calibrationId === sample.calibrationId && prior.measurementTimestampMs === sample.measurementTimestampMs && prior.sx === sample.sx && prior.sy === sample.sy;
       if (identicalRepeat) return;
       previousNoseSample = null;
@@ -680,10 +706,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       finalizeObstacles(obstacles);
       return;
     }
-    lastEvidenceFrameId = sample.sourceFrameId;
+    lastEvidenceFrameId = evidenceFrameId;
+    lastEvidenceFrameFrozenTickId = frozenTickId;
     latestEvidenceTimelineMs = sample.songTimeMs;
     if (variant.rulesetId === FLOW_COLLIDER_RULESET && noseBaselineRequired) { noseBaselineRequired = false; previousNoseSample = sample; finalizeObstacles(obstacles); return; }
-    if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
+    if (frozenTickId !== null) {
+      if (priorFrozenTickId !== null && frozenTickId < priorFrozenTickId) {
+        previousNoseSample = null;
+        occupiedObstacleIds.clear();
+        finalizeObstacles(obstacles);
+        return;
+      }
+    } else if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
       finalizeObstacles(obstacles);
@@ -757,18 +791,35 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
     if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); return; }
+    /* F4 (0.0.60): frozen frames use (calibrationId, frozenTickId) as their
+       per-tick identity (see evaluateFlowObstacles / the Flow Colliders mirror
+       in evaluateFlowColliderNotesAndBombs). A strictly increasing frozenTickId
+       is a NEW frame that proceeds to evaluation (contact can fire from the
+       held nose); a repeated tick is idempotent; a lower tick (new freeze
+       episode) re-baselines without evaluating. Measured frames keep their
+       exact current identity and monotonicity behavior. */
+    const frozenTickId = latestEvidence?.provenance === "frozen" ? /** @type {number} */ (latestEvidence.frozenTickId) : null;
+    const evidenceFrameId = frozenTickId === null ? sample.sourceFrameId : `frozen:${sample.calibrationId}:${frozenTickId}`;
+    const priorFrozenTickId = lastEvidenceFrameFrozenTickId;
     const prior = previousNoseSample;
-    if (sample.sourceFrameId === lastEvidenceFrameId) {
+    if (evidenceFrameId === lastEvidenceFrameId) {
       const identicalRepeat = prior !== null && prior.sourceFrameId === sample.sourceFrameId && prior.calibrationId === sample.calibrationId && prior.measurementTimestampMs === sample.measurementTimestampMs && prior.sx === sample.sx && prior.sy === sample.sy;
       if (identicalRepeat) return;
       previousNoseSample = null;
       occupiedObstacleIds.clear();
       return;
     }
-    lastEvidenceFrameId = sample.sourceFrameId;
+    lastEvidenceFrameId = evidenceFrameId;
+    lastEvidenceFrameFrozenTickId = frozenTickId;
     latestEvidenceTimelineMs = sample.songTimeMs;
     if (noseBaselineRequired) { noseBaselineRequired = false; previousNoseSample = sample; return; }
-    if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
+    if (frozenTickId !== null) {
+      if (priorFrozenTickId !== null && frozenTickId < priorFrozenTickId) {
+        previousNoseSample = null;
+        occupiedObstacleIds.clear();
+        return;
+      }
+    } else if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
       return;
@@ -1248,7 +1299,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */

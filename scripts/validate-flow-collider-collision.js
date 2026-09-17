@@ -203,4 +203,67 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const c=ready([beat("private-bomb",1000,"bomb",{placement:5})]);send(c,1000,1000,[1,1],[3,1],[3,2]);const publicText=JSON.stringify({hazards:c.getHazardOutcomes(),partitions:c.getScorePartitions()});for(const forbidden of ["colliderRadius","directionToleranceDegrees","measurementTimestampMs","sourceFrameId","sourceIdentity","calibrationId","confidence","rawX","rawY","trajectory","segment","contactEpisodeId","evidenceFrameId"])assert.equal(publicText.includes(forbidden),false,forbidden);
 }
 
+// F4 (0.0.60): tracking freeze — `provenance: "frozen"` nose frames republish the
+// held last-measured position on every tick, so their held timestamp ages past the
+// 150ms freshness window by design. evaluateFlowObstacles must EXEMPT frozen frames
+// from that gate and treat each (calibrationId, frozenTickId) as a NEW frame, so a
+// wall contact fires from the held nose during the freeze, first contact is recorded
+// exactly once, and the session stays "playing". Measured frames keep their exact
+// byte-identical identity/monotonicity behavior.
+{
+  const frozenEvidence=(heldFrameId,heldTs,tick,nose)=>({schema:"aerobeat/gameplay_evidence_snapshot",version:1,calibrationId:"cal-1",provenance:"frozen",frozenTickId:tick,measuredSourceFrameId:heldFrameId,measurementTimestampMs:heldTs,activeBoxingActions:[],anchors:[anchor("nose",heldTs,...nose),anchor("left_shoulder",heldTs,0,0),anchor("right_shoulder",heldTs,3,0),anchor("left_elbow",heldTs,0,0),anchor("right_elbow",heldTs,3,0),anchor("left_wrist",heldTs,1,1),anchor("right_wrist",heldTs,3,1)],entries:[]});
+  const sendFrozen=(c,songMs,heldFrameId,heldTs,tick,nose)=>{c.advance({timestampMs:songMs,clock:clock(songMs,true),input:input(songMs,frozenEvidence(heldFrameId,heldTs,tick,nose))});};
+  // (a) held nose INSIDE the wall column across multiple frozen ticks (held
+  // timestamp ages 100ms -> 350ms of wall time, well past the 150ms gate): contact
+  // fires on the first frozen tick, holds, the held nose exits the wall while still
+  // frozen, and the wall finalizes as a single contact with one hazard consequence.
+  {
+    const c=ready([wall("fz-wall",900,1450)]);
+    send(c,850,850,[-.4,1],[3.4,1],[3,1],"camera-a","fz-in-0");
+    sendFrozen(c,950,"fz-in-0",850,1,[1,1]);
+    assert.equal(c.getSnapshot().session.state,"playing","frozen nose inside wall: session stays playing");
+    assert.equal(c.getHazardOutcomes().length,0,"wall not yet finalized before its interval end");
+    const a1=c.getSnapshot().hazardContact;
+    assert.equal(a1.active,true,"held nose inside the wall activates hazardContact on the first frozen tick");
+    assert.ok(typeof a1.sinceMs==="number"&&a1.sinceMs>=900&&a1.sinceMs<=950,`first frozen tick sets a finite hazardContact.sinceMs (${a1.sinceMs})`);
+    sendFrozen(c,1050,"fz-in-0",850,2,[1,1]);
+    const a2=c.getSnapshot().hazardContact;
+    assert.equal(a2.active,true,"second frozen tick keeps hazardContact active (held timestamp now 200ms old, exempt)");
+    assert.equal(a2.sinceMs,a1.sinceMs,"first-contact time is not re-fired by a later frozen tick");
+    sendFrozen(c,1150,"fz-in-0",850,3,[1,1]);
+    const a3=c.getSnapshot().hazardContact;
+    assert.equal(a3.active,true,"third frozen tick keeps the contact alive");
+    assert.equal(a3.sinceMs,a1.sinceMs,"first-contact time stays stable across frozen ticks");
+    sendFrozen(c,1250,"fz-in-0",850,4,[2,1]); // held nose exits the wall column while still frozen
+    const a4=c.getSnapshot().hazardContact;
+    assert.equal(a4.active,false,"held nose leaving the wall during the freeze releases hazardContact");
+    assert.equal(a4.releasedAtMs,1200,"hazardContact releases at the analytic crossing time (sx 1->2 crosses the wall edge at 1200)");
+    send(c,1500,1500,[-.4,1],[3.4,1],[3,1],"camera-a","fz-in-final");
+    const wallOutcome=c.getHazardOutcomes().find((outcome)=>outcome.kind==="wall");
+    assert.equal(wallOutcome?.result,"contact","wall contact from a frozen held nose settles as contact");
+    assert.equal(wallOutcome?.consequenceApplied,true,"the frozen wall contact applies its consequence once");
+    assert.equal(c.getScorePartitions()[0].obstacleContacts,1,"exactly one hazard consequence across all frozen ticks");
+    assert.equal(c.getSnapshot().session.state,"playing","state stays playing through the freeze and resume");
+  }
+  // (b) held nose OUTSIDE the wall across multiple frozen ticks: no contact fires,
+  // coverage accrues continuously from the frozen samples, and the wall finalizes
+  // as avoided once the interval closes.
+  {
+    const c=ready([wall("fz-safe",1000,1350)]);
+    send(c,850,850,[-.4,1],[3.4,1],[3,1],"camera-a","fz-safe-0");
+    sendFrozen(c,950,"fz-safe-0",850,1,[3,1]);
+    assert.equal(c.getSnapshot().hazardContact.active,false,"frozen nose outside the wall does not activate hazardContact");
+    sendFrozen(c,1050,"fz-safe-0",850,2,[3,1]);
+    sendFrozen(c,1150,"fz-safe-0",850,3,[3,1]);
+    sendFrozen(c,1250,"fz-safe-0",850,4,[3,1]);
+    sendFrozen(c,1350,"fz-safe-0",850,5,[3,1]);
+    send(c,1500,1500,[-.4,1],[3.4,1],[3,1],"camera-a","fz-safe-final");
+    const wallOutcome=c.getHazardOutcomes().find((outcome)=>outcome.kind==="wall");
+    assert.equal(wallOutcome?.result,"avoided","frozen nose outside the wall settles as avoided, not contact");
+    assert.equal(wallOutcome?.consequenceApplied,false,"avoided wall applies no hazard consequence");
+    assert.equal(c.getScorePartitions().find((p)=>p.obstacleContacts>0) ?? 0,0,"avoided frozen-nose wall adds no obstacle contact");
+    assert.equal(c.getSnapshot().session.state,"playing","state stays playing through an outside-wall freeze");
+  }
+}
+
 console.log("Flow Colliders swept, directional, hazard, privacy, and lifecycle validation passed.");

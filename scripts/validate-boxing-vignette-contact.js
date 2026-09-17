@@ -175,4 +175,80 @@ function send(c, songMs, sx, sy, frameId) {
   assert.deepEqual(c.getObstacleOutcomes().map((outcome) => [outcome.eventId, outcome.rulesetId, outcome.result, outcome.consequenceApplied]), [["b12-scorable-wall", "boxing_collider_v1", "contact", false]], "the collision still records a consequence-free contact outcome");
 }
 
+// --- F4 (0.0.60): tracking freeze — walls stay live from a held (frozen) nose ---
+// During a calibrated tracking freeze the input republishes the held last-measured
+// frame as `provenance: "frozen"` with a strictly increasing `frozenTickId`. The
+// obstacle nose path must accept those held nose samples (freshness-exempted in
+// measuredNoseSample, and per-tick identity via (calibrationId, frozenTickId) in the
+// coordinator) so a wall contact keeps firing / is maintained from the held nose,
+// first contact is recorded exactly once, and the session stays "playing".
+{
+  const frozenEvidence = (heldFrameId, heldTs, sx, sy, tick) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", provenance: "frozen", frozenTickId: tick, measuredSourceFrameId: heldFrameId, measurementTimestampMs: heldTs, activeBoxingActions: [], anchors: [anchor("nose", heldTs, sx, sy), anchor("left_shoulder", heldTs, 0, 0), anchor("right_shoulder", heldTs, 3, 0), anchor("left_elbow", heldTs, 0, 0), anchor("right_elbow", heldTs, 3, 0), anchor("left_wrist", heldTs, 1, 1), anchor("right_wrist", heldTs, 3, 1)], entries: [] });
+  /** Send a frozen re-publication of the held frame at wall time == song time. */
+  const sendFrozen = (c, songMs, heldFrameId, heldTs, sx, sy, tick) => { c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, frozenEvidence(heldFrameId, heldTs, sx, sy, tick)) }); };
+
+  // (a) The held nose is INSIDE the wall column for the whole freeze. The first
+  // frozen tick (the wall activates at song 1000) is what sets firstContact — the
+  // prior measured frame was inside but before the interval. Across >=2 frozen
+  // ticks the contact holds, firstContact is recorded exactly once, the red-edge
+  // vignette (hazardContact) stays active, and the wall finalizes as "contact".
+  {
+    const c = ready([weaveEvent("fz-contact", 1000, 1400), keeperPunch()], "fz-contact");
+    // Nose at the wall, but the wall interval has not opened yet (song 900 < 1000).
+    send(c, 900, 0, 1.5, "fzc-0");
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "pre-interval: no contact yet");
+    // Freeze begins, holding frame "fzc-0" (nose at the wall). First frozen tick
+    // lands at song 1050, inside the interval [1000,1400] -> contact fires from the
+    // held nose and sets firstContact exactly once.
+    sendFrozen(c, 1050, "fzc-0", 900, 0, 1.5, 1);
+    const afterFirst = c.getSnapshot().hazardContact;
+    assert.equal(afterFirst.active, true, "first frozen tick with the held nose in the wall activates hazardContact");
+    assert.ok(typeof afterFirst.sinceMs === "number" && Number.isFinite(afterFirst.sinceMs) && afterFirst.sinceMs >= 999.99 && afterFirst.sinceMs <= 1050.01, `firstContact set once on the first frozen tick (${afterFirst.sinceMs})`);
+    assert.equal(c.getSnapshot().session.state, "playing", "session stays playing on the first frozen tick");
+    // Second + third frozen ticks (held timestamp now 250ms / 350ms old, well past
+    // the 150ms window): the held nose still tracks, contact holds, firstContact
+    // is NOT re-fired, and the vignette stays lit.
+    sendFrozen(c, 1150, "fzc-0", 900, 0, 1.5, 2);
+    sendFrozen(c, 1250, "fzc-0", 900, 0, 1.5, 3);
+    const afterMore = c.getSnapshot().hazardContact;
+    assert.equal(afterMore.active, true, "held nose inside the wall keeps hazardContact active across >=2 frozen ticks");
+    assert.equal(afterMore.sinceMs, afterFirst.sinceMs, "first-contact time is not re-fired by later frozen ticks");
+    assert.equal(c.getSnapshot().session.state, "playing", "session stays playing across the frozen ticks");
+    // Resume: a measured frame after the freeze is accepted (not swallowed by the
+    // monotonic gate) and keeps tracking the wall.
+    send(c, 1300, 0, 1.5, "fzc-1");
+    assert.equal(c.getSnapshot().session.state, "playing", "measured resume frame after the freeze is accepted");
+    // Past the interval end: the wall finalizes as a single contact, firstContact
+    // preserved from the frozen tick, with no boxing score consequence. The session
+    // stays "playing" through the freeze and the resume above; once the wall
+    // resolves (and the weave checkpoint's own window closes) the chart may settle
+    // — matching the existing b12 blocks, which assert the outcome rather than a
+    // terminal "playing" state after the wall resolves.
+    send(c, 1450, 2, 1.5, "fzc-2");
+    const outcomes = c.getObstacleOutcomes();
+    assert.deepEqual(outcomes.map((outcome) => [outcome.eventId, outcome.rulesetId, outcome.result, outcome.consequenceApplied]), [["fz-contact", "boxing_collider_v1", "contact", false]], "frozen-held-nose wall contact settles as one boxing_collider_v1 contact outcome");
+    const outcome = outcomes[0];
+    assert.equal(outcome.firstContactTimelinePositionMs, afterFirst.sinceMs, "final firstContactTimelinePositionMs equals the once-set frozen first contact");
+    assert.ok(typeof outcome.firstContactTimelinePositionMs === "number" && Number.isFinite(outcome.firstContactTimelinePositionMs), "contact outcome carries a finite firstContactTimelinePositionMs");
+  }
+
+  // (b) The held nose is OUTSIDE the wall for the whole freeze: no contact fires,
+  // the vignette never activates, and the wall finalizes with no first contact
+  // (never-contacted walls settle as unevaluated_tracking, same as the measured
+  // b12-safe case — the frozen path must not fabricate a contact).
+  {
+    const c = ready([weaveEvent("fz-safe", 1000, 1400), keeperPunch()], "fz-safe");
+    send(c, 900, 2, 1.5, "fzs-0");          // outside the left-column wall
+    send(c, 1050, 2, 1.5, "fzs-1");
+    sendFrozen(c, 1150, "fzs-1", 1050, 2, 1.5, 1);
+    sendFrozen(c, 1250, "fzs-1", 1050, 2, 1.5, 2);
+    assert.equal(c.getSnapshot().hazardContact.active, false, "frozen nose outside the wall never activates hazardContact");
+    assert.equal(c.getSnapshot().session.state, "playing", "session stays playing during an outside-wall freeze");
+    send(c, 1450, 2, 1.5, "fzs-2");
+    const outcomes = c.getObstacleOutcomes();
+    assert.notEqual(outcomes[0].result, "contact", "frozen nose outside the wall produces no contact");
+    assert.equal(outcomes[0].firstContactTimelinePositionMs, null, "no-contact frozen outcome has no first contact");
+  }
+}
+
 console.log("B12 boxing nose-obstacle collision contact-signal validation passed.");
