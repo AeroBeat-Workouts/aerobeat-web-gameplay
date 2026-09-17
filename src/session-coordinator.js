@@ -135,7 +135,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const hazardOutcomes = /** @type {DataRecord[]} */ ([]);
   let previousLeftWristSample = /** @type {ColliderSample | null} */ (null);
   let previousRightWristSample = /** @type {ColliderSample | null} */ (null);
-  let lastColliderFrame = /** @type {Readonly<{frameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string}> | null} */ (null);
+  let lastColliderFrame = /** @type {Readonly<{frameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string,frozenTickId:number | null}> | null} */ (null);
   let leftWristBaselineRequired = false;
   let rightWristBaselineRequired = false;
   let noseBaselineRequired = false;
@@ -855,12 +855,27 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const right = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right_wrist", timelinePositionMs, timestampMs);
     const validSample = left ?? right;
     if (!validSample || validSample.calibrationId !== calibrationId) { clearColliderSamples(); finalizeColliderEvents(); return; }
-    const frame = Object.freeze({ frameId: validSample.sourceFrameId, measurementTimestampMs: validSample.measurementTimestampMs, calibrationId: validSample.calibrationId, sourceIdentity: validSample.sourceIdentity });
-    if (lastColliderFrame?.frameId === frame.frameId) {
+    /* F4 (0.0.60): a frozen frame re-publishes ONE held frame, repeating its
+       sourceFrameId and measurementTimestampMs on every tick, so measured-frame
+       identity would swallow every tick after the first. Frozen frames use
+       (calibrationId, frozenTickId) as their per-tick identity: a strictly
+       increasing frozenTickId is a NEW frame that must update the sweep
+       baseline and proceed to candidate evaluation (point contact can fire);
+       a repeated tick is an idempotent re-publish, and a lower tick is a new
+       freeze episode that re-baselines without evaluating. Measured frames
+       keep their exact current identity and monotonicity behavior. */
+    const frozenTickId = latestEvidence.provenance === "frozen" ? /** @type {number} */ (latestEvidence.frozenTickId) : null;
+    const frameId = frozenTickId === null ? validSample.sourceFrameId : `frozen:${validSample.calibrationId}:${frozenTickId}`;
+    const frame = Object.freeze({ frameId, measurementTimestampMs: validSample.measurementTimestampMs, calibrationId: validSample.calibrationId, sourceIdentity: validSample.sourceIdentity, frozenTickId });
+    if (lastColliderFrame?.frameId === frame.frameId && lastColliderFrame.frozenTickId === frame.frozenTickId) {
       if (lastColliderFrame.measurementTimestampMs === frame.measurementTimestampMs && lastColliderFrame.calibrationId === frame.calibrationId && lastColliderFrame.sourceIdentity === frame.sourceIdentity) { finalizeColliderEvents(); return; }
       clearColliderSamples(); finalizeColliderEvents(); return;
     }
-    if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
+    if (frozenTickId !== null) {
+      if (lastColliderFrame !== null && lastColliderFrame.frozenTickId !== null && frozenTickId < lastColliderFrame.frozenTickId) {
+        clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeColliderEvents(); return;
+      }
+    } else if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
       clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeColliderEvents(); return;
     }
     const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
@@ -972,12 +987,24 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const right = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right_wrist", timelinePositionMs, timestampMs);
     const validSample = left ?? right;
     if (!validSample || validSample.calibrationId !== calibrationId) { clearColliderSamples(); finalizeBoxingColliderEvents(); return; }
-    const frame = Object.freeze({ frameId: validSample.sourceFrameId, measurementTimestampMs: validSample.measurementTimestampMs, calibrationId: validSample.calibrationId, sourceIdentity: validSample.sourceIdentity });
-    if (lastColliderFrame?.frameId === frame.frameId) {
+    /* F4 (0.0.60): frozen frames use (calibrationId, frozenTickId) as their
+       per-tick identity — see the Flow Colliders mirror in
+       evaluateFlowColliderNotesAndBombs. A strictly increasing frozenTickId is
+       a NEW frame; a repeated tick is idempotent; a lower tick (new freeze
+       episode) re-baselines without evaluating. Measured frames keep their
+       exact current identity and monotonicity behavior. */
+    const frozenTickId = latestEvidence.provenance === "frozen" ? /** @type {number} */ (latestEvidence.frozenTickId) : null;
+    const frameId = frozenTickId === null ? validSample.sourceFrameId : `frozen:${validSample.calibrationId}:${frozenTickId}`;
+    const frame = Object.freeze({ frameId, measurementTimestampMs: validSample.measurementTimestampMs, calibrationId: validSample.calibrationId, sourceIdentity: validSample.sourceIdentity, frozenTickId });
+    if (lastColliderFrame?.frameId === frame.frameId && lastColliderFrame.frozenTickId === frame.frozenTickId) {
       if (lastColliderFrame.measurementTimestampMs === frame.measurementTimestampMs && lastColliderFrame.calibrationId === frame.calibrationId && lastColliderFrame.sourceIdentity === frame.sourceIdentity) { finalizeBoxingColliderEvents(); return; }
       clearColliderSamples(); finalizeBoxingColliderEvents(); return;
     }
-    if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
+    if (frozenTickId !== null) {
+      if (lastColliderFrame !== null && lastColliderFrame.frozenTickId !== null && frozenTickId < lastColliderFrame.frozenTickId) {
+        clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeBoxingColliderEvents(); return;
+      }
+    } else if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
       clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeBoxingColliderEvents(); return;
     }
     const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;

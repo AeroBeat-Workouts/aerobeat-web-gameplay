@@ -8,18 +8,31 @@ export const maximumObstacleSampleGapMs = 150;
 /**
  * Extract the only collision authority: a valid measured nose anchor. Coordinates
  * are converted from top-left normalized athlete space to canonical grid-world coordinates.
+ *
+ * F4 (0.0.60): `provenance: "frozen"` frames (the held last-measured nose
+ * position republished during a calibrated tracking freeze) are accepted with
+ * the freshness window EXEMPTED — the held timestamp is allowed to age past
+ * it by design — and the held position is scored at the current song position
+ * because it represents the athlete's current pose.
+ *
  * @param {DataRecord} evidence @param {number} timelinePositionMs @param {number} frameTimestampMs
  * @returns {NoseSample | null}
  */
 export function measuredNoseSample(evidence, timelinePositionMs, frameTimestampMs) {
-  if (evidence.provenance !== "measured" || !Array.isArray(evidence.anchors) || typeof evidence.measuredSourceFrameId !== "string" || typeof evidence.calibrationId !== "string" || typeof evidence.measurementTimestampMs !== "number") return null;
+  const isFrozen = evidence.provenance === "frozen";
+  if (evidence.provenance !== "measured" && !isFrozen || !Array.isArray(evidence.anchors) || typeof evidence.measuredSourceFrameId !== "string" || typeof evidence.calibrationId !== "string" || typeof evidence.measurementTimestampMs !== "number") return null;
   const anchor = evidence.anchors.find((entry) => entry && typeof entry === "object" && /** @type {DataRecord} */ (entry).anchor === "nose");
   if (!anchor || typeof anchor !== "object") return null;
   const nose = /** @type {DataRecord} */ (anchor);
   if (nose.valid !== true || typeof nose.confidence !== "number" || nose.confidence < 0.5 || typeof nose.x !== "number" || typeof nose.y !== "number" || !Number.isFinite(nose.x) || !Number.isFinite(nose.y) || nose.calibrationId !== evidence.calibrationId || nose.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
   const ageMs = frameTimestampMs - evidence.measurementTimestampMs;
-  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maximumObstacleSampleGapMs) return null;
-  return Object.freeze({ songTimeMs: timelinePositionMs - Math.min(maximumObstacleSampleGapMs, Math.max(0, ageMs)), measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, calibrationId: evidence.calibrationId, sx: 4 * nose.x - 0.5, sy: 2.5 - 3 * nose.y });
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  // Frozen frames hold the last measured nose position, so the held timestamp
+  // deliberately ages past the freshness window. Exempt it from the freshness
+  // check and score the held pose at the current song position.
+  if (!isFrozen && ageMs > maximumObstacleSampleGapMs) return null;
+  const effectiveAgeMs = isFrozen ? 0 : Math.min(maximumObstacleSampleGapMs, Math.max(0, ageMs));
+  return Object.freeze({ songTimeMs: timelinePositionMs - effectiveAgeMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, calibrationId: evidence.calibrationId, sx: 4 * nose.x - 0.5, sy: 2.5 - 3 * nose.y });
 }
 
 /** @param {DataRecord} obstacle @param {NoseSample} sample */

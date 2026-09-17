@@ -1017,6 +1017,133 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.throws(() => coordinator.reset(), /destroyed/u);
 }
 
+// W4-C2a (0.0.60, F4): tracking freeze — the coordinator accepts provenance
+// "frozen" evidence in both collider paths while the session stays "playing":
+// the 150ms freshness gate is EXEMPTED for frozen frames (the held timestamp
+// deliberately ages past it), (calibrationId, frozenTickId) is the per-tick
+// frame identity so every tick is a new frame, judgedIds remains the only
+// double-hit guard, and a measured frame after a frozen episode resumes
+// normal monotonic handling. The held positions are scoring-eligible:
+// on-target frozen fist -> HIT, off-target -> MISS.
+{
+  const bcolVariant = variant("boxing_collider_v1", null);
+  const flowVariant = variant("flow_colliders_v1");
+  let frozenSeq = 0;
+  /** Canonical judge-space (sx, sy) anchor: x = (sx+0.5)/4, y = (2.5-sy)/3. */
+  const fAnchor = (name, measured, sx, sy) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: (sx + 0.5) / 4, y: (2.5 - sy) / 3, cell: 5, subcell: 20 });
+  /** Positions-only evidence (empty actions/entries on frozen frames). */
+  const fEvidence = (frameId, measured, left, right, frozenTickId) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: frozenTickId === undefined ? "measured" : "frozen", ...(frozenTickId === undefined ? {} : { frozenTickId }), activeBoxingActions: [], anchors: [fAnchor("nose", measured, 2, 2.5), fAnchor("left_shoulder", measured, 0, 0), fAnchor("right_shoulder", measured, 3, 0), fAnchor("left_elbow", measured, 0, 0), fAnchor("right_elbow", measured, 3, 0), fAnchor("left_wrist", measured, ...left), fAnchor("right_wrist", measured, ...right)], entries: [] });
+  const fInput = (latestEvidence) => ({ sourceIdentity: "camera-a", calibration: { calibrationId: "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: false, freshCalibrationRequired: false }, countdownFrozen: false, latestEvidence, straightQualifications: [] });
+  const readyB = (label, events, selected) => {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: `frozen-${label}-${++frozenSeq}`, countdownStepMs: 1 });
+    c.configureContent(config(events, selected));
+    c.advance({ timestampMs: 0, clock: clock(0, false), input: fInput(null) });
+    assert.equal(c.requestStart(0).accepted, true);
+    c.advance({ timestampMs: 1, clock: clock(0, false) });
+    c.advance({ timestampMs: 2, clock: clock(0, false) });
+    c.advance({ timestampMs: 3, clock: clock(0, false) });
+    assert.equal(c.getSnapshot().session.state, "playing");
+    return c;
+  };
+  /** Wall time == song time, measured frame (fresh, age 0). */
+  const sendMeasured = (c, songMs, left, right, frameId) => c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: fInput(fEvidence(frameId, songMs, left, right)) });
+  /** Frozen re-publication of the held frame (heldTs < songMs, tick = episode ordinal). */
+  const sendFrozen = (c, songMs, heldTs, left, right, tick) => c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: fInput(fEvidence("held-1", heldTs, left, right, tick)) });
+  const straightRight = (eventId) => event(eventId, 1000, "straight_right", { spatialTarget: { targetCell: 6, acceptedSubcells: [], sourceCell: -1 } });
+  /** Far-future decoy note so a chart's last judged event never completes the session. */
+  const future = (eventId) => event(eventId, 5000, "straight_right", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } });
+
+  // (a) Core case: straight_right target (2,1) sits at the held right-wrist
+  // position. The note window [820,1180] is open when the frozen ticks arrive,
+  // so the note HITS on the first frozen tick (freshness-exempted point
+  // contact scored at the current song position) and EXACTLY ONCE across all
+  // frozen ticks (judgedIds guard; swept contacts stay impossible because the
+  // held segment repeats one source frame / one timestamp).
+  {
+    const c = readyB("hit", [straightRight("fr-hit"), future("fr-hit-future")], bcolVariant);
+    sendMeasured(c, 600, [0, 0], [2, 1], "fr-hit-f1");
+    assert.equal(c.getJudgements().length, 0, "held position before the window opens does not score");
+    sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
+    assert.equal(c.getSnapshot().session.state, "playing", "session stays playing during the freeze");
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -150]], "frozen on-target fist scores a hit at the current song position");
+    sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
+    sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
+    assert.equal(c.getSnapshot().session.state, "playing", "session stays playing across later frozen ticks");
+    assert.equal(c.getJudgements().length, 1, "a frozen note never hits twice (judgedIds double-hit guard)");
+    sendFrozen(c, 1200, 600, [0, 0], [2, 1], 4);
+    assert.equal(c.getJudgements().length, 1, "no synthetic miss after a frozen hit");
+    assert.equal(c.getSnapshot().session.state, "playing");
+  }
+
+  // (b) Off-target: the held position is NOT at the target, so the note
+  // misses. Negative events still fire during/after the freeze (finalize uses
+  // the advancing song timeline), and the measured frame that ends the freeze
+  // resumes normal monotonic handling without being swallowed.
+  {
+    const c = readyB("miss", [straightRight("fr-miss"), future("fr-miss-future")], bcolVariant);
+    sendMeasured(c, 600, [0, 0], [0, 1], "fr-miss-f1");
+    sendFrozen(c, 850, 600, [0, 0], [0, 1], 1);
+    sendFrozen(c, 900, 600, [0, 0], [0, 1], 2);
+    assert.equal(c.getJudgements().length, 0, "off-target frozen fist scores nothing");
+    assert.equal(c.getSnapshot().session.state, "playing", "session stays playing during the freeze");
+    sendMeasured(c, 950, [0, 0], [0, 1], "fr-miss-f2");
+    assert.equal(c.getJudgements().length, 0, "resume measured frame is evaluated normally (monotonic gate passes)");
+    assert.equal(c.getSnapshot().session.state, "playing");
+    sendMeasured(c, 1181, [0, 0], [0, 1], "fr-miss-f3");
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]), [["fr-miss", "miss", ["wrong_collider"]]], "off-target note finalizes as a miss once the window closes");
+    assert.equal(c.getSnapshot().session.state, "playing");
+  }
+
+  // (c) Resume: after off-target frozen ticks, tracking returns and a measured
+  // frame carries the fist onto the target — the note hits via the measured
+  // path (the freeze-to-measured transition is clean).
+  {
+    const c = readyB("resume", [straightRight("fr-resume"), future("fr-resume-future")], bcolVariant);
+    sendMeasured(c, 600, [0, 0], [0, 1], "fr-resume-f1");
+    sendFrozen(c, 850, 600, [0, 0], [0, 1], 1);
+    sendFrozen(c, 900, 600, [0, 0], [0, 1], 2);
+    sendMeasured(c, 950, [0, 0], [2, 1], "fr-resume-f2");
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-resume", "hit", 950, -50]], "measured frame after the freeze hits normally via the measured path");
+    sendMeasured(c, 1200, [0, 0], [2, 1], "fr-resume-f3");
+    assert.equal(c.getJudgements().length, 1, "resume hit is not re-scored by later measured frames");
+    assert.equal(c.getSnapshot().session.state, "playing");
+  }
+
+  // (d) Flow Colliders path: the same frozen acceptance applies to the swept
+  // flow collider judge — a directionless note at the held position hits once
+  // during the freeze.
+  {
+    const c = readyB("flow-hit", [event("fr-flow", 1000, "note", { hand: "right", placement: 6 }), event("fr-flow-future", 5000, "note", { hand: "left", placement: 9 })], flowVariant);
+    sendMeasured(c, 600, [0, 0], [2, 1], "fr-flow-f1");
+    assert.equal(c.getJudgements().length, 0);
+    sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
+    assert.equal(c.getSnapshot().session.state, "playing", "flow session stays playing during the freeze");
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-flow", "hit", 850, -150]], "frozen on-target wrist scores the flow note at the current song position");
+    sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
+    sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
+    assert.equal(c.getJudgements().length, 1, "flow note never hits twice across frozen ticks");
+    assert.equal(c.getSnapshot().session.state, "playing");
+  }
+
+  // (e) Hostile frozen evidence fails closed like measured evidence: an
+  // invalid frozenTickId is rejected at the contract boundary, and a frozen
+  // frame whose anchor no longer matches the held calibration yields no sample
+  // (no hit, state stays playing).
+  {
+    const c = readyB("hostile", [straightRight("fr-hostile"), future("fr-hostile-future")], bcolVariant);
+    sendMeasured(c, 600, [0, 0], [2, 1], "fr-hostile-f1");
+    const badTick = fEvidence("held-1", 600, [0, 0], [2, 1], 0);
+    assert.throws(() => c.advance({ timestampMs: 850, clock: clock(850, true), input: fInput(badTick) }), /public contract/u, "frozenTickId must be a positive integer");
+    const staleCal = fEvidence("held-1", 600, [0, 0], [2, 1], 1);
+    staleCal.anchors.find((a) => a.anchor === "right_wrist").calibrationId = "cal-other";
+    c.advance({ timestampMs: 850, clock: clock(850, true), input: fInput(staleCal) });
+    assert.equal(c.getJudgements().length, 0, "frozen frame with a calibration-mismatched anchor yields no sample");
+    assert.equal(c.getSnapshot().session.state, "playing");
+    sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result]), [["fr-hostile", "hit"]], "the next clean frozen tick still scores");
+  }
+}
+
 assert.equal(aeroGameplaySessionCapabilities.visualTestSession, true);
 assert.equal(aeroGameplaySessionCapabilities.commitmentTimedJudgements, true);
 assert.equal(aeroGameplaySessionCapabilities.publicLeaderboards, false);

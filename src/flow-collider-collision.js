@@ -60,18 +60,33 @@ const DIRECTIONS = Object.freeze({
 /**
  * Extract one measured, calibrated landmark in canonical athlete-grid coordinates.
  * Provider/raw/screen coordinates never enter this result.
+ *
+ * F4 (0.0.60): `provenance: "frozen"` frames (held last-measured positions
+ * republished during a calibrated tracking freeze) are accepted. The 150 ms
+ * freshness age check is EXEMPTED for frozen frames — the held timestamp is
+ * allowed to age past it by design — and the held position is scored at the
+ * current song position because it represents the athlete's current pose.
+ * Every other validation (exact anchor name, valid + confidence, finite
+ * normalized coordinates, calibration/timestamp equality) stays identical.
+ *
  * @param {DataRecord} evidence @param {DataRecord} input @param {WristName | "nose"} anchorName @param {number} timelinePositionMs @param {number} frameTimestampMs
  * @returns {ColliderSample | null}
  */
 export function measuredColliderSample(evidence, input, anchorName, timelinePositionMs, frameTimestampMs) {
-  if (evidence.provenance !== "measured" || !Array.isArray(evidence.anchors) || typeof evidence.measuredSourceFrameId !== "string" || typeof evidence.calibrationId !== "string" || typeof evidence.measurementTimestampMs !== "number" || typeof input.sourceIdentity !== "string" || input.sourceIdentity.length === 0) return null;
+  const isFrozen = evidence.provenance === "frozen";
+  if (evidence.provenance !== "measured" && !isFrozen || !Array.isArray(evidence.anchors) || typeof evidence.measuredSourceFrameId !== "string" || typeof evidence.calibrationId !== "string" || typeof evidence.measurementTimestampMs !== "number" || typeof input.sourceIdentity !== "string" || input.sourceIdentity.length === 0) return null;
   const anchor = evidence.anchors.find((entry) => entry && typeof entry === "object" && /** @type {DataRecord} */ (entry).anchor === anchorName);
   if (!anchor || typeof anchor !== "object") return null;
   const point = /** @type {DataRecord} */ (anchor);
   if (point.valid !== true || typeof point.confidence !== "number" || point.confidence < 0.5 || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1 || point.calibrationId !== evidence.calibrationId || point.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
   const ageMs = frameTimestampMs - evidence.measurementTimestampMs;
-  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs >= maximumColliderSampleFreshnessMs) return null;
-  return Object.freeze({ songTimeMs: timelinePositionMs - ageMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * point.x - 0.5, sy: 2.5 - 3 * point.y });
+  if (!Number.isFinite(ageMs) || ageMs < 0) return null;
+  // Frozen frames hold the last measured position, so the held timestamp
+  // deliberately ages past the freshness window. Exempt it from the freshness
+  // check and score the held pose at the current song position.
+  if (!isFrozen && ageMs >= maximumColliderSampleFreshnessMs) return null;
+  const effectiveAgeMs = isFrozen ? 0 : ageMs;
+  return Object.freeze({ songTimeMs: timelinePositionMs - effectiveAgeMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * point.x - 0.5, sy: 2.5 - 3 * point.y });
 }
 
 /** @param {number} placement */
