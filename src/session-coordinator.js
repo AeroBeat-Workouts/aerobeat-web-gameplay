@@ -159,6 +159,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * assembly orients the visible beam with. */
   let leftWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
   let rightWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
+  /** 0.0.61 (chgy): per-wrist wrist-history captured at the exact flow hit
+   * point — the PRE-push frozen arrays the saber capsule orients from. The
+   * assembly re-derives the beam direction with the SAME pure
+   * `saberDirectionFromWristHistory` and the SAME `timestampMs` this history
+   * was judged with, so the visible beam is the hit volume verbatim
+   * (visual == hit). `null` until the first flow collider frame is evaluated;
+   * cleared with the collider state. */
+  let exposedLeftWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>> | null} */ (null);
+  let exposedRightWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>> | null} */ (null);
   let lastColliderFrame = /** @type {Readonly<{frameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string,frozenTickId:number | null}> | null} */ (null);
   let leftWristBaselineRequired = false;
   let rightWristBaselineRequired = false;
@@ -953,6 +962,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
     const priorLeft = left === null || seedLeftOnly ? null : previousLeftWristSample; const priorRight = right === null || seedRightOnly ? null : previousRightWristSample;
+    // 0.0.61 (chgy): expose the PRE-push per-wrist wrist-history — the exact
+    // frozen arrays the saber capsule below orients from. The assembly
+    // re-derives the beam direction with the same pure
+    // `saberDirectionFromWristHistory` and the same `timestampMs`, so the
+    // visible beam is the hit volume verbatim (visual == hit). The arrays are
+    // frozen and only reassigned (pushed) after this point, so the captured
+    // reference is stable through the snapshot publish.
+    exposedLeftWristHistory = leftWristHistory;
+    exposedRightWristHistory = rightWristHistory;
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
     for (const event of events) {
       if (judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
@@ -1061,7 +1079,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
   }
 
-  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); }
+  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
@@ -1356,6 +1374,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       activeEventIds: Object.freeze([...activeIds].sort(compareCodePoints)), judgedEventIds: Object.freeze([...judgedIds].sort(compareCodePoints)),
       judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]), obstacleOutcomes: Object.freeze([...obstacleOutcomes]), hazardOutcomes: Object.freeze([...hazardOutcomes]),
       hazardContact: Object.freeze({ active: occupiedObstacleIds.size > 0, sinceMs: hazardContactSinceMs, releasedAtMs: hazardContactReleasedAtMs }),
+      // 0.0.61 (chgy): per-wrist PRE-push wrist-history for saber orientation.
+      // Exposed at the top level (NOT inside `session`, which is exact-key
+      // validated by the session contract) so the assembly can re-derive the
+      // EXACT hit direction with the shared `saberDirectionFromWristHistory`.
+      saberWristHistory: Object.freeze({ left_wrist: exposedLeftWristHistory, right_wrist: exposedRightWristHistory }),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
     });
   }
