@@ -384,4 +384,69 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   }
 }
 
+// kpxg (0.0.61): an EXPIRED flow wall finalizes EXACTLY ONCE. Its outcome lands
+// in `hazardOutcomes` (kind "wall") and the wall id is recorded in the internal
+// `finalizedObstacleIds` set, so the wall is excluded from every later tick's
+// work list. Before the fix the wall re-finalized on EVERY 16 ms tick (a new
+// outcome record per tick -> quadratic growth, ~2.8M entries at 15 min).
+// The wall count must stay 1 across +100 ms, +1 s and +10 s of song time.
+{
+  const c=ready([wall("kpxg-once",900,1100)]);
+  send(c,900,900,[-.4,1],[3.4,1],[3,1]);
+  send(c,1000,1000,[-.4,1],[3.4,1],[3,1]);
+  send(c,1100,1100,[-.4,1],[3.4,1],[3,1]);
+  const wallCount=()=>c.getHazardOutcomes().filter((o)=>o.kind==="wall").length;
+  assert.equal(wallCount(),1,"wall finalized exactly once at expiry");
+  for(let i=1;i<=7;i++)send(c,1100+i*14,1100+i*14,[-.4,1],[3.4,1],[3,1]);
+  assert.equal(wallCount(),1,"wall count stable at +100 ms after expiry");
+  for(let i=1;i<=63;i++)send(c,1200+i*16,1200+i*16,[-.4,1],[3.4,1],[3,1]);
+  assert.equal(wallCount(),1,"wall count stable at +1 s after expiry");
+  for(let i=1;i<=630;i++)send(c,2208+i*16,2208+i*16,[-.4,1],[3.4,1],[3,1]);
+  assert.equal(wallCount(),1,"wall count stable at +10 s after expiry");
+  assert.equal(c.getHazardOutcomes().length,1,"no duplicate hazard outcomes of any kind accumulated");
+}
+
+// kpxg (0.0.61): clearRunTruth resets `finalizedObstacleIds` along with
+// `hazardOutcomes` — after a full reset the SAME wall must be able to finalize
+// again in the next run. If the set were not cleared the wall would stay
+// excluded forever and never produce its second-run outcome.
+{
+  const c=ready([wall("kpxg-reset",900,1100)]);
+  send(c,900,900,[-.4,1],[3.4,1],[3,1]);
+  send(c,1000,1000,[-.4,1],[3.4,1],[3,1]);
+  send(c,1100,1100,[-.4,1],[3.4,1],[3,1]);
+  const wallCount=()=>c.getHazardOutcomes().filter((o)=>o.kind==="wall").length;
+  assert.equal(wallCount(),1,"wall finalized once before the reset");
+  c.reset(1200);
+  assert.equal(c.getSnapshot().session.state,"calibrating","reset returns to calibrating");
+  assert.equal(c.getHazardOutcomes().length,0,"hazard outcomes cleared on reset");
+  c.advance({timestampMs:1201,clock:clock(0,false),input:input(1201,null)});
+  assert.equal(c.requestStart(1202).accepted,true,"fresh run accepted after reset");
+  c.advance({timestampMs:1203,clock:clock(0,false)});
+  c.advance({timestampMs:1204,clock:clock(0,false)});
+  c.advance({timestampMs:1205,clock:clock(0,false)});
+  assert.equal(c.getSnapshot().session.state,"playing","playing again after reset");
+  send(c,1300,1100,[-.4,1],[3.4,1],[3,1]);
+  assert.equal(wallCount(),1,"wall re-finalizes in the run after reset (finalizedObstacleIds was cleared)");
+}
+
+// kpxg (0.0.61): the no-op `hazardOutcomes.sort` skip must not change ordering
+// semantics. Two walls finalize at DIFFERENT song times; the many following
+// no-push ticks skip the sort, and the array must remain ordered by
+// committedTimelinePositionMs (eventId tie-break, already covered by the
+// same-position wall-a/wall-b assertion above).
+{
+  const c=ready([wall("kpxg-early",900,1000),wall("kpxg-late",1100,1200)]);
+  send(c,900,900,[-.4,1],[3.4,1],[3,1]);
+  send(c,1000,1000,[-.4,1],[3.4,1],[3,1]);
+  send(c,1100,1100,[-.4,1],[3.4,1],[3,1]);
+  send(c,1200,1200,[-.4,1],[3.4,1],[3,1]);
+  const wallOrder=()=>c.getHazardOutcomes().filter((o)=>o.kind==="wall").map((o)=>[o.eventId,o.committedTimelinePositionMs]);
+  assert.deepEqual(wallOrder(),[["kpxg-early",1000],["kpxg-late",1200]],"walls ordered by committed timeline position after finalization");
+  for(let i=1;i<=20;i++)send(c,1200+i*16,1200+i*16,[-.4,1],[3.4,1],[3,1]);
+  assert.deepEqual(wallOrder(),[["kpxg-early",1000],["kpxg-late",1200]],"order stable across no-push ticks where the sort is skipped");
+  const pos=c.getHazardOutcomes().map((o)=>Number(o.committedTimelinePositionMs));
+  assert.deepEqual(pos,[...pos].sort((a,b)=>a-b),"full hazardOutcomes array stays sorted by committed position after skipped sorts");
+}
+
 console.log("Flow Colliders swept, directional, hazard, privacy, and lifecycle validation passed.");

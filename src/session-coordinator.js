@@ -121,6 +121,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let lastEvidenceFrameFrozenTickId = /** @type {number | null} */ (null);
   let leaseSnapshot = /** @type {DataRecord | null} */ (null);
   const judgedIds = new Set();
+  /** 0.0.61 (kpxg): flow_colliders_v1 wall ids finalized into `hazardOutcomes`
+   * (kind "wall") EXACTLY ONCE. The flow wall exclusion filter checks this Set
+   * (O(1)) instead of scanning `obstacleOutcomes` — the array flow walls never
+   * enter (they finalize into `hazardOutcomes`). Without it every EXPIRED wall
+   * was re-finalized on every 16ms tick, growing `hazardOutcomes` quadratically
+   * (~300 MB at 15 min). Cleared with the run truth. */
+  const finalizedObstacleIds = new Set();
+  /** 0.0.61 (kpxg): true when a `hazardOutcomes` push happened since the last
+   * sort. The per-tick hazard sort is skipped when false (a no-op on an already
+   * sorted array) — kills the late-song O(n log n) churn over the outcome array.
+   * Reset after each sort and with the run truth. */
+  let hazardOutcomesDirty = false;
   let activeIds = new Set();
   const judgements = /** @type {AeroGameplayJudgement[]} */ ([]);
   const shadowJudgements = /** @type {AeroGameplayJudgement[]} */ ([]);
@@ -678,7 +690,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function evaluateFlowObstacles() {
     if (!variant || variant.mode !== "flow" || sessionPurpose !== "play" || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) return;
-    const obstacles = events.filter((event) => event.type === "obstacle" && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
+    // kpxg (0.0.61): flow walls finalize into `hazardOutcomes` (kind "wall"),
+    // never `obstacleOutcomes`, so the `obstacleOutcomes` scan alone let every
+    // expired wall re-finalize every tick. Exclude finalized wall ids via the
+    // O(1) `finalizedObstacleIds` Set so each wall finalizes exactly once.
+    const obstacles = events.filter((event) => event.type === "obstacle" && !finalizedObstacleIds.has(String(event.eventId)) && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
@@ -898,7 +914,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
       if (variant?.rulesetId === FLOW_COLLIDER_RULESET) {
         const outcome = Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "wall", result, committedTimelinePositionMs: timelinePositionMs, consequenceApplied: tracker.consequenceApplied });
-        hazardOutcomes.push(outcome);
+        hazardOutcomes.push(outcome); hazardOutcomesDirty = true; finalizedObstacleIds.add(eventId);
       } else obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: String(variant?.rulesetId ?? FLOW_COLLIDER_RULESET), result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
       occupiedObstacleIds.delete(eventId); obstacleStates.delete(eventId);
       if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") { hazardContactReleasedAtMs = timelinePositionMs; hazardContactSinceMs = null; }
@@ -1008,7 +1024,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };
-        hazardOutcomes.push(Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "bomb", result: "contact", committedTimelinePositionMs: timelinePositionMs, consequenceApplied: true }));
+        hazardOutcomes.push(Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "bomb", result: "contact", committedTimelinePositionMs: timelinePositionMs, consequenceApplied: true })); hazardOutcomesDirty = true;
         pendingHazardBreak = true; pendingBombContacts += 1;
       }
       bombStates.set(eventId, tracker);
@@ -1024,11 +1040,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       else if (event.type === "bomb" && timelinePositionMs > late && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === eventId)) {
         const tracker = bombStates.get(eventId) ?? { leftCoverage: [], rightCoverage: [], contactTimelinePositionMs: null, consequenceApplied: false };
         const result = coversInterval(tracker.leftCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs), late) && coversInterval(tracker.rightCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs), late) ? "avoided" : "unevaluated_tracking";
-        hazardOutcomes.push(Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "bomb", result, committedTimelinePositionMs: timelinePositionMs, consequenceApplied: false }));
+        hazardOutcomes.push(Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "bomb", result, committedTimelinePositionMs: timelinePositionMs, consequenceApplied: false })); hazardOutcomesDirty = true;
         bombStates.delete(eventId);
       }
     }
-    hazardOutcomes.sort((a, b) => Number(a.committedTimelinePositionMs) - Number(b.committedTimelinePositionMs) || compareCodePoints(String(a.eventId), String(b.eventId)));
+    // kpxg (0.0.61): the array is only ever appended to and the push sites
+    // always commit at the current (max) timeline position, so a no-op sort is
+    // pure late-song churn. Sort only when a push set `hazardOutcomesDirty`
+    // (semantics identical to the previous unconditional sort — the sort still
+    // runs on the tick after any push; it is skipped only when nothing changed).
+    if (hazardOutcomesDirty) { hazardOutcomes.sort((a, b) => Number(a.committedTimelinePositionMs) - Number(b.committedTimelinePositionMs) || compareCodePoints(String(a.eventId), String(b.eventId))); hazardOutcomesDirty = false; }
   }
 
   /** @param {DataRecord} event */
@@ -1340,7 +1361,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */

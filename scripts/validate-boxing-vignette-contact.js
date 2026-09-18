@@ -251,4 +251,22 @@ function send(c, songMs, sx, sy, frameId) {
   }
 }
 
+// kpxg (0.0.61): boxing obstacle outcomes are UNCHANGED by the flow-wall fix —
+// the boxing path pushes into `obstacleOutcomes` (the array the exclusion
+// filter checks), so an expired checkpoint finalizes exactly once and its
+// outcome count stays stable across many later LIVE ticks. Extra keeper events
+// keep the session "playing" well past the wall expiry (a lone keeper would
+// complete the run the instant the weave double-resolves as judged + outcome).
+{
+  const c = ready([weaveEvent("kpxg-boxing", 1000, 1300), keeperPunch("kb-keep-1"), { ...keeperPunch("kb-keep-2"), centerTimestampMs: 6000 }, { ...keeperPunch("kb-keep-3"), centerTimestampMs: 7000 }], "kpxg-boxing");
+  send(c, 950, 2, 1.5, "kb-0");
+  send(c, 1100, 2, 1.5, "kb-1");
+  send(c, 1400, 2, 1.5, "kb-2");
+  const count = () => c.getObstacleOutcomes().filter((o) => o.eventId === "kpxg-boxing").length;
+  assert.equal(count(), 1, "boxing wall finalized exactly once at expiry");
+  assert.equal(c.getSnapshot().session.state, "playing", "session still playing past the wall expiry");
+  for (let i = 1; i <= 10; i++) send(c, 1400 + i * 100, 2, 1.5, `kb-a${i}`);
+  assert.equal(count(), 1, "boxing wall count stable at +1 s of live ticks after expiry");
+}
+
 console.log("B12 boxing nose-obstacle collision contact-signal validation passed.");
