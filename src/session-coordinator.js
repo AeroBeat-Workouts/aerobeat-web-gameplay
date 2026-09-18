@@ -713,8 +713,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
        held pose is scored at the current song position); measured frames keep
        the exact current gate. */
     const isFrozen = latestEvidence?.provenance === "frozen";
-    if (!sample || sample.calibrationId !== calibrationId || !lastInput || (variant.rulesetId === FLOW_COLLIDER_RULESET && (typeof lastInput.sourceIdentity !== "string" || (!isFrozen && timestampMs - sample.measurementTimestampMs >= maximumColliderSampleFreshnessMs)))) { previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); finalizeObstacles(obstacles); return; }
-    if (variant.rulesetId === FLOW_COLLIDER_RULESET && lastObstacleSourceIdentity !== null && lastObstacleSourceIdentity !== lastInput.sourceIdentity) { previousNoseSample = null; occupiedObstacleIds.clear(); lastObstacleSourceIdentity = String(lastInput.sourceIdentity); finalizeObstacles(obstacles); return; }
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput || (variant.rulesetId === FLOW_COLLIDER_RULESET && (typeof lastInput.sourceIdentity !== "string" || (!isFrozen && timestampMs - sample.measurementTimestampMs >= maximumColliderSampleFreshnessMs)))) { previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); finalizeObstacles(obstacles); return; }
+    if (variant.rulesetId === FLOW_COLLIDER_RULESET && lastObstacleSourceIdentity !== null && lastObstacleSourceIdentity !== lastInput.sourceIdentity) { previousNoseSample = null; occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); lastObstacleSourceIdentity = String(lastInput.sourceIdentity); finalizeObstacles(obstacles); return; }
     if (variant.rulesetId === FLOW_COLLIDER_RULESET) lastObstacleSourceIdentity = String(lastInput.sourceIdentity);
     const prior = previousNoseSample;
     /* F4 (0.0.60): a frozen frame re-publishes ONE held frame, repeating its
@@ -734,6 +734,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (identicalRepeat) return;
       previousNoseSample = null;
       occupiedObstacleIds.clear();
+      releaseHazardContact(timelinePositionMs);
       finalizeObstacles(obstacles);
       return;
     }
@@ -745,17 +746,19 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (priorFrozenTickId !== null && frozenTickId < priorFrozenTickId) {
         previousNoseSample = null;
         occupiedObstacleIds.clear();
+        releaseHazardContact(timelinePositionMs);
         finalizeObstacles(obstacles);
         return;
       }
     } else if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
+      releaseHazardContact(timelinePositionMs);
       finalizeObstacles(obstacles);
       return;
     }
     const continuous = prior !== null && prior.calibrationId === sample.calibrationId && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
-    if (prior !== null && !continuous) occupiedObstacleIds.clear();
+    if (prior !== null && !continuous) { occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); }
     /** @type {{timelineMs:number,kind:"enter"|"exit",eventId:string}[]} */ const boundaries = [];
     for (const obstacle of obstacles) {
       const eventId = String(obstacle.eventId);
@@ -815,13 +818,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: BOXING_COLLIDER_RULESET, result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
       occupiedObstacleIds.delete(eventId);
       obstacleStates.delete(eventId);
-      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null) { hazardContactReleasedAtMs = timelinePositionMs; hazardContactSinceMs = null; }
+      if (occupiedObstacleIds.size === 0) releaseHazardContact(timelinePositionMs);
     }
     const activeObstacles = obstacles.filter((event) => !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (activeObstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
-    if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); return; }
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); return; }
     /* F4 (0.0.60): frozen frames use (calibrationId, frozenTickId) as their
        per-tick identity (see evaluateFlowObstacles / the Flow Colliders mirror
        in evaluateFlowColliderNotesAndBombs). A strictly increasing frozenTickId
@@ -838,6 +841,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (identicalRepeat) return;
       previousNoseSample = null;
       occupiedObstacleIds.clear();
+      releaseHazardContact(timelinePositionMs);
       return;
     }
     lastEvidenceFrameId = evidenceFrameId;
@@ -848,15 +852,17 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (priorFrozenTickId !== null && frozenTickId < priorFrozenTickId) {
         previousNoseSample = null;
         occupiedObstacleIds.clear();
+        releaseHazardContact(timelinePositionMs);
         return;
       }
     } else if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
+      releaseHazardContact(timelinePositionMs);
       return;
     }
     const continuous = prior !== null && prior.calibrationId === sample.calibrationId && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
-    if (prior !== null && !continuous) occupiedObstacleIds.clear();
+    if (prior !== null && !continuous) { occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); }
     /** @type {{timelineMs:number,kind:"enter"|"exit",eventId:string}[]} */ const boundaries = [];
     for (const obstacle of activeObstacles) {
       const eventId = String(obstacle.eventId);
@@ -883,6 +889,28 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     previousNoseSample = sample;
   }
 
+  /**
+   * 0.0.61 L-B2 (3gb2): publish the hazard-contact RELEASE boundary. The moment an
+   * obstacle episode ends — a clipped nose exit, an interval finalize, or ANY path
+   * that empties `occupiedObstacleIds` (stale/invalid measurement, repeated-frame
+   * re-baseline, frozen-episode re-baseline, non-continuous sample gap) — the
+   * snapshot must carry the documented `{active:false, sinceMs:null,
+   * releasedAtMs:<release tick>}` shape, not only on an explicit exit boundary. The
+   * renderer's released-phase decay (150 ms ramp / 2 Hz pulse / 400 ms linear decay)
+   * needs this release instant; a null releasedAtMs snap-offs the vignette at exit.
+   * No-op while no episode is in flight (sinceMs === null), so the fully-idle
+   * `{active:false, sinceMs:null, releasedAtMs:null}` shape is never mutated, and
+   * only flow_colliders_v1 / boxing_collider_v1 (play purpose) carry hazard-contact
+   * state.
+   * @param {number} releaseTickMs - the song timeline position at which the episode closed.
+   */
+  function releaseHazardContact(releaseTickMs) {
+    if (hazardContactSinceMs === null || sessionPurpose !== "play") return;
+    if (!(variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET)) return;
+    hazardContactReleasedAtMs = releaseTickMs;
+    hazardContactSinceMs = null;
+  }
+
   /** @param {readonly {timelineMs:number,kind:"enter"|"exit",eventId:string}[]} boundaries */
   function processObstacleBoundaries(boundaries) {
     const ordered = [...boundaries].sort((left, right) => left.timelineMs - right.timelineMs || (left.kind === right.kind ? compareCodePoints(left.eventId, right.eventId) : left.kind === "enter" ? -1 : 1));
@@ -892,7 +920,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       while (index < ordered.length && ordered[index].timelineMs === timelineMs) group.push(ordered[index++]);
       const entrants = group.filter((entry) => entry.kind === "enter" && !occupiedObstacleIds.has(entry.eventId));
       if (occupiedObstacleIds.size === 0 && entrants.length > 0) {
-        if ((variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET) && sessionPurpose === "play") hazardContactSinceMs = timelineMs;
+        if ((variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET) && sessionPurpose === "play") { hazardContactSinceMs = timelineMs; hazardContactReleasedAtMs = null; }
         obstacleEpisodeOrdinal += 1; const episodeId = `${sessionId}:g${generation}:obstacle:${obstacleEpisodeOrdinal}`;
         const winner = [...entrants].sort((left, right) => compareCodePoints(left.eventId, right.eventId))[0];
         for (const entry of entrants) { const tracker = obstacleStates.get(entry.eventId); if (tracker && tracker.contactEpisodeId === null) tracker.contactEpisodeId = episodeId; }
@@ -903,7 +931,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       }
       for (const entry of entrants) occupiedObstacleIds.add(entry.eventId);
       for (const entry of group) if (entry.kind === "exit") occupiedObstacleIds.delete(entry.eventId);
-      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && (variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET) && sessionPurpose === "play") { hazardContactReleasedAtMs = timelineMs; hazardContactSinceMs = null; }
+      if (occupiedObstacleIds.size === 0) releaseHazardContact(timelineMs);
     }
   }
 
@@ -926,7 +954,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         hazardOutcomes.push(outcome); hazardOutcomesDirty = true; finalizedObstacleIds.add(eventId);
       } else obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: String(variant?.rulesetId ?? FLOW_COLLIDER_RULESET), result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
       occupiedObstacleIds.delete(eventId); obstacleStates.delete(eventId);
-      if (occupiedObstacleIds.size === 0 && hazardContactSinceMs !== null && variant?.rulesetId === FLOW_COLLIDER_RULESET && sessionPurpose === "play") { hazardContactReleasedAtMs = timelinePositionMs; hazardContactSinceMs = null; }
+      if (occupiedObstacleIds.size === 0) releaseHazardContact(timelinePositionMs);
     }
     obstacleOutcomes.sort((left, right) => compareCodePoints(String(left.eventId), String(right.eventId)));
   }

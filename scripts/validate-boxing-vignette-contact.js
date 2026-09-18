@@ -138,6 +138,30 @@ function send(c, songMs, sx, sy, frameId) {
   assert.deepEqual(outcomes.map((outcome) => [outcome.eventId, outcome.rulesetId, outcome.result]), [["b12-stale", "boxing_collider_v1", "contact"]], "the clipped entry before the stall still records contact");
 }
 
+// --- L-B2 (0.0.61): non-continuous sample gap BEFORE the interval ends publishes the
+// release boundary (pre-fix the snapshot stayed {active:false, sinceMs:<entry>,
+// releasedAtMs:null} because the gap severing path never released) ---
+{
+  const c = ready([weaveEvent("b12-gap", 1000, 1600), keeperPunch()], "b12-gap");
+  send(c, 950, 1, 2, "b12g-0");
+  assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "gap: hazardContact idle before any contact");
+  send(c, 1050, 0, 1.5, "b12g-1");
+  const inside = c.getSnapshot().hazardContact;
+  assert.equal(inside.active, true, "gap: inside the wall after entry");
+  assert.ok(Number.isFinite(inside.sinceMs) && inside.sinceMs >= 1000 && inside.sinceMs <= 1050, `gap: sinceMs is the clipped entry (${inside.sinceMs})`);
+  assert.equal(inside.releasedAtMs, null, "gap: releasedAtMs null while the episode is active");
+  // 300 ms sample gap (> maximumObstacleSampleGapMs=150) with the nose now OUTSIDE the
+  // wall, while the interval [1000,1600] is still open: the occupied set is severed
+  // without an exit boundary and the release boundary must be published at this tick.
+  send(c, 1350, 2, 1.5, "b12g-2");
+  assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: 1350 }, "gap: released shape {active:false, sinceMs:null, releasedAtMs:gap tick} (pre-fix releasedAtMs was null)");
+  // Past the interval end: the wall finalizes as a single contact and the
+  // already-published release tick is not overwritten by the finalize.
+  send(c, 1700, 2, 1.5, "b12g-3");
+  assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: 1350 }, "gap: finalize does not overwrite the published release tick");
+  assert.deepEqual(c.getObstacleOutcomes().map((outcome) => [outcome.eventId, outcome.result]), [["b12-gap", "contact"]], "gap: the clipped entry still settles as one contact outcome");
+}
+
 // --- Pause clears the boxing hazardContact state (same lifecycle as Flow) ---
 {
   const c = ready([weaveEvent("b12-pause", 1000, 1300), keeperPunch()], "b12-pause");

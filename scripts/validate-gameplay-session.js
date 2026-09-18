@@ -608,6 +608,58 @@ function readyPlaying(coordinator, events, selected = variant()) {
     const staleInput = input(4200, stale); staleInput.sourceIdentity = "src-1";
     c.advance({ timestampMs: 4400, clock: clock(720, true), input: staleInput });
     assert.equal(c.getSnapshot().hazardContact.active, false, "stale evidence severs: hazardContact inactive");
+    // L-B2 (0.0.61): the severing path must publish the release boundary, not only drop occupation.
+    assert.equal(c.getSnapshot().hazardContact.sinceMs, null, "stale evidence severs: sinceMs null");
+    assert.equal(c.getSnapshot().hazardContact.releasedAtMs, 720, "stale evidence severs: releasedAtMs published at the severing tick (pre-fix it was null)");
+  }
+
+  // --- L-B2 (0.0.61): non-continuous sample gap BEFORE the interval ends publishes the
+  // release boundary for flow walls (pre-fix the snapshot stayed
+  // {active:false, sinceMs:<entry>, releasedAtMs:null}) ---
+  {
+    const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-gap" });
+    const wall = canonicalFlowEvent("hc-gap-wall", 700, { start: 1.4, end: 1.6, type: "obstacle", ...wallGeometry }, 1200);
+    readyPlaying(c, [wall], flow);
+    // Baseline outside at 700
+    const base = evidence("hc-gap-base", 3700, []);
+    base.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    base.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "gap: idle before any contact");
+    // Enter at 750
+    const inside = evidence("hc-gap-in", 3800, []);
+    inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
+    inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
+    const inInput = input(3800, inside); inInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inInput });
+    const enterHc = c.getSnapshot().hazardContact;
+    assert.equal(enterHc.active, true, "gap: active inside the wall");
+    assert.ok(Number.isFinite(enterHc.sinceMs) && enterHc.sinceMs >= 700 && enterHc.sinceMs <= 750, `gap: sinceMs is the clipped entry (${enterHc.sinceMs})`);
+    assert.equal(enterHc.releasedAtMs, null, "gap: releasedAtMs null while the episode is active");
+    // 200 ms sample gap (> maximumObstacleSampleGapMs=150) with the nose now OUTSIDE the
+    // wall, while the interval [700,1200] is still open: occupied is severed without an
+    // exit boundary and the release boundary must be published at this tick.
+    const gap = evidence("hc-gap-out", 4000, []);
+    gap.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    gap.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const gapInput = input(4000, gap); gapInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 4000, clock: clock(950, true), input: gapInput });
+    const gapHc = c.getSnapshot().hazardContact;
+    assert.equal(gapHc.active, false, "gap: occupied severed after the non-continuous sample gap");
+    assert.equal(gapHc.sinceMs, null, "gap: sinceMs null after the severing gap");
+    assert.equal(gapHc.releasedAtMs, 950, "gap: releasedAtMs published at the gap tick (pre-fix it was null)");
+    // Past the interval end: the wall finalizes exactly once as a contact and the
+    // already-published release tick is not overwritten by the finalize.
+    const after = evidence("hc-gap-after", 4300, []);
+    after.anchors.find((a) => a.anchor === "nose").x = 0.125;
+    after.anchors.find((a) => a.anchor === "nose").y = 0.5;
+    const afterInput = input(4300, after); afterInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 4300, clock: clock(1250, true), input: afterInput });
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: 950 }, "gap: finalize does not overwrite the published release tick");
+    const wallOutcomes = c.getHazardOutcomes().filter((outcome) => outcome.kind === "wall" && outcome.eventId === "hc-gap-wall");
+    assert.equal(wallOutcomes.length, 1, "gap: the wall settles exactly once");
+    assert.equal(wallOutcomes[0].result, "contact", "gap: the clipped entry settles as a contact outcome");
   }
 }
 // Every invalid or discontinuous boundary still severs the sparse interpolation chain.
