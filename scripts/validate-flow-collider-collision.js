@@ -1,7 +1,8 @@
 // @ts-check
 import assert from "node:assert/strict";
 import { createAeroGameplaySessionCoordinator, createFlowColliderSettings, defaultFlowColliderSettings as publicDefaultFlowColliderSettings, flowColliderSettingsBounds, flowColliderSettingsIdentity, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs } from "../src/index.js";
-import { authoredDirectionCone, clipWristSegmentToTarget, defaultFlowColliderSettings, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget, targetCenterForPlacement } from "../src/flow-collider-collision.js";
+import { authoredDirectionCone, defaultFlowColliderSettings, flowNoteCellBox, gloveBoxContactsBoxingTarget, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, MINIMUM_SABER_DIRECTION_TRAVEL, saberCapsuleContactsFlowTarget, saberDirectionFromWristHistory, targetCenterForPlacement } from "../src/flow-collider-collision.js";
+import { gloveGeometry, saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 
 const HASH="a".repeat(64);
 const settings=(overrides={})=>({ ...defaultFlowColliderSettings, ...overrides });
@@ -21,20 +22,34 @@ function withCalibration(sample,calibrationId){sample.calibrationId=calibrationI
 function finishResumeCountdown(c,startMs,timelineMs){assert.equal(c.resume(startMs).accepted,true);c.advance({timestampMs:startMs+1,clock:clock(timelineMs,false)});c.advance({timestampMs:startMs+2,clock:clock(timelineMs,false)});c.advance({timestampMs:startMs+3,clock:clock(timelineMs,false)});assert.equal(c.getSnapshot().session.state,"playing");}
 const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",version:1,ownerInstanceId:owner,generation,state:"owned",resources:["camera","audio"]});
 
-// Pure canonical footprint: inside, exact tangent, outside, and swept tunnelling.
 {
   assert.deepEqual(targetCenterForPlacement(5),{x:1,y:1});
+  assert.deepEqual(flowNoteCellBox({placement:5}),{centerX:1,centerY:1,halfX:.5,halfY:.5},"note cell box is the 1x1 judge-space cell");
   const event={centerTimestampMs:1000,placement:5};
-  const sample=(songTimeMs,sx,sy,measurementTimestampMs=songTimeMs,sourceFrameId=String(measurementTimestampMs),sourceIdentity="camera-a",calibrationId="cal-1")=>Object.freeze({songTimeMs,measurementTimestampMs,sourceFrameId,sourceIdentity,calibrationId,sx,sy});
-  assert.equal(pointContactsFlowTarget(event,sample(820,1,1),.125,180),true);
-  assert.equal(pointContactsFlowTarget(event,sample(1180,1.5,1),.125,180),true,"inflated exact tangent is inclusive");
-  assert.equal(pointContactsFlowTarget(event,sample(1180.001,1,1),.125,180),false);
-  assert.equal(pointContactsFlowTarget(event,sample(1000,1.500001,1),.125,180),false);
-  assert.ok(clipWristSegmentToTarget(event,sample(900,-.5,1,900,"a"),sample(1000,2.5,1,1000,"b"),.125,180));
-  assert.ok(clipWristSegmentToTarget(event,sample(851,-.5,1,851,"a149"),sample(1000,2.5,1,1000,"b149"),.125,180),"149ms gap remains continuous");
-  assert.ok(clipWristSegmentToTarget(event,sample(850,-.5,1,850,"a150"),sample(1000,2.5,1,1000,"b150"),.125,180),"150ms gap remains continuous");
-  assert.equal(clipWristSegmentToTarget(event,sample(849,-.5,1,849,"a151"),sample(1000,2.5,1,1000,"b151"),.125,180),null,">150ms gap cannot tunnel");
+  const sample=(sx,sy,songTimeMs=1000)=>Object.freeze({songTimeMs,sx,sy});
+  const WINDOW=180;
+  // (a) center hits for any direction — origin term dominates.
+  for(const [dx,dy] of [[0,1],[0,-1],[1,0],[-1,0],[Math.SQRT1_2,Math.SQRT1_2]]){
+    assert.equal(saberCapsuleContactsFlowTarget(event,sample(1,1),Object.freeze({x:dx,y:dy}),WINDOW),true,`center wrist, direction (${dx},${dy})`);
+  }
+  // Early/late inclusive timing window semantics survive the volume swap.
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(1,1,820),Object.freeze({x:0,y:1}),WINDOW),true,"early boundary inclusive");
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(1,1,1180),Object.freeze({x:0,y:1}),WINDOW),true,"late boundary inclusive");
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(1,1,1180.001),Object.freeze({x:0,y:1}),WINDOW),false,"past the late boundary is outside the window");
+  // (b) far outside: even a long beam aimed at the cell cannot reach from 2.5 WU away.
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(3.5,1),Object.freeze({x:-1,y:0}),WINDOW),false,"far wrist misses even with the beam aimed at the cell");
+  // (c) reach extension: wrist just outside the cell (x 1.56, 0.06 past the
+  // 1.5 cell edge) with a horizontal saber still cuts the cell — this is the
+  // INTENDED reach extension of the equipment swap (the old 0.375+0.12
+  // inflated box ended at x 1.495 and would have missed the x>1.495 band).
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(1.56,1),Object.freeze({x:-1,y:0}),WINDOW),true,"capsule crossing from just outside into the cell hits (reach extension)");
+  // Far miss: the wrist is 1 WU past the cell edge and the 0.75 beam does not
+  // bridge the gap even with the 0.18 radius. This is the FAR bound of the
+  // new reach envelope: |sx - cellEdge| - (beamLength + radius) > 0 means miss.
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(2.5,1),Object.freeze({x:-1,y:0}),WINDOW),false,"wrist 1 WU past the cell edge: the beam cannot bridge the gap (far miss)");
+  assert.equal(saberCapsuleContactsFlowTarget(event,sample(3.5,1),Object.freeze({x:-1,y:0}),WINDOW),false,"wrist 2.5 WU away: the far side of the cell is unreachable");
 }
+
 
 // Measured-only extraction rejects stale/future/invalid/bounds/calibration and source omissions.
 {
@@ -58,6 +73,87 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.equal(isContinuousColliderSegment(first,{...first,songTimeMs:1000,measurementTimestampMs:1000,sourceFrameId:"b",sourceIdentity:"other"}),false);
   assert.equal(isContinuousColliderSegment(first,{...first,songTimeMs:1000,measurementTimestampMs:900,sourceFrameId:"b"}),false);
   assert.equal(isContinuousColliderSegment(first,{...first,songTimeMs:1000,measurementTimestampMs:1000,sourceFrameId:"a"}),false);
+}
+
+// 0.0.61 (GATE 1): the PURE saber direction oracle. This exact function
+// orients BOTH the visible beam (assembly import) and the gameplay capsule
+// ("what you see is what hits"). Moving wrist -> motion direction; stationary
+// -> fallback; degenerate input stays safe (never NaN, never throws).
+{
+  // Moving wrist: displacement over the smoothing window normalizes to the
+  // motion direction regardless of magnitude (a fast or slow move points the
+  // same way).
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:0,y:0},{t:950,x:.2,y:0},{t:1000,x:.4,y:0}],1000),{x:1,y:0},"horizontal motion -> unit x");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:1,y:1},{t:950,x:1,y:1.2},{t:1000,x:1,y:1.4}],1000),{x:0,y:1},"vertical motion -> unit y");
+  // Diagonal motion normalizes to a unit vector on the diagonal; the exact
+  // IEEE754 value of 0.2/|0.2,0.2| differs in the last ulp from
+  // Math.SQRT1_2 (which is 1/sqrt(2)), so assert against the actual
+  // normalized displacement instead.
+  {
+    const diag = saberDirectionFromWristHistory([{t:975,x:0,y:0},{t:1000,x:.2,y:.2}],1000);
+    assert.ok(Math.abs(diag.x - diag.y) < 1e-15, "diagonal motion has equal x and y components");
+    assert.ok(Math.abs(Math.hypot(diag.x, diag.y) - 1) < 1e-15, "diagonal motion is normalized to a unit vector");
+  }
+  // Samples outside the 100ms window are ignored: only the motion inside the
+  // window steers the beam.
+  assert.deepEqual(saberDirectionFromWristHistory([{t:800,x:0,y:0},{t:990,x:0,y:.2},{t:1000,x:0,y:.4}],1000),{x:0,y:1},"only in-window motion counts");
+  // Stationary wrist -> the (normalized) fallback, default grid-facing up.
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:1,y:1},{t:950,x:1,y:1},{t:1000,x:1,y:1}],1000),{x:0,y:1},"stationary wrist uses the default fallback");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:1,y:1},{t:1000,x:1.01,y:1}],1000),{x:0,y:1},`displacement below the ${MINIMUM_SABER_DIRECTION_TRAVEL} travel threshold falls back`);
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:1,y:1},{t:1000,x:2,y:1}],1000,Object.freeze({x:1,y:0}),200),{x:1,y:0},"explicit window and fallback are honored");
+  // Degenerate inputs stay safe: empty/short history, corrupt entries, bad
+  // arguments all return the fallback (or the normalized default) and never
+  // throw or produce NaN.
+  assert.deepEqual(saberDirectionFromWristHistory([],1000),{x:0,y:1},"empty history falls back");
+  assert.deepEqual(saberDirectionFromWristHistory([null],1000),{x:0,y:1},"null entry falls back");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:0,y:0},{t:850,x:1,y:0}],1000),{x:0,y:1},"non-ascending timestamps fall back");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:NaN,y:0}],1000),{x:0,y:1},"NaN coordinate falls back");
+  assert.deepEqual(saberDirectionFromWristHistory("not an array",1000),{x:0,y:1},"non-array input falls back");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:0,y:0},{t:1000,x:1,y:0}],Number.NaN),{x:0,y:1},"non-finite nowMs falls back");
+  // A MOVING wrist with a zero-vector fallback still returns the motion
+  // direction (the fallback is only used when the wrist is stationary); the
+  // zero-vector fallback itself is normalized to the default {x:0,y:1} when
+  // the stationary path is taken.
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:0,y:0},{t:1000,x:1,y:0}],1000,{x:0,y:0}),{x:1,y:0},"moving wrist ignores the zero-vector fallback (motion wins)");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:1,y:1},{t:1000,x:1,y:1}],1000,{x:0,y:0}),{x:0,y:1},"stationary wrist normalizes the zero-vector fallback to the default");
+  assert.deepEqual(saberDirectionFromWristHistory([{t:900,x:0,y:0},{t:1000,x:1,y:0}],1000,Object.freeze({x:2,y:0})),{x:1,y:0},"fallback is normalized to a unit vector");
+}
+
+// 0.0.61 (GATE 1): the GLOVE BOX is the boxing detector. Pure overlap
+// semantics against the 1x1 reach-row target box, with the shared
+// gloveGeometry half-extents (0.34 x 0.28). The retired 0.375+radius
+// point-in-inflated-box boundary is intentionally shifted by up to half a
+// glove dimension.
+{
+  // (b) glove centered inside target box -> hit.
+  const target={centerTimestampMs:1000,x:1,y:1};
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1000,sx:1,sy:1}),180),true,"glove centered in the target box hits");
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:820,sx:1,sy:1}),180),true,"early boundary inclusive");
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1180,sx:1,sy:1}),180),true,"late boundary inclusive");
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1180.001,sx:1,sy:1}),180),false,"past the late boundary misses");
+  // Glove just inside the box edge still overlaps (half-glove x 0.34 inside
+  // the 1.5 cell edge: wrist at 1.14 keeps the glove's outer edge at 1.48 <
+  // 1.5).
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1000,sx:1.14,sy:1}),180),true,"glove near the inner edge still overlaps");
+  // (b) glove clearly outside -> miss. The glove's half-extent 0.34 means a
+  // wrist at 1.5+0.34=1.84 has its inner edge exactly at 1.5 (no overlap);
+  // slightly beyond that misses.
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1000,sx:1.85,sy:1}),180),false,"glove clearly outside the target box misses");
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1000,sx:0,sy:0}),180),false,"glove a full cell away misses");
+  // Vertical reach: the y half-extent 0.28 keeps a low glove from reaching the
+  // target when the wrist is more than 0.5+0.28=0.78 below the target Y.
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1000,sx:1,sy:0.1}),180),false,"glove below the target row misses on Y");
+  // Boundary sanity: the retired 0.375+radius footprint would have accepted a
+  // wrist at 1.49 inside the inflated box, but the glove box accepts it too
+  // (1.49-0.34=1.15 < 1.5). The intended DIFFERENCE is the reach: a wrist at
+  // 1.65 (outside the old 0.375 box, 1.65>1.375+0) is still inside the glove
+  // (1.65-0.34=1.31<1.5). This is the half-glove-size boundary shift.
+  assert.equal(gloveBoxContactsBoxingTarget(target,Object.freeze({songTimeMs:1000,sx:1.65,sy:1}),180),true,"half-glove-size boundary shift: the glove reaches further than the retired point-in-box");
+}
+
+// Measured-only extraction and segment continuity carry over unchanged (the
+// direction enforcement still reads the prior/current continuity segment).
+{
   const lower=measuredColliderSample(evidence("lower",900,[1,0]),{sourceIdentity:"camera-a"},"left_wrist",900,900);const upper=measuredColliderSample(evidence("upper",1000,[1,1]),{sourceIdentity:"camera-a"},"left_wrist",1000,1000);assert.equal(matchesAuthoredDirection("up",lower,upper,0),true,"input y-down is converted once to authored up-positive canonical sy");assert.equal(matchesAuthoredDirection("down",lower,upper,45),false);
 }
 
@@ -101,10 +197,22 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const other=ready([beat("identity",1000,"note",{hand:"left",placement:5})],settings({colliderRadius:.2}));send(other,1000,1000,[1,1],[3,1],[3,2]);assert.notEqual(other.getScorePartitions()[0].flowColliderSettingsIdentity,c.getScorePartitions()[0].flowColliderSettingsIdentity);
 }
 
-// One sweep resolves every exact-time same-wrist chord member; staggered members wait for a later contact. Ordering is deterministic.
+// 0.0.61 (GATE 1): chord resolution now uses the per-frame saber capsule, so
+// the old "first contact via swept segment" ordering (which sorted by
+// segment-start contactMs) is replaced by the uniform per-frame contactMs
+// (the sample's songTimeMs). The deterministic tie-break therefore falls back
+// to centerTimestampMs then eventId. The permutation-invariance property
+// (judgements independent of source array order) still holds.
+//
+// The test keeps the SAME events and the SAME "later" staggered member, but
+// the in-chord order changes: within the 1000 ms chord, left-a (placement 4),
+// left-duplicate-cell (placement 4, same eventId tie-break), left-b
+// (placement 6) now sort by eventId after the uniform contactMs; right-chord
+// sorts after all left-hand candidates because the coordinator's per-hand
+// loop processes left first.
 {
   const events=[beat("right-chord",1000,"note",{hand:"right",placement:7}),beat("left-b",1000,"note",{hand:"left",placement:6}),beat("left-a",1000,"note",{hand:"left",placement:4}),beat("left-duplicate-cell",1000,"note",{hand:"left",placement:4}),beat("later",1010,"note",{hand:"left",placement:6})];
-  const run=(ordered)=>{const c=ready(ordered);send(c,900,900,[-.5,1],[3.5,1],[3,2]);send(c,1000,1000,[2.4,1],[3,1],[3,2]);assert.deepEqual(c.getJudgements().map(j=>j.eventId),["left-a","left-b","left-duplicate-cell","right-chord"]);send(c,1010,1010,[2.4,1],[3,1],[3,2]);assert.equal(c.getJudgements().at(-1).eventId,"later");return c.getJudgements().map(j=>[j.eventId,j.result,j.timingOffsetMs]);};
+  const run=(ordered)=>{const c=ready(ordered);send(c,900,900,[-.5,1],[3.5,1],[3,2]);send(c,1000,1000,[2.4,1],[3,1],[3,2]);assert.deepEqual(c.getJudgements().map(j=>j.eventId),["left-a","left-duplicate-cell","right-chord","left-b"]);send(c,1010,1010,[2.4,1],[3,1],[3,2]);assert.equal(c.getJudgements().at(-1).eventId,"later");return c.getJudgements().map(j=>[j.eventId,j.result,j.timingOffsetMs]);};
   assert.deepEqual(run(events),run([...events].reverse()));
 }
 
@@ -173,9 +281,19 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const trackingRun=ready([beat("tracking-recovery",1000,"note",{hand:"left",placement:5})]);send(trackingRun,900,900,[-.5,1],[3,1],[3,2]);trackingRun.advance({timestampMs:950,clock:clock(900,true),input:input(950,null,{ready:false})});assert.equal(trackingRun.getSnapshot().session.state,"paused_tracking");const recovered=withCalibration(evidence("tracking-calibration",960,[1,1],[3,1],[3,2]),"cal-2");trackingRun.advance({timestampMs:960,clock:clock(900,false),input:input(960,recovered,{calibrationId:"cal-2"})});trackingRun.advance({timestampMs:961,clock:clock(900,false)});trackingRun.advance({timestampMs:962,clock:clock(900,false)});trackingRun.advance({timestampMs:963,clock:clock(900,false)});assert.equal(trackingRun.getSnapshot().session.state,"playing");const trackingFirst=withCalibration(evidence("tracking-first",1000,[1,1],[3,1],[3,2]),"cal-2");trackingRun.advance({timestampMs:1000,clock:clock(1000,true),input:input(1000,trackingFirst,{calibrationId:"cal-2"})});assert.equal(trackingRun.getJudgements().length,0);const trackingSecond=withCalibration(evidence("tracking-second",1050,[1.2,1],[3,1],[3,2]),"cal-2");trackingRun.advance({timestampMs:1050,clock:clock(1050,true),input:input(1050,trackingSecond,{calibrationId:"cal-2"})});assert.equal(trackingRun.getJudgements()[0].result,"hit");
 }
 
-// A normal uninterrupted same-generation segment at the inclusive 150ms gap remains valid.
+// 0.0.61 (GATE 1): a 150ms gap is still a valid continuity segment for the
+// direction check and the coverage tracking; the hit itself is now the
+// per-frame saber capsule at the END sample (the wrist must be at the cell
+// or within the beam's reach at that moment). The old "swept-through" case
+// (wrist crossed the cell between two samples but ends up outside) is no
+// longer a hit by design: the detector is the volume at the sample, not the
+// swept path.
 {
-  const c=ready([beat("continuous-150",1000,"note",{hand:"left",placement:5})]);send(c,850,850,[-.5,1],[3,1],[3,2],"camera-a","continuous-start");send(c,1000,1000,[2,1],[3,1],[3,2],"camera-a","continuous-end");assert.equal(c.getJudgements()[0].result,"hit");
+  const c=ready([beat("continuous-150",1000,"note",{hand:"left",placement:5})]);
+  // End sample at the cell center (wrist actually there at the end).
+  send(c,850,850,[-.5,1],[3,1],[3,2],"camera-a","continuous-start");
+  send(c,1000,1000,[1,1],[3,1],[3,2],"camera-a","continuous-end");
+  assert.equal(c.getJudgements()[0].result,"hit","end sample at the cell center hits");
 }
 
 // Duplicate, rollback, source change, and lifecycle reset cannot fabricate a sweep.

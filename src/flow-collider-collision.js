@@ -1,9 +1,11 @@
 // @ts-check
 
 import { Sha256 } from "@aerobeat/web-hash";
+import { gloveGeometry, saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
 /** @typedef {"left_wrist" | "right_wrist"} WristName */
+/** @typedef {Readonly<{x:number,y:number}>} JudgePoint */
 /** @typedef {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,sourceIdentity:string,calibrationId:string,sx:number,sy:number}>} ColliderSample */
 
 export const maximumColliderSampleFreshnessMs = 150;
@@ -49,8 +51,13 @@ function boundedSetting(value, bounds, label) { if (typeof value !== "number" ||
 /** @param {unknown} settings */
 export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); return `sha256:${new Sha256().update(JSON.stringify(SETTING_KEYS.map((key) => exact[key]))).digestHex()}`; }
 
-const TARGET_HALF_EXTENT = 0.375;
-const MINIMUM_DIRECTION_TRAVEL = 0.05;
+/**
+ * Minimum judge-space displacement over the smoothing window before the
+ * saber direction is motion-derived rather than the grid-facing fallback.
+ * Shared by the pure `saberDirectionFromWristHistory` oracle.
+ */
+export const MINIMUM_SABER_DIRECTION_TRAVEL = 0.05;
+const MINIMUM_DIRECTION_TRAVEL = MINIMUM_SABER_DIRECTION_TRAVEL;
 const DIRECTIONS = Object.freeze({
   up: Object.freeze([0, 1]), down: Object.freeze([0, -1]), left: Object.freeze([-1, 0]), right: Object.freeze([1, 0]),
   "up-left": Object.freeze([-Math.SQRT1_2, Math.SQRT1_2]), "up-right": Object.freeze([Math.SQRT1_2, Math.SQRT1_2]),
@@ -89,9 +96,166 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
   return Object.freeze({ songTimeMs: timelinePositionMs - effectiveAgeMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * point.x - 0.5, sy: 2.5 - 3 * point.y });
 }
 
-/** @param {number} placement */
+/**
+ * Canonical 4x3 judge-space cell center for a placement (column 0..3, one WU
+ * per cell: X = placement % 4, Y = 2 - row with row 0 = top). JUDGE space,
+ * never presentation space.
+ *
+ * @param {number} placement
+ * @returns {JudgePoint}
+ */
 export function targetCenterForPlacement(placement) {
   return Object.freeze({ x: placement % 4, y: 2 - Math.floor(placement / 4) });
+}
+
+/**
+ * 0.0.61 (GATE 1): equipment detection volumes live in JUDGE space, sourced
+ * from the shared `@aerobeat/web-contracts/equipment-contracts` so the
+ * renderer's visible equipment and the gameplay hit volumes are the same
+ * constants ("what you see is what hits").
+ *
+ * A flow note's cell box is the 1x1 judge-space cell around its placement
+ * center (the old 0.375-radius target footprint is retired).
+ *
+ * @param {DataRecord} event
+ * @returns {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>}
+ */
+export function flowNoteCellBox(event) {
+  const center = targetCenterForPlacement(Number(event.placement));
+  return Object.freeze({ centerX: center.x, centerY: center.y, halfX: 0.5, halfY: 0.5 });
+}
+
+/**
+ * 0.0.61 (GATE 1): the saber capsule is the SOLE flow hit detector. It is a
+ * 2D capsule on the z=0 judge plane: origin at the measured wrist sample,
+ * axis along `direction` (unit vector, judge up-positive space), half-extent
+ * `saberGeometry.length` along the axis, radius `saberGeometry.radius` around
+ * it. A note is contacted when the capsule intersects the note's 1x1 cell box
+ * and the sample sits inside the inclusive timing window. The wrist-in-cell
+ * point test is retired: the capsule's origin term keeps a wrist at the cell
+ * center hittable in ANY direction, while the axis term adds the beam's reach
+ * extension (a wrist just outside the cell can still cut the note).
+ *
+ * @param {DataRecord} event
+ * @param {Readonly<{songTimeMs:number,sx:number,sy:number}>} sample
+ * @param {JudgePoint} direction Unit saber axis direction.
+ * @param {number} timingWindowMs
+ * @returns {boolean}
+ */
+export function saberCapsuleContactsFlowTarget(event, sample, direction, timingWindowMs) {
+  if (sample.songTimeMs < Number(event.centerTimestampMs) - timingWindowMs || sample.songTimeMs > Number(event.centerTimestampMs) + timingWindowMs) return false;
+  const cell = flowNoteCellBox(event);
+  // The capsule is a 2D shape: a line segment (the beam's centerline) from
+  // the wrist sample p0 to p0 + saberGeometry.length * direction, inflated by
+  // saberGeometry.radius. It intersects the 1x1 cell box iff the minimum
+  // distance between the centerline segment and the cell box is <= radius.
+  // For a convex segment and a convex axis-aligned box, the minimum distance
+  // is the smaller of:
+  //   - 0 if either segment endpoint lies inside the cell box;
+  //   - the minimum over the cell's four corners of the corner-to-segment
+  //     distance (a corner-to-segment distance already captures the case where
+  //     the segment crosses a cell edge, because the closest cell point to
+  //     the crossing is on that edge and hence within the convex hull of the
+  //     four corners — the convexity of both sets makes the corner test
+  //     sufficient when no endpoint is inside).
+  const p0 = { x: sample.sx, y: sample.sy };
+  const p1 = { x: sample.sx + saberGeometry.length * direction.x, y: sample.sy + saberGeometry.length * direction.y };
+  const minX = cell.centerX - cell.halfX; const maxX = cell.centerX + cell.halfX;
+  const minY = cell.centerY - cell.halfY; const maxY = cell.centerY + cell.halfY;
+  const inside = (p) => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
+  if (inside(p0) || inside(p1)) return true;
+  const segDx = p1.x - p0.x; const segDy = p1.y - p0.y;
+  const segLenSq = segDx * segDx + segDy * segDy;
+  let minimum = Number.POSITIVE_INFINITY;
+  for (const [cx, cy] of [[minX, minY], [maxX, minY], [minX, maxY], [maxX, maxY]]) {
+    const t = segLenSq === 0 ? 0 : Math.max(0, Math.min(1, ((cx - p0.x) * segDx + (cy - p0.y) * segDy) / segLenSq));
+    const px = p0.x + t * segDx; const py = p0.y + t * segDy;
+    minimum = Math.min(minimum, Math.hypot(cx - px, cy - py));
+  }
+  return minimum <= saberGeometry.radius + Number.EPSILON;
+}
+
+/**
+ * 0.0.61 (GATE 1): the glove box is the SOLE boxing hit detector. It is the
+ * shared `gloveGeometry` half-extents (0.34 x 0.28 x 0.34, local x = thumb
+ * side mirrored per hand, y = up, z = grid-facing) placed with its center at
+ * the measured wrist sample offset `offsetZ` (0.05) toward the grid. In the
+ * z=0 judge plane the detection volume is therefore the axis-aligned box
+ * `[wrist.x - 0.34, wrist.x + 0.34] x [wrist.y - 0.28, wrist.y + 0.28]`
+ * (the +0.05 grid-facing offset is out-of-plane and does not shift the
+ * 2D judge position). A punch (or guard side) is contacted when the glove box
+ * intersects the 1x1 target box and the sample sits inside the inclusive
+ * timing window. The old wrist-sample-in-inflated-box test is retired; this
+ * box OVERLAP test intentionally changes the boundary by up to half a glove
+ * dimension versus the old 0.375+radius footprint.
+ *
+ * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
+ * @param {Readonly<{songTimeMs:number,sx:number,sy:number}>} sample
+ * @param {number} timingWindowMs
+ * @returns {boolean}
+ */
+export function gloveBoxContactsBoxingTarget(target, sample, timingWindowMs) {
+  if (sample.songTimeMs < Number(target.centerTimestampMs) - timingWindowMs || sample.songTimeMs > Number(target.centerTimestampMs) + timingWindowMs) return false;
+  return sample.sx - gloveGeometry.x < target.x + 0.5 && sample.sx + gloveGeometry.x > target.x - 0.5 && sample.sy - gloveGeometry.y < target.y + 0.5 && sample.sy + gloveGeometry.y > target.y - 0.5;
+}
+
+/**
+ * 0.0.61 (GATE 1): pure, exported saber-orientation oracle. The assembly
+ * imports this EXACT function to orient the visible beam, so visual == hit:
+ * the same function drives both the renderer's beam and the gameplay capsule.
+ *
+ * Inputs:
+ * - `wristSamples`: ascending array of measured wrist positions in judge
+ *   space. Each entry is `{ t: measurementTimestampMs (ms, ascending),
+ *   x: sx, y: sy }`. Entries with non-finite fields, a non-finite/non-
+ *   ascending `t`, or an array of any shape are rejected by returning the
+ *   fallback (safe: no NaN, no throw on host input).
+ * - `nowMs`: the current wall timestamp in ms. Samples older than
+ *   `windowMs` relative to `nowMs` are ignored.
+ * - `windowMs`: smoothing lookback in ms (default 100). Must be a finite
+ *   positive number, otherwise the fallback is returned.
+ * - `fallback`: the grid-facing direction used when the wrist is (near)
+ *   stationary or no usable sample exists. Must be a finite {x,y}; the
+ *   default is `{x:0,y:1}` (up = toward the top of the grid, matching the
+ *   authored up-positive convention).
+ *
+ * Output: a FROZEN unit direction vector `{x, y}` in the same judge
+ * up-positive space as `measuredColliderSample` (sx right-positive, sy
+ * up-positive). When the net displacement of the samples inside the window
+ * is at least `MINIMUM_SABER_DIRECTION_TRAVEL` the displacement is
+ * normalized to the motion direction; otherwise (stationary wrist, empty or
+ * degenerate input) the (normalized) fallback is returned.
+ *
+ * @param {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} wristSamples
+ * @param {number} nowMs
+ * @param {Readonly<{x:number,y:number}>} [fallback]
+ * @param {number} [windowMs]
+ * @returns {Readonly<{x:number,y:number}>}
+ */
+export function saberDirectionFromWristHistory(wristSamples, nowMs, fallback = Object.freeze({ x: 0, y: 1 }), windowMs = 100) {
+  const normalizeVector = (x, y) => {
+    const length = Math.hypot(x, y);
+    if (length < Number.EPSILON) return Object.freeze({ x: 0, y: 1 });
+    return Object.freeze({ x: x / length, y: y / length });
+  };
+  const safeFallback = fallback !== null && typeof fallback === "object" && Number.isFinite(/** @type {DataRecord} */ (fallback).x) && Number.isFinite(/** @type {DataRecord} */ (fallback).y) ? normalizeVector(/** @type {DataRecord} */ (fallback).x, /** @type {DataRecord} */ (fallback).y) : Object.freeze({ x: 0, y: 1 });
+  if (!Array.isArray(wristSamples) || !Number.isFinite(nowMs) || !Number.isFinite(windowMs) || windowMs <= 0) return safeFallback;
+  /** @type {Readonly<{t:number,x:number,y:number}> | null} */
+  let oldest = null;
+  /** @type {Readonly<{t:number,x:number,y:number}> | null} */
+  let newest = null;
+  for (const entry of wristSamples) {
+    if (entry === null || typeof entry !== "object" || !Number.isFinite(/** @type {DataRecord} */ (entry).t) || !Number.isFinite(/** @type {DataRecord} */ (entry).x) || !Number.isFinite(/** @type {DataRecord} */ (entry).y)) return safeFallback;
+    const sample = /** @type {Readonly<{t:number,x:number,y:number}>} */ (entry);
+    if (sample.t < nowMs - windowMs) continue;
+    if (sample.t > nowMs) return safeFallback; // non-monotonic/corrupt history: fail to the fallback
+    if (oldest === null || sample.t < oldest.t) oldest = sample;
+    if (newest === null || sample.t > newest.t) newest = sample;
+  }
+  if (oldest === null || newest === null || oldest === newest) return safeFallback;
+  const dx = newest.x - oldest.x; const dy = newest.y - oldest.y;
+  if (Math.hypot(dx, dy) < MINIMUM_SABER_DIRECTION_TRAVEL) return safeFallback;
+  return normalizeVector(dx, dy);
 }
 
 /**
@@ -123,39 +287,15 @@ export function authoredDirectionCone(direction, toleranceDegrees) {
   });
 }
 
-/** @param {DataRecord} event @param {ColliderSample} sample @param {number} radius @param {number} timingWindowMs */
-export function pointContactsFlowTarget(event, sample, radius, timingWindowMs) {
-  const center = targetCenterForPlacement(Number(event.placement));
-  const half = TARGET_HALF_EXTENT + radius;
-  return sample.songTimeMs >= Number(event.centerTimestampMs) - timingWindowMs && sample.songTimeMs <= Number(event.centerTimestampMs) + timingWindowMs && sample.sx >= center.x - half && sample.sx <= center.x + half && sample.sy >= center.y - half && sample.sy <= center.y + half;
-}
-
 /**
- * Clip a measured wrist segment against the logical target footprint and timing slab.
- * Tangency and both timing boundaries are inclusive.
- * @param {DataRecord} event @param {ColliderSample} first @param {ColliderSample} second @param {number} radius @param {number} timingWindowMs
- * @returns {Readonly<{startMs:number,endMs:number,fraction:number}> | null}
+ * 0.0.61: continuity contract for the equipment-volume judge. The detector is
+ * now a per-frame equipment-volume test (saber capsule / glove box), so the
+ * old swept-segment clipping is retired; this keeps the segment-continuity
+ * definition (used by the authored-direction check and bomb coverage
+ * tracking) unchanged.
+ *
+ * @param {ColliderSample | null} first @param {ColliderSample} second
  */
-export function clipWristSegmentToTarget(event, first, second, radius, timingWindowMs) {
-  if (!isContinuousColliderSegment(first, second)) return null;
-  const target = targetCenterForPlacement(Number(event.placement));
-  const half = TARGET_HALF_EXTENT + radius;
-  const dt = second.songTimeMs - first.songTimeMs;
-  let low = 0; let high = 1;
-  for (const [origin, delta, minimum, maximum] of [
-    [first.songTimeMs, dt, Number(event.centerTimestampMs) - timingWindowMs, Number(event.centerTimestampMs) + timingWindowMs],
-    [first.sx, second.sx - first.sx, target.x - half, target.x + half],
-    [first.sy, second.sy - first.sy, target.y - half, target.y + half]
-  ]) {
-    if (delta === 0) { if (origin < minimum || origin > maximum) return null; continue; }
-    const a = (minimum - origin) / delta; const b = (maximum - origin) / delta;
-    low = Math.max(low, Math.min(a, b)); high = Math.min(high, Math.max(a, b));
-    if (low > high) return null;
-  }
-  return Object.freeze({ startMs: first.songTimeMs + dt * low, endMs: first.songTimeMs + dt * high, fraction: low });
-}
-
-/** @param {ColliderSample | null} first @param {ColliderSample} second */
 export function isContinuousColliderSegment(first, second) {
   return first !== null && first.sourceFrameId !== second.sourceFrameId && first.sourceIdentity === second.sourceIdentity && first.calibrationId === second.calibrationId && second.measurementTimestampMs > first.measurementTimestampMs && second.songTimeMs > first.songTimeMs && second.measurementTimestampMs - first.measurementTimestampMs <= maximumColliderSampleGapMs && second.songTimeMs - first.songTimeMs <= maximumColliderSampleGapMs;
 }

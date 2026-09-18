@@ -16,6 +16,7 @@ import {
   matchesAuthoredDirection,
   targetCenterForPlacement
 } from "./flow-collider-collision.js";
+import { gloveGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
 /**
@@ -223,56 +224,31 @@ export function guardGestureFromEvidence(evidence, config = defaultGuardGestureC
 }
 
 /**
- * Swept 2.5D contact of one wrist segment against a reach-row Boxing target:
- * the Flow Colliders sweep (inclusive tangency and timing slab) re-slabbed at
- * the reach-row Y. The X footprint comes from the canonical placement's
- * column; the Y slab is [target.y - (0.375 + radius), target.y + (0.375 +
- * radius)] so the judge plane always follows the shared reach-row mapping.
- *
- * @param {DataRecord} event
- * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
- * @param {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,sourceIdentity:string,calibrationId:string,sx:number,sy:number}>} first
- * @param {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,sourceIdentity:string,calibrationId:string,sx:number,sy:number}>} second
- * @param {number} radius
- * @param {number} timingWindowMs
- * @returns {Readonly<{startMs:number,endMs:number,fraction:number}> | null}
- */
-export function clipWristSegmentToBoxingTarget(event, target, first, second, radius, timingWindowMs) {
-  if (!isContinuousColliderSegment(first, second)) return null;
-  const dt = second.songTimeMs - first.songTimeMs;
-  const half = 0.375 + radius;
-  let low = 0; let high = 1;
-  for (const [origin, delta, minimum, maximum] of [
-    [first.songTimeMs, dt, Number(target.centerTimestampMs) - timingWindowMs, Number(target.centerTimestampMs) + timingWindowMs],
-    [first.sx, second.sx - first.sx, target.x - half, target.x + half],
-    [first.sy, second.sy - first.sy, target.y - half, target.y + half]
-  ]) {
-    if (delta === 0) { if (origin < minimum || origin > maximum) return null; continue; }
-    const a = (minimum - origin) / delta; const b = (maximum - origin) / delta;
-    low = Math.max(low, Math.min(a, b)); high = Math.min(high, Math.max(a, b));
-    if (low > high) return null;
-  }
-  return Object.freeze({ startMs: first.songTimeMs + dt * low, endMs: first.songTimeMs + dt * high, fraction: low });
-}
-
-/**
- * Point contact against a reach-row Boxing target footprint with the same
- * inclusive slab semantics as pointContactsFlowTarget.
+ * 0.0.61 (GATE 1): boxing hit detection. The glove box (shared
+ * `gloveGeometry`, half-extents x/y in the z=0 judge plane, +0.05 grid-facing
+ * offset out-of-plane) REPLACES the wrist-sample-in-inflated-box test. A
+ * punch or guard side is HIT when the glove box OVERLAPS the 1x1 reach-row
+ * target box within the inclusive timing window. Overlap-only semantics are
+ * preserved (F3: straights remain hand-attribute-only, no hand
+ * qualification); the boundary shifts by up to half a glove dimension versus
+ * the retired 0.375+radius footprint.
  *
  * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
  * @param {Readonly<{songTimeMs:number,sx:number,sy:number}>} sample
- * @param {number} radius
  * @param {number} timingWindowMs
  * @returns {boolean}
  */
-export function pointContactsBoxingTarget(target, sample, radius, timingWindowMs) {
-  const half = 0.375 + radius;
-  return sample.songTimeMs >= Number(target.centerTimestampMs) - timingWindowMs && sample.songTimeMs <= Number(target.centerTimestampMs) + timingWindowMs && sample.sx >= target.x - half && sample.sx <= target.x + half && sample.sy >= target.y - half && sample.sy <= target.y + half;
+export function gloveBoxContactsBoxingTarget(target, sample, timingWindowMs) {
+  if (sample.songTimeMs < Number(target.centerTimestampMs) - timingWindowMs || sample.songTimeMs > Number(target.centerTimestampMs) + timingWindowMs) return false;
+  return sample.sx - gloveGeometry.x < target.x + 0.5 && sample.sx + gloveGeometry.x > target.x - 0.5 && sample.sy - gloveGeometry.y < target.y + 0.5 && sample.sy + gloveGeometry.y > target.y - 0.5;
 }
 
 /**
  * Boxing punch direction check: applies the authored-direction tolerance
  * check to the enforced families; straights always pass (overlap-only).
+ * Retained for the direction-gated families even though the contact detector
+ * is now the per-frame glove volume: the prior/current continuity segment is
+ * still the motion authority for the authored-direction tolerance.
  *
  * @param {string} action
  * @param {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,sourceIdentity:string,calibrationId:string,sx:number,sy:number}> | null} first

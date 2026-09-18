@@ -12,9 +12,8 @@ import {
   guardGestureSatisfied,
   matchesBoxingAuthoredDirection,
   boxerRowForPlacement,
-  pointContactsBoxingTarget,
-  boxingColliderTargetCenter,
-  clipWristSegmentToBoxingTarget
+  gloveBoxContactsBoxingTarget,
+  boxingColliderTargetCenter
 } from "../src/index.js";
 import { targetCenterForPlacement } from "../src/flow-collider-collision.js";
 import { boxingColliderRowY } from "@aerobeat/web-contracts";
@@ -93,6 +92,12 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
     }
   }
   // Point contact at the exact judge plane for each reach case proves the judge uses the shared row Y.
+  // 0.0.61 (GATE 1): judge target Y still equals the shared contracts row Y —
+  // but the contact detector is now the GLOVE BOX (half-extent y = 0.28 in the
+  // z=0 plane), not the retired 0.375+radius footprint. The on-plane sample
+  // (wrist at the target center) hits; the off-plane sample 0.5 above is
+  // inside the glove's y half-extent, so it hits TOO — the reach-row Y is the
+  // judge truth, not a spatial gate. The spatial gate is the glove box.
   for (const [top, bottom] of cases) {
     const reach = { topRowReachWU: top, bottomRowReachWU: bottom };
     const placements = [4, 9];
@@ -102,9 +107,17 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
       const shared = boxingColliderRowY(row, reach);
       const target = { centerTimestampMs: 1000, x: canonical.x, y: shared.worldY };
       const onPlane = { songTimeMs: 1000, sx: canonical.x, sy: shared.worldY };
-      assert.equal(pointContactsBoxingTarget(target, onPlane, 0.12, 180), true, `reach ${top}/${bottom} placement ${placement}`);
+      assert.equal(gloveBoxContactsBoxingTarget(target, onPlane, 180), true, `reach ${top}/${bottom} placement ${placement}`);
+      // Off-plane sample 0.5 above: inside the glove's y half-extent, so the
+      // glove box still overlaps the 1x1 target box. This is the intended
+      // half-glove-size boundary shift versus the retired point-in-box test.
       const offPlane = { songTimeMs: 1000, sx: canonical.x, sy: shared.worldY + 0.5 };
-      assert.equal(pointContactsBoxingTarget(target, offPlane, 0.12, 180), false, `reach ${top}/${bottom} placement ${placement} off-plane`);
+      assert.equal(gloveBoxContactsBoxingTarget(target, offPlane, 180), true, `reach ${top}/${bottom} placement ${placement} off-plane (glove box still overlaps)`);
+      // A sample 0.8 above the target center is OUTSIDE the glove's y
+      // half-extent (0.28) plus the 0.5 cell half-height, so the glove box no
+      // longer overlaps the target box.
+      const farOffPlane = { songTimeMs: 1000, sx: canonical.x, sy: shared.worldY + 0.8 };
+      assert.equal(gloveBoxContactsBoxingTarget(target, farOffPlane, 180), false, `reach ${top}/${bottom} placement ${placement} far off-plane (glove box does not overlap)`);
     }
   }
   // 1/1 legacy byte-parity: reach-row targets equal the legacy full-grid centers.
@@ -122,33 +135,28 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
     const shared = boxingColliderRowY(1, { topRowReachWU: top, bottomRowReachWU: bottom });
     assert.deepEqual([shared.worldY, shared.athleteY], [1, 1.5]);
   }
-  // Boundary inclusivity: tangency and both timing boundaries are inclusive in the swept reuse.
+  // 0.0.61 (GATE 1): boundary inclusivity now uses the GLOVE BOX, not the
+  // retired 0.375+radius footprint. Timing boundaries are still inclusive;
+  // the spatial boundary shifts by up to half a glove dimension (0.34 x).
   const target5 = { centerTimestampMs: 1000, x: 1, y: 1 };
-  assert.equal(pointContactsBoxingTarget(target5, { songTimeMs: 820, sx: 1, sy: 1 }, 0.12, 180), true, "early boundary inclusive");
-  assert.equal(pointContactsBoxingTarget(target5, { songTimeMs: 1180, sx: 1, sy: 1 }, 0.12, 180), true, "late boundary inclusive");
-  assert.equal(pointContactsBoxingTarget(target5, { songTimeMs: 1180.001, sx: 1, sy: 1 }, 0.12, 180), false, "past late boundary exclusive");
-  // The inflated half-extent 0.375+0.12 evaluates to 1.4949999999999998 in IEEE754,
-  // so the exact tangent 1.5 sits 2.27e-16 outside; use 1.495 (within the slab)
-  // for the inclusive-inside case and 1.505 (clearly outside) for the miss case.
-  assert.equal(pointContactsBoxingTarget(target5, { songTimeMs: 1000, sx: 1.505, sy: 1 }, 0.12, 180), false, "outside inflated footprint");
-  assert.equal(pointContactsBoxingTarget(target5, { songTimeMs: 1000, sx: 1.495, sy: 1 }, 0.12, 180), true, "inflated near-tangent inside footprint");
-  assert.equal(pointContactsBoxingTarget(target5, { songTimeMs: 1000, sx: 0.505, sy: 0.505 }, 0.12, 180), true, "corner near-tangent inside both inflated edges");
-  const first = Object.freeze({ songTimeMs: 900, measurementTimestampMs: 900, sourceFrameId: "a", sourceIdentity: "s", calibrationId: "c", sx: 0.6, sy: 1 });
-  const second = Object.freeze({ songTimeMs: 1000, measurementTimestampMs: 1000, sourceFrameId: "b", sourceIdentity: "s", calibrationId: "c", sx: 1.5, sy: 1 });
-  assert.ok(clipWristSegmentToBoxingTarget(beat("t", 1000, "straight_left", { placement: 5 }), { centerTimestampMs: 1000, x: 1, y: 1 }, first, second, 0.12, 180));
-  assert.equal(clipWristSegmentToBoxingTarget(beat("t", 1000, "straight_left", { placement: 5 }), { centerTimestampMs: 1000, x: 1, y: 1 }, null, second, 0.12, 180), null);
-  // Reach-row re-clip: the swept Y slab follows the cell's reach-row center.
-  // Placement 9 (bottom row) sits at world Y 0 at the full reach 1.0 and at
-  // world Y 1.5 at reach 0/0 (the degenerate all-rows-shoulder case is 1.0).
-  const bottomFull = { centerTimestampMs: 1000, x: 1, y: 0 };
-  assert.equal(clipWristSegmentToBoxingTarget(beat("t9a", 1000, "hook_right", { placement: 9 }), bottomFull, first, second, 0.12, 180), null, "center-row segment misses the full-reach bottom row");
-  const bottomLow = { songTimeMs: 950, measurementTimestampMs: 950, sourceFrameId: "a", sourceIdentity: "s", calibrationId: "c", sx: -0.5, sy: 0.2 };
-  const bottomLowEnd = { songTimeMs: 1000, measurementTimestampMs: 1000, sourceFrameId: "b", sourceIdentity: "s", calibrationId: "c", sx: 1.5, sy: 0.2 };
-  assert.ok(clipWristSegmentToBoxingTarget(beat("t9b", 1000, "hook_right", { placement: 9 }), bottomFull, bottomLow, bottomLowEnd, 0.12, 180), "bottom-row segment hits the full-reach bottom row");
-  const bottomZero = { centerTimestampMs: 1000, x: 1, y: 1 };
-  const lowSeg = Object.freeze({ songTimeMs: 950, measurementTimestampMs: 950, sourceFrameId: "a", sourceIdentity: "s", calibrationId: "c", sx: 0.6, sy: 1 });
-  assert.ok(clipWristSegmentToBoxingTarget(beat("t9c", 1000, "hook_right", { placement: 9 }), bottomZero, lowSeg, second, 0.12, 180), "segment inside the zero-reach bottom row slab hits");
-  assert.equal(clipWristSegmentToBoxingTarget(beat("t9d", 1000, "hook_right", { placement: 9 }), bottomZero, bottomLow, bottomLowEnd, 0.12, 180), null, "low segment misses the zero-reach bottom row");
+  assert.equal(gloveBoxContactsBoxingTarget(target5, { songTimeMs: 820, sx: 1, sy: 1 }, 180), true, "early boundary inclusive");
+  assert.equal(gloveBoxContactsBoxingTarget(target5, { songTimeMs: 1180, sx: 1, sy: 1 }, 180), true, "late boundary inclusive");
+  assert.equal(gloveBoxContactsBoxingTarget(target5, { songTimeMs: 1180.001, sx: 1, sy: 1 }, 180), false, "past late boundary exclusive");
+  // Glove half-extent 0.34: a wrist at 1.5+0.34=1.84 has its inner edge
+  // exactly at 1.5 (no overlap); slightly beyond that misses. A wrist at
+  // 1.83 still overlaps (inner edge 1.49 < 1.5).
+  assert.equal(gloveBoxContactsBoxingTarget(target5, { songTimeMs: 1000, sx: 1.84, sy: 1 }, 180), false, "wrist at the glove's exact far edge misses");
+  assert.equal(gloveBoxContactsBoxingTarget(target5, { songTimeMs: 1000, sx: 1.83, sy: 1 }, 180), true, "wrist just inside the glove's far edge still overlaps");
+  // The old 0.375+0.12=0.495 boundary is replaced by the glove's 0.34
+  // half-extent: a wrist at 1.495 (which was inside the old inflated box) is
+  // still inside the glove (1.495-0.34=1.155 < 1.5). A wrist at 1.85 (outside
+  // the glove) is also outside the old box (1.85 > 1.495). The DIFFERENCE is
+  // the reach: a wrist at 1.5+0.34=1.84 was OUTSIDE the old box (1.84 >
+  // 1.495) but is now AT the glove's exact edge — the boundary moved outward.
+  // The corner case: a wrist at (0.505, 0.505) is inside the glove box
+  // (0.505-0.34=0.165 < 0.5 on both axes) and the target box [0.5,1.5]x
+  // [0.5,1.5], so it overlaps on both axes.
+  assert.equal(gloveBoxContactsBoxingTarget(target5, { songTimeMs: 1000, sx: 0.505, sy: 0.505 }, 180), true, "corner near-tangent: the glove box overlaps both cell edges");
 }
 
 // --- Direction per family -----------------------------------------------------
@@ -625,15 +633,31 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
     [["sim-cross-l", "miss", ["wrong_collider"]], ["sim-cross-r", "miss", ["wrong_collider"]]],
     "simultaneous crossing: each beat is judged only by its own (absent) hand");
 
-  // Geometry sanity for the whole block: the crossing points are truly INSIDE the opposite
-  // boxes and the far wrists truly OUTSIDE, so every miss above is hand-strictness, not a
-  // geometry slip. (pointContactsBoxingTarget(target, sample, radius, windowMs).)
+  // 0.0.61 (GATE 1): geometry sanity now uses the GLOVE BOX, not the retired
+  // point-in-inflated-box. The crossing points are inside the opposite
+  // glove boxes and the far wrists are outside, so every miss above is
+  // hand-strictness, not a geometry slip.
   const tOwnL = { centerTimestampMs: 1000, x: 1, y: 1 };   // straight_left cell 5
   const tOwnR = { centerTimestampMs: 1000, x: 2, y: 1 };   // straight_right cell 6
-  assert.equal(pointContactsBoxingTarget(tOwnR, { songTimeMs: 1000, sx: 1.9, sy: 1 }, 0.12, 180), true, "crossing left point (1.9,1) is inside the straight_right box");
-  assert.equal(pointContactsBoxingTarget(tOwnL, { songTimeMs: 1000, sx: 1.0, sy: 1 }, 0.12, 180), true, "crossing right point (1.0,1) is inside the straight_left box");
-  assert.equal(pointContactsBoxingTarget(tOwnR, { songTimeMs: 1000, sx: 0.2, sy: 0.3 }, 0.12, 180), false, "scenario-1 far right wrist (0.2,0.3) is outside the straight_right box");
-  assert.equal(pointContactsBoxingTarget(tOwnL, { songTimeMs: 1000, sx: 3.0, sy: 0.3 }, 0.12, 180), false, "scenario-2 far left wrist (3.0,0.3) is outside the straight_left box");
+  // Wrist at 1.9: the LEFT hand's glove (center 1.9) overlaps the
+  // straight_right box [1.5,2.5] on X (1.9-0.34=1.56 < 1.5+0.5=2.0... wait,
+  // the target box is [1.5,2.5] since target.x=2, half=0.5 → [1.5,2.5]).
+  // Glove [1.56, 2.24] ∩ [1.5, 2.5] = [1.56, 2.24] → overlap on X. On Y:
+  // glove [0.72, 1.28] ∩ [0.5, 1.5] = [0.72, 1.28] → overlap. So the glove
+  // box DOES overlap the target box.
+  assert.equal(gloveBoxContactsBoxingTarget(tOwnR, { songTimeMs: 1000, sx: 1.9, sy: 1 }, 180), true, "crossing left point (1.9,1) is inside the straight_right glove box");
+  // Wrist at 1.0: the RIGHT hand's glove (center 1.0) overlaps the
+  // straight_left box [0.5,1.5] on X. Glove [0.66,1.34] ∩ [0.5,1.5] =
+  // [0.66,1.34] → overlap.
+  assert.equal(gloveBoxContactsBoxingTarget(tOwnL, { songTimeMs: 1000, sx: 1.0, sy: 1 }, 180), true, "crossing right point (1.0,1) is inside the straight_left glove box");
+  // Wrist at 0.2, 0.3: the right hand's glove (center 0.2) does NOT overlap
+  // the straight_right box [1.5,2.5] on X (glove [-0.14, 0.54], target
+  // [1.5,2.5], no X overlap).
+  assert.equal(gloveBoxContactsBoxingTarget(tOwnR, { songTimeMs: 1000, sx: 0.2, sy: 0.3 }, 180), false, "scenario-1 far right wrist (0.2,0.3) is outside the straight_right glove box");
+  // Wrist at 3.0, 0.3: the left hand's glove (center 3.0) does NOT overlap
+  // the straight_left box [0.5,1.5] on X (glove [2.66,3.34], target
+  // [0.5,1.5], no X overlap).
+  assert.equal(gloveBoxContactsBoxingTarget(tOwnL, { songTimeMs: 1000, sx: 3.0, sy: 0.3 }, 180), false, "scenario-2 far left wrist (3.0,0.3) is outside the straight_left glove box");
 
   // 4) Control: the same beat pair with each own hand IN its own box -> both HIT. Proves the
   //    harness still produces hits (guards against a harness bug that makes everything miss).

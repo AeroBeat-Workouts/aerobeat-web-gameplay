@@ -14,8 +14,8 @@ import {
 } from "@aerobeat/web-contracts";
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
-import { clipWristSegmentToTarget, createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, pointContactsFlowTarget } from "./flow-collider-collision.js";
-import { boxingColliderSettingsIdentity, clipWristSegmentToBoxingTarget, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, pointContactsBoxingTarget, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
+import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, gloveBoxContactsBoxingTarget, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, saberCapsuleContactsFlowTarget, saberDirectionFromWristHistory } from "./flow-collider-collision.js";
+import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -141,6 +141,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const hazardOutcomes = /** @type {DataRecord[]} */ ([]);
   let previousLeftWristSample = /** @type {ColliderSample | null} */ (null);
   let previousRightWristSample = /** @type {ColliderSample | null} */ (null);
+  /** 0.0.61: bounded per-wrist judge-space history (last ~150ms, ascending
+   * measurement timestamps) feeding the pure `saberDirectionFromWristHistory`
+   * oracle so the gameplay saber capsule uses the EXACT direction the
+   * assembly orients the visible beam with. */
+  let leftWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
+  let rightWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
   let lastColliderFrame = /** @type {Readonly<{frameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string,frozenTickId:number | null}> | null} */ (null);
   let leftWristBaselineRequired = false;
   let rightWristBaselineRequired = false;
@@ -938,12 +944,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
       if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
-      const segmentContact = clipWristSegmentToTarget(event, prior, current, Number(eventSettings.colliderRadius), Number(eventSettings.timingWindowMs));
-      const pointContact = segmentContact === null && pointContactsFlowTarget(event, current, Number(eventSettings.colliderRadius), Number(eventSettings.timingWindowMs));
-      if (!segmentContact && !pointContact) continue;
+      // 0.0.61 (GATE 1): the saber capsule is the SOLE flow hit detector —
+      // the wrist-in-cell point test and the swept segment are retired. The
+      // capsule is built from the SAME pure direction oracle the assembly
+      // uses to orient the visible beam, so visual == hit.
+      const saberDirection = saberDirectionFromWristHistory(hand === "right" ? rightWristHistory : leftWristHistory, timestampMs);
+      if (!saberCapsuleContactsFlowTarget(event, current, saberDirection, Number(eventSettings.timingWindowMs))) continue;
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
-      candidates.push({ event, evidence: current, contactMs: segmentContact?.startMs ?? current.songTimeMs, hand });
+      candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
     }
     /** @type {typeof candidates} */ const accepted = [];
     for (const hand of /** @type {const} */ (["left", "right"])) {
@@ -956,19 +965,46 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
     evaluateColliderBombs(left, right, priorLeft, priorRight, !seedLeftOnly, !seedRightOnly);
     previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
+    leftWristHistory = pushJudgeHistory(leftWristHistory, left); rightWristHistory = pushJudgeHistory(rightWristHistory, right);
     finalizeColliderEvents();
+  }
+
+  /**
+   * 0.0.61: append one judge-space wrist sample to the bounded direction
+   * history and keep only the last `maximumColliderSampleFreshnessMs` window.
+   * Null (invalid/unavailable anchor) entries clear the history for that
+   * wrist so a stale streak cannot steer the saber.
+   *
+   * @param {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} history
+   * @param {ColliderSample | null} sample
+   * @returns {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>}
+   */
+  function pushJudgeHistory(history, sample) {
+    if (sample === null) return Object.freeze([]);
+    const entry = Object.freeze({ t: sample.measurementTimestampMs, x: sample.sx, y: sample.sy });
+    const cutoff = entry.t - maximumColliderSampleFreshnessMs;
+    // Copy into a fresh mutable array so the push never touches the shared
+    // frozen empty-array constant (and never mutates a previous frozen
+    // history, which would throw).
+    const kept = [];
+    for (const candidate of history) if (candidate.t > cutoff) kept.push(candidate);
+    kept.push(entry);
+    return Object.freeze(kept);
   }
 
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
   function evaluateColliderBombs(left, right, priorLeft, priorRight, evaluateLeft, evaluateRight) {
     for (const bomb of events.filter((event) => event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
-      const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const radius = Number(settings.colliderRadius); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = Number(bomb.centerTimestampMs) + windowMs;
+      const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = Number(bomb.centerTimestampMs) + windowMs;
       let tracker = bombStates.get(eventId) ?? { leftCoverage: Object.freeze([]), rightCoverage: Object.freeze([]), contactTimelinePositionMs: null, consequenceApplied: false };
       const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
       if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
       if (rightContinuous && priorRight && right) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
-      const leftContact = !evaluateLeft || left === null ? null : clipWristSegmentToTarget(bomb, priorLeft, left, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, left, radius, windowMs) ? left.songTimeMs : null);
-      const rightContact = !evaluateRight || right === null ? null : clipWristSegmentToTarget(bomb, priorRight, right, radius, windowMs)?.startMs ?? (pointContactsFlowTarget(bomb, right, radius, windowMs) ? right.songTimeMs : null);
+      // 0.0.61 (GATE 1): bombs are detonated by the same saber capsule the
+      // notes use (either wrist owns the bomb), replacing the retired
+      // wrist-in-inflated-cell detector.
+      const leftContact = !evaluateLeft || left === null ? null : saberCapsuleContactsFlowTarget(bomb, left, saberDirectionFromWristHistory(leftWristHistory, timestampMs), windowMs) ? left.songTimeMs : null;
+      const rightContact = !evaluateRight || right === null ? null : saberCapsuleContactsFlowTarget(bomb, right, saberDirectionFromWristHistory(rightWristHistory, timestampMs), windowMs) ? right.songTimeMs : null;
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };
@@ -1004,7 +1040,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
   }
 
-  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; }
+  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
@@ -1072,20 +1108,25 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
         const placement = Number(event.spatialTarget.targetCell);
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
-        const contact = clipWristSegmentToBoxingTarget(event, target, prior, current, Number(boxingColliderSettings.colliderRadius), Number(boxingColliderSettings.timingWindowMs));
-        const point = contact === null && pointContactsBoxingTarget(target, current, Number(boxingColliderSettings.colliderRadius), Number(boxingColliderSettings.timingWindowMs));
-        if (!contact && !point) continue;
+        // 0.0.61 (GATE 1): the glove box REPLACES the wrist-sample-in-box
+        // detector. Glove volume OVERLAPS the 1x1 reach-row target box within
+        // the inclusive timing window; overlap-only semantics are preserved
+        // (F3: no hand qualification, the opposite-hand guard below still
+        // reads only the own-hand sample).
+        if (!gloveBoxContactsBoxingTarget(target, current, Number(boxingColliderSettings.timingWindowMs))) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
-        candidates.push({ event, evidence: current, contactMs: contact?.startMs ?? current.songTimeMs, hand });
+        candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
       } else if (action === "guard" || action === "crossed_guard") {
         const target = /** @type {DataRecord | undefined} */ (event.guardTarget);
         if (!target) continue;
         const leftCell = Number(target.leftCell); const rightCell = Number(target.rightCell);
         const leftTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(leftCell, reach) });
         const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(rightCell, reach) });
-        const radius = Number(boxingColliderSettings.colliderRadius); const windowMs = Number(boxingColliderSettings.timingWindowMs);
-        const leftContact = left !== null && !seedLeftOnly && (clipWristSegmentToBoxingTarget(event, leftTarget, priorLeft, left, radius, windowMs) !== null || pointContactsBoxingTarget(leftTarget, left, radius, windowMs));
-        const rightContact = right !== null && !seedRightOnly && (clipWristSegmentToBoxingTarget(event, rightTarget, priorRight, right, radius, windowMs) !== null || pointContactsBoxingTarget(rightTarget, right, radius, windowMs));
+        const windowMs = Number(boxingColliderSettings.timingWindowMs);
+        // 0.0.61 (GATE 1): guard poses judge through the SAME glove volume —
+        // both authored cells must be overlapped by their own hands' gloves.
+        const leftContact = left !== null && !seedLeftOnly && gloveBoxContactsBoxingTarget(leftTarget, left, windowMs);
+        const rightContact = right !== null && !seedRightOnly && gloveBoxContactsBoxingTarget(rightTarget, right, windowMs);
         if (!leftContact || !rightContact) continue;
         guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(left?.songTimeMs ?? 0, right?.songTimeMs ?? 0), leftContact: true, rightContact: true });
       }
@@ -1299,7 +1340,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
