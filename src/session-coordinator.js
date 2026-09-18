@@ -398,7 +398,23 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
             judgeLiveEvents();
           }
           judgeShadowEvents();
-          if (events.length > 0 && judgedIds.size + obstacleOutcomes.length + hazardOutcomes.filter((outcome) => outcome.kind === "bomb").length + suppressedObstacleCount() >= events.length) {
+          /* L-F7 (0.0.61, 2dh7): completion counts each completed EVENT exactly
+             once — the UNION of completion signals, not the sum. Boxing
+             collider obstacle checkpoints (squat/weave) get BOTH a judgement
+             (finalizeBoxingColliderEvents miss path) AND an obstacle outcome
+             (evaluateBoxingObstacles); the old sum counted each twice, so a
+             chart with enough obstacles crossed the threshold mid-song and
+             completed early, dropping the not-yet-finalized obstacle outcomes.
+             Flow semantics are byte-identical: flow obstacles appear in only
+             one signal each (obstacleOutcomes for classic, hazardOutcomes
+             "wall" for colliders — never counted), bombs only in
+             hazardOutcomes "bomb", notes only in judgedIds, so union == sum
+             there. Suppressed flow obstacles (no_obstacles / obstacle_visual_only)
+             still add flat, since no signal can ever cover them. */
+          const completedEventIds = new Set(judgedIds);
+          for (const outcome of obstacleOutcomes) completedEventIds.add(String(outcome.eventId));
+          for (const outcome of hazardOutcomes) if (outcome.kind === "bomb") completedEventIds.add(String(outcome.eventId));
+          if (events.length > 0 && completedEventIds.size + suppressedObstacleCount() >= events.length) {
             state = "completed";
             pauseReason = null;
           }
@@ -797,34 +813,20 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * `judgeLiveEvents`, and a head collision applies no boxing score
    * consequence (no combo break), so the assembly's hazard-contact derivation
    * (obstacleOutcomes contact -> hazardContactActive) fires the same red edge
-   * vignette as Flow. Finalization runs before the sample-validity gate so an
-   * expired wall closes out even when the current frame has no valid
-   * measurement (mirrors evaluateFlowObstacles' finalize ordering).
+   * vignette as Flow. The current frame's sample is scored BEFORE expired
+   * obstacles are finalized (flow-aligned ordering, see
+   * evaluateFlowObstacles): a sample with songTimeMs >= intervalEnd extends
+   * coverage to the interval end, so a fully covered safe pass finalizes as
+   * "avoided" instead of "unevaluated_tracking" (htc8). Expired obstacles
+   * still close out on every no-sample early-return path.
    */
   function evaluateBoxingObstacles() {
     if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || sessionPurpose !== "play") return;
     const obstacles = events.filter((event) => (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
-    // Finalize any obstacle whose interval has fully elapsed BEFORE checking
-    // for a fresh nose sample: an expired wall must close out as
-    // unevaluated_tracking even when the current frame carries no valid
-    // measurement (mirrors evaluateFlowObstacles' finalize ordering).
-    for (const obstacle of obstacles) {
-      const eventId = String(obstacle.eventId);
-      if (timelinePositionMs < Number(obstacle.intervalEndTimestampMs)) continue;
-      const tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
-      const result = tracker.contact.length > 0 ? "contact" : coversInterval(tracker.coverage, Number(obstacle.intervalStartTimestampMs), Number(obstacle.intervalEndTimestampMs)) ? "avoided" : "unevaluated_tracking";
-      const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
-      obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: BOXING_COLLIDER_RULESET, result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
-      occupiedObstacleIds.delete(eventId);
-      obstacleStates.delete(eventId);
-      if (occupiedObstacleIds.size === 0) releaseHazardContact(timelinePositionMs);
-    }
-    const activeObstacles = obstacles.filter((event) => !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
-    if (activeObstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
-    if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); return; }
+    if (!sample || sample.calibrationId !== calibrationId || !lastInput) { previousNoseSample = null; occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); finalizeBoxingObstacles(obstacles); return; }
     /* F4 (0.0.60): frozen frames use (calibrationId, frozenTickId) as their
        per-tick identity (see evaluateFlowObstacles / the Flow Colliders mirror
        in evaluateFlowColliderNotesAndBombs). A strictly increasing frozenTickId
@@ -842,29 +844,32 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
       releaseHazardContact(timelinePositionMs);
+      finalizeBoxingObstacles(obstacles);
       return;
     }
     lastEvidenceFrameId = evidenceFrameId;
     lastEvidenceFrameFrozenTickId = frozenTickId;
     latestEvidenceTimelineMs = sample.songTimeMs;
-    if (noseBaselineRequired) { noseBaselineRequired = false; previousNoseSample = sample; return; }
+    if (noseBaselineRequired) { noseBaselineRequired = false; previousNoseSample = sample; finalizeBoxingObstacles(obstacles); return; }
     if (frozenTickId !== null) {
       if (priorFrozenTickId !== null && frozenTickId < priorFrozenTickId) {
         previousNoseSample = null;
         occupiedObstacleIds.clear();
         releaseHazardContact(timelinePositionMs);
+        finalizeBoxingObstacles(obstacles);
         return;
       }
     } else if (prior !== null && (sample.measurementTimestampMs <= prior.measurementTimestampMs || sample.songTimeMs <= prior.songTimeMs)) {
       previousNoseSample = null;
       occupiedObstacleIds.clear();
       releaseHazardContact(timelinePositionMs);
+      finalizeBoxingObstacles(obstacles);
       return;
     }
     const continuous = prior !== null && prior.calibrationId === sample.calibrationId && sample.measurementTimestampMs - prior.measurementTimestampMs <= maximumObstacleSampleGapMs && sample.songTimeMs - prior.songTimeMs <= maximumObstacleSampleGapMs;
     if (prior !== null && !continuous) { occupiedObstacleIds.clear(); releaseHazardContact(timelinePositionMs); }
     /** @type {{timelineMs:number,kind:"enter"|"exit",eventId:string}[]} */ const boundaries = [];
-    for (const obstacle of activeObstacles) {
+    for (const obstacle of obstacles) {
       const eventId = String(obstacle.eventId);
       let tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
       if (continuous && prior) {
@@ -887,6 +892,35 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     processObstacleBoundaries(boundaries);
     previousNoseSample = sample;
+    // Flow-aligned: finalize AFTER the current frame's sample was scored, so
+    // the sample that crosses intervalEnd extends coverage to intervalEnd and
+    // a full safe pass can finalize as "avoided" (htc8).
+    finalizeBoxingObstacles(obstacles);
+  }
+
+  /**
+   * L-F7 (0.0.61, htc8): finalize expired boxing obstacles into
+   * `obstacleOutcomes` (one outcome per event, one-shot via the
+   * `obstacleOutcomes` exclusion filter in evaluateBoxingObstacles). Called
+   * AFTER the current frame's sample has been scored — or from every
+   * no-sample early-return path — so the expired-obstacle close-out happens
+   * on the same tick in both cases, exactly like
+   * evaluateFlowObstacles' trailing `finalizeObstacles`. The L-B2/L-B3
+   * release wiring (releasedAtMs set, sinceMs retained) is unchanged.
+   * @param {readonly DataRecord[]} obstacles
+   */
+  function finalizeBoxingObstacles(obstacles) {
+    for (const obstacle of obstacles) {
+      if (timelinePositionMs < Number(obstacle.intervalEndTimestampMs)) continue;
+      const eventId = String(obstacle.eventId);
+      const tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
+      const result = tracker.contact.length > 0 ? "contact" : coversInterval(tracker.coverage, Number(obstacle.intervalStartTimestampMs), Number(obstacle.intervalEndTimestampMs)) ? "avoided" : "unevaluated_tracking";
+      const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
+      obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: BOXING_COLLIDER_RULESET, result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
+      occupiedObstacleIds.delete(eventId);
+      obstacleStates.delete(eventId);
+      if (occupiedObstacleIds.size === 0) releaseHazardContact(timelinePositionMs);
+    }
   }
 
   /**

@@ -296,4 +296,67 @@ function send(c, songMs, sx, sy, frameId) {
   assert.equal(count(), 1, "boxing wall count stable at +1 s of live ticks after expiry");
 }
 
+// --- L-F7 (0.0.61, htc8): "avoided" is REACHABLE for boxing obstacles.
+// Pre-fix, evaluateBoxingObstacles finalized expired obstacles BEFORE scoring
+// the current frame's sample (unlike evaluateFlowObstacles, which finalizes at
+// the END). Any sample with songTimeMs >= intervalEnd is only processed at/after
+// the finalizing advance, so coverage at finalize time always ended below
+// intervalEnd, coversInterval was always false without contact, and a perfect
+// safe-cell drive could only settle as "contact" or "unevaluated_tracking".
+// Continuous 100ms safe drive through the full interval: the sample that
+// crosses intervalEnd extends coverage to intervalEnd -> "avoided", firstContact null.
+{
+  const c = ready([weaveEvent("lf7-avoid", 1000, 1300), keeperPunch()], "lf7-avoid");
+  for (const t of [950, 1050, 1150, 1250, 1350]) send(c, t, 2.5, 1.5, `lf7a-${t}`);
+  assert.deepEqual(
+    c.getObstacleOutcomes().map((o) => [o.eventId, o.result, o.firstContactTimelinePositionMs]),
+    [["lf7-avoid", "avoided", null]],
+    "full safe-cell coverage of the whole interval finalizes as avoided with no contact"
+  );
+  assert.equal(c.getSnapshot().session.state, "playing", "session stays playing after the avoided outcome (keeper note still pending)");
+}
+
+// --- L-F7 (0.0.61, 2dh7): a boxing obstacle event counts ONCE toward
+// completion. Each obstacle checkpoint both gets a miss judgement (via
+// finalizeBoxingColliderEvents) AND produces an obstacle outcome; the pre-fix
+// sum (judgedIds.size + obstacleOutcomes.length) counted each obstacle twice,
+// so a chart with enough obstacles crossed the threshold mid-song and the
+// session completed early, dropping not-yet-finalized obstacle outcomes.
+// Chart: W1[1000,1300] N1@1500 W2[2000,2300] N2@2500 (4 events). W1 miss at
+// 1250, N1 hit at 1350, W2 miss at 2250 (its outcome cannot exist before its
+// interval ends at 2300), W2 outcome at 2350, N2 hit at 2350. Pre-fix the
+// double count reached 4/4 at 2250 and the session completed early with only
+// ONE obstacle outcome and no N2 judgement; post-fix it runs to true
+// completion at 2350 with BOTH outcomes present.
+{
+  const c = ready([
+    weaveEvent("lf7-w1", 1000, 1300),
+    { ...keeperPunch("lf7-n1"), centerTimestampMs: 1500 },
+    weaveEvent("lf7-w2", 2000, 2300),
+    { ...keeperPunch("lf7-n2"), centerTimestampMs: 2500 },
+  ], "lf7-completion");
+  let completedAt = null;
+  let stateAtW2Miss = null;
+  for (let t = 950; t <= 2900; t += 100) {
+    send(c, t, 2.5, 1.5, `lf7b-${t}`);
+    if (t === 2250) stateAtW2Miss = c.getSnapshot().session.state;
+    if (completedAt === null && c.getSnapshot().session.state === "completed") completedAt = t;
+  }
+  assert.equal(stateAtW2Miss, "playing", "no early completion while W2's outcome and N2 are still pending (pre-fix: completed here)");
+  assert.equal(completedAt, 2350, `true completion: every event resolved before the terminal state (completed at ${completedAt})`);
+  assert.deepEqual(
+    c.getJudgements().map((j) => [j.eventId, j.result]),
+    [["lf7-w1", "miss"], ["lf7-n1", "hit"], ["lf7-w2", "miss"], ["lf7-n2", "hit"]],
+    "all four events judged exactly once (notes count once per judgement)"
+  );
+  assert.deepEqual(
+    c.getObstacleOutcomes().map((o) => [o.eventId, o.result, o.firstContactTimelinePositionMs]),
+    [["lf7-w1", "avoided", null], ["lf7-w2", "avoided", null]],
+    "both obstacle outcomes present at completion (safe continuous drives -> avoided)"
+  );
+  const completedIds = new Set([...c.getJudgements().map((j) => j.eventId), ...c.getObstacleOutcomes().map((o) => o.eventId)]);
+  assert.equal(completedIds.size, 4, "each of the 4 events completed exactly once (union of judgements + outcomes, no double count)");
+  assert.equal(c.getSnapshot().session.state, "completed");
+}
+
 console.log("B12 boxing nose-obstacle collision contact-signal validation passed.");
