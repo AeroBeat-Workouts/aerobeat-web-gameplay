@@ -890,25 +890,28 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   /**
-   * 0.0.61 L-B2 (3gb2): publish the hazard-contact RELEASE boundary. The moment an
+   * 0.0.61 L-B2/L-B3 (3gb2): publish the hazard-contact RELEASE boundary. The moment an
    * obstacle episode ends — a clipped nose exit, an interval finalize, or ANY path
    * that empties `occupiedObstacleIds` (stale/invalid measurement, repeated-frame
    * re-baseline, frozen-episode re-baseline, non-continuous sample gap) — the
-   * snapshot must carry the documented `{active:false, sinceMs:null,
+   * snapshot must carry the documented `{active:false, sinceMs:<entry RETAINED>,
    * releasedAtMs:<release tick>}` shape, not only on an explicit exit boundary. The
-   * renderer's released-phase decay (150 ms ramp / 2 Hz pulse / 400 ms linear decay)
-   * needs this release instant; a null releasedAtMs snap-offs the vignette at exit.
-   * No-op while no episode is in flight (sinceMs === null), so the fully-idle
-   * `{active:false, sinceMs:null, releasedAtMs:null}` shape is never mutated, and
-   * only flow_colliders_v1 / boxing_collider_v1 (play purpose) carry hazard-contact
-   * state.
+   * renderer's released-phase decay recomputes the release-moment pulse intensity
+   * statelessly as activeIntensity(releasedAtMs, {active:true, sinceMs, releasedAtMs})
+   * from (sinceMs, releasedAtMs, params) — so sinceMs MUST be retained on release:
+   * a null sinceMs makes the release-moment intensity 0 and the vignette snap-offs
+   * at exit. releasedAtMs is the most recent exit; a fresh episode's enter resets
+   * both fields. No-op unless an episode is in flight (sinceMs !== null AND
+   * releasedAtMs === null), so a published release is never overwritten by later
+   * release paths and the fully-idle `{active:false, sinceMs:null, releasedAtMs:null}`
+   * shape is never mutated, and only flow_colliders_v1 / boxing_collider_v1 (play
+   * purpose) carry hazard-contact state.
    * @param {number} releaseTickMs - the song timeline position at which the episode closed.
    */
   function releaseHazardContact(releaseTickMs) {
-    if (hazardContactSinceMs === null || sessionPurpose !== "play") return;
+    if (hazardContactSinceMs === null || hazardContactReleasedAtMs !== null || sessionPurpose !== "play") return;
     if (!(variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET)) return;
     hazardContactReleasedAtMs = releaseTickMs;
-    hazardContactSinceMs = null;
   }
 
   /** @param {readonly {timelineMs:number,kind:"enter"|"exit",eventId:string}[]} boundaries */

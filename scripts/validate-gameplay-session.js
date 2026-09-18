@@ -464,10 +464,12 @@ function readyPlaying(coordinator, events, selected = variant()) {
     outside.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const outInput = input(3900, outside); outInput.sourceIdentity = "src-1";
     c.advance({ timestampMs: 3900, clock: clock(850, true), input: outInput });
-    // releasedAtMs clamped to interval end (800) because exit is beyond the wall
+    // releasedAtMs clamped to interval end (800) because exit is beyond the wall;
+    // sinceMs is retained from the entry (L-B3) so the renderer can recompute the
+    // release-moment pulse phase from (sinceMs, releasedAtMs, params).
     const exitHc = c.getSnapshot().hazardContact;
     assert.equal(exitHc.active, false, "exit: inactive");
-    assert.equal(exitHc.sinceMs, null, "exit: sinceMs null");
+    assert.equal(exitHc.sinceMs, 722.7272727272727, "exit: sinceMs retained from the exact segment-clip entry");
     assert.equal(exitHc.releasedAtMs, 800, "exit: exact releasedAtMs (clamped to interval end)");
   }
 
@@ -511,7 +513,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     const outBInput = input(4000, outB); outBInput.sourceIdentity = "src-1";
     c.advance({ timestampMs: 4000, clock: clock(820, true), input: outBInput });
     assert.equal(c.getSnapshot().hazardContact.active, false, "exit B: inactive");
-    assert.equal(c.getSnapshot().hazardContact.sinceMs, null, "exit B: sinceMs null");
+    assert.equal(c.getSnapshot().hazardContact.sinceMs, enterSinceMs, "exit B: sinceMs stays at the original episode start (retained across replacement + release)");
     assert.ok(c.getSnapshot().hazardContact.releasedAtMs !== null, "exit B: releasedAtMs set");
   }
 
@@ -600,7 +602,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
     inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const hostileInput = input(4000, inside); hostileInput.sourceIdentity = "src-1";
     c.advance({ timestampMs: 4000, clock: clock(712, true), input: hostileInput });
-    assert.equal(c.getSnapshot().hazardContact.active, true, "active after valid enter");
+    const hostileEntry = c.getSnapshot().hazardContact;
+    assert.equal(hostileEntry.active, true, "active after valid enter");
+    assert.ok(typeof hostileEntry.sinceMs === "number" && Number.isFinite(hostileEntry.sinceMs) && hostileEntry.sinceMs >= 700 && hostileEntry.sinceMs <= 712, `hostile: finite entry sinceMs (${hostileEntry.sinceMs})`);
     // Stale evidence (>150ms gap) severs → inactive
     const stale = evidence("hc-hostile-stale", 4200, []);
     stale.anchors.find((a) => a.anchor === "nose").x = 0.4;
@@ -608,14 +612,18 @@ function readyPlaying(coordinator, events, selected = variant()) {
     const staleInput = input(4200, stale); staleInput.sourceIdentity = "src-1";
     c.advance({ timestampMs: 4400, clock: clock(720, true), input: staleInput });
     assert.equal(c.getSnapshot().hazardContact.active, false, "stale evidence severs: hazardContact inactive");
-    // L-B2 (0.0.61): the severing path must publish the release boundary, not only drop occupation.
-    assert.equal(c.getSnapshot().hazardContact.sinceMs, null, "stale evidence severs: sinceMs null");
+    // L-B2/L-B3 (0.0.61): the severing path must publish the release boundary, not only
+    // drop occupation; sinceMs is retained so the renderer's release-moment pulse phase
+    // stays recomputable from (sinceMs, releasedAtMs, params).
+    assert.equal(c.getSnapshot().hazardContact.sinceMs, hostileEntry.sinceMs, "stale evidence severs: sinceMs retained from the episode entry");
     assert.equal(c.getSnapshot().hazardContact.releasedAtMs, 720, "stale evidence severs: releasedAtMs published at the severing tick (pre-fix it was null)");
   }
 
-  // --- L-B2 (0.0.61): non-continuous sample gap BEFORE the interval ends publishes the
-  // release boundary for flow walls (pre-fix the snapshot stayed
-  // {active:false, sinceMs:<entry>, releasedAtMs:null}) ---
+  // --- L-B2/L-B3 (0.0.61): non-continuous sample gap BEFORE the interval ends publishes
+  // the release boundary for flow walls with the entry sinceMs retained (pre-fix the
+  // snapshot stayed {active:false, sinceMs:<entry>, releasedAtMs:null}; L-B2 published
+  // releasedAtMs but nulled sinceMs, which the renderer's release-moment pulse phase
+  // needs retained) ---
   {
     const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-gap" });
     const wall = canonicalFlowEvent("hc-gap-wall", 700, { start: 1.4, end: 1.6, type: "obstacle", ...wallGeometry }, 1200);
@@ -637,6 +645,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     assert.equal(enterHc.active, true, "gap: active inside the wall");
     assert.ok(Number.isFinite(enterHc.sinceMs) && enterHc.sinceMs >= 700 && enterHc.sinceMs <= 750, `gap: sinceMs is the clipped entry (${enterHc.sinceMs})`);
     assert.equal(enterHc.releasedAtMs, null, "gap: releasedAtMs null while the episode is active");
+    const gapEntrySinceMs = enterHc.sinceMs;
     // 200 ms sample gap (> maximumObstacleSampleGapMs=150) with the nose now OUTSIDE the
     // wall, while the interval [700,1200] is still open: occupied is severed without an
     // exit boundary and the release boundary must be published at this tick.
@@ -647,7 +656,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     c.advance({ timestampMs: 4000, clock: clock(950, true), input: gapInput });
     const gapHc = c.getSnapshot().hazardContact;
     assert.equal(gapHc.active, false, "gap: occupied severed after the non-continuous sample gap");
-    assert.equal(gapHc.sinceMs, null, "gap: sinceMs null after the severing gap");
+    assert.equal(gapHc.sinceMs, gapEntrySinceMs, "gap: sinceMs retained from the episode entry after the severing gap");
     assert.equal(gapHc.releasedAtMs, 950, "gap: releasedAtMs published at the gap tick (pre-fix it was null)");
     // Past the interval end: the wall finalizes exactly once as a contact and the
     // already-published release tick is not overwritten by the finalize.
@@ -656,7 +665,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     after.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const afterInput = input(4300, after); afterInput.sourceIdentity = "src-1";
     c.advance({ timestampMs: 4300, clock: clock(1250, true), input: afterInput });
-    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: 950 }, "gap: finalize does not overwrite the published release tick");
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: gapEntrySinceMs, releasedAtMs: 950 }, "gap: finalize does not overwrite the published release tick or the retained entry sinceMs");
     const wallOutcomes = c.getHazardOutcomes().filter((outcome) => outcome.kind === "wall" && outcome.eventId === "hc-gap-wall");
     assert.equal(wallOutcomes.length, 1, "gap: the wall settles exactly once");
     assert.equal(wallOutcomes[0].result, "contact", "gap: the clipped entry settles as a contact outcome");
