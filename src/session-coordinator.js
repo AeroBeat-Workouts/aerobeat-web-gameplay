@@ -606,6 +606,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // auto-recovery, same calibrationId) from source changes (full T-pose,
     // new calibrationId). The coordinator trusts the upstream signal rather
     // than re-deriving it from the calibrationId.
+    // A commit that carries the upstream FRESH flag already cleared on a
+    // calibration generation DIFFERENT from the one the invalidation latched to
+    // is authoritative recovery truth: the player completed a genuinely new
+    // T-pose after a tracking loss, so the latch releases NOW. Without this the
+    // guard below can never lift — fresh=true forces safetyReady=false until the
+    // first scored frame of the NEW run, which cannot arrive while the session
+    // stays paused — and the recovery parks in paused_tracking forever (the D1
+    // mobile-menu + shell-matrix seam reds).
+    const recoveredInvalidation = normalized.upstreamFreshRequired !== true && nextCalibrationId !== null && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId;
+    if (recoveredInvalidation) invalidatedCalibrationId = null;
     freshCalibrationRequired = normalized.upstreamFreshRequired === true || nextCalibrationId === null;
     safetyReady = (readiness === "ready" || readiness === "countdown") && !trackingPaused && !freshCalibrationRequired;
     if (nextCalibrationId !== calibrationId) {
