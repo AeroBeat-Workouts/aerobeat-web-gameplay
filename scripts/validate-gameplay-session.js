@@ -900,6 +900,38 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.ok(["countdown", "paused_manual", "playing"].includes(coordinator.getSnapshot().session.state), "post-recovery frames advance without rejection");
 }
 
+// Second half of the seam (mobile-menu + shell-matrix reds): while parked in
+// paused_tracking, the coordinator must re-evaluate against the CURRENT committed
+// input. With only the stale pre-pause flags (fresh=true from the loss frame) a
+// freshly-recalibrated generation that already publishes fresh-cleared truth can
+// never flip safetyReady — the scored frame that would clear it cannot arrive
+// while the session is paused, so the recovery parks forever. The current-input
+// guard releases the latch exactly when upstream truth recovers, and STILL parks
+// while that truth demands recalibration.
+{
+  const lostFrame = () => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: "measured-frame:cam:fresh-t2", measurementTimestampMs: 6500, provenance: "measured", activeBoxingActions: [], anchors: Object.entries({ nose: 1, left_shoulder: 4, right_shoulder: 7, left_elbow: 4, right_elbow: 7, left_wrist: 5, right_wrist: 6 }).map(([name, cell]) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: 6500, valid: true, confidence: 1, rawX: .5, rawY: .5, x: .5, y: .5, cell, subcell: cell + 1 })), entries: [] });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "current-input-recovery" });
+  readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
+  // Live scoring on cal-1, then the recalibrating snapshot (readiness flip) that
+  // the D1 loss window publishes — this is what pauses play.
+  coordinator.advance({ timestampMs: 3000, clock: clock(700, true), input: input(3000, evidence("frame-live", 3000, ["hook_left"]), { calibrationId: "cal-1" }) });
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, null, { calibrationId: "cal-1", ready: false }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "readiness flip during play enters the tracking pause");
+  // Recalibration commits cal-2; the fixed input service drops the old frame at the
+  // commit and republishes on the new id — the first recovered snapshot therefore
+  // carries fresh-cleared truth AND new-generation evidence in one advance.
+  const recoveredFrame = ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-2", measuredSourceFrameId: "measured-frame:cam:fresh-t2", measurementTimestampMs: 6500, provenance: "measured", activeBoxingActions: [], anchors: Object.entries({ nose: 1, left_shoulder: 4, right_shoulder: 7, left_elbow: 4, right_elbow: 7, left_wrist: 5, right_wrist: 6 }).map(([name, cell]) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-2", measurementTimestampMs: 6500, valid: true, confidence: 1, rawX: .5, rawY: .5, x: .5, y: .5, cell, subcell: cell + 1 })), entries: [] });
+  coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, recoveredFrame, { calibrationId: "cal-2" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown", "current-input truth releases the paused latch into the tracking_resume countdown");
+  assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+  assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-2");
+  // A further snapshot that still demands recalibration (readiness back to
+  // calibration_required, e.g. an interrupted hold) must park the session again —
+  // the guard re-enters the tracking pause instead of walking the countdown.
+  coordinator.advance({ timestampMs: 5500, clock: clock(1000, false), input: input(5500, null, { calibrationId: "cal-2", ready: false }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "non-recovered truth re-enters the tracking pause during the resume countdown");
+}
+
 // The public input contract itself stays strict: evidence whose calibrationId does
 // not match the snapshot's live calibration is a hard violation. The assembly seam
 // routes any such throw to its error path instead of swallowing it, so a regression

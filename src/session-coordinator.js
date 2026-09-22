@@ -606,17 +606,23 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // auto-recovery, same calibrationId) from source changes (full T-pose,
     // new calibrationId). The coordinator trusts the upstream signal rather
     // than re-deriving it from the calibrationId.
-    // A commit that carries the upstream FRESH flag already cleared on a
-    // calibration generation DIFFERENT from the one the invalidation latched to
-    // is authoritative recovery truth: the player completed a genuinely new
-    // T-pose after a tracking loss, so the latch releases NOW. Without this the
-    // guard below can never lift — fresh=true forces safetyReady=false until the
-    // first scored frame of the NEW run, which cannot arrive while the session
-    // stays paused — and the recovery parks in paused_tracking forever (the D1
-    // mobile-menu + shell-matrix seam reds).
-    const recoveredInvalidation = normalized.upstreamFreshRequired !== true && nextCalibrationId !== null && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId;
+    // The upstream service is the authoritative source for whether recalibration
+    // is required. Its flags say it directly; but a snapshot whose calibrationId
+    // JUMPS generations while its readiness still demands calibration (a T-pose
+    // hold in flight across the loss/reset window) implies fresh truth the flags
+    // do not yet carry — treat it as such so the coordinator parks instead of
+    // resuming on stale-generation evidence.
+    freshCalibrationRequired = normalized.upstreamFreshRequired === true || (nextCalibrationId !== null && nextCalibrationId !== calibrationId && readiness !== "countdown" && readiness !== "ready") || nextCalibrationId === null;
+    // A commit that publishes RECOVERED truth (fresh cleared, readiness
+    // countdown/ready) on a calibration generation different from the one the
+    // invalidation latched to is authoritative recovery: the player completed a
+    // genuinely new T-pose after the tracking loss, so the latch releases NOW.
+    // Without this the guard below can never lift — fresh=true forces
+    // safetyReady=false until the first scored frame of the NEW run, which
+    // cannot arrive while the session stays paused — and the recovery parks in
+    // paused_tracking forever (the D1 mobile-menu + shell-matrix seam reds).
+    const recoveredInvalidation = !freshCalibrationRequired && (readiness === "countdown" || readiness === "ready") && nextCalibrationId !== null && invalidatedCalibrationId !== null && nextCalibrationId !== invalidatedCalibrationId;
     if (recoveredInvalidation) invalidatedCalibrationId = null;
-    freshCalibrationRequired = normalized.upstreamFreshRequired === true || nextCalibrationId === null;
     safetyReady = (readiness === "ready" || readiness === "countdown") && !trackingPaused && !freshCalibrationRequired;
     if (nextCalibrationId !== calibrationId) {
       const priorCalibrationId = calibrationId;
@@ -637,9 +643,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function enforceSafety() {
     if (sessionPurpose === "visual_test") return;
-    if (state === "playing" || state === "countdown" || state === "paused_manual") {
+    if (state === "playing" || state === "countdown") {
+      // commitInput already ran for THIS advance: these branches evaluate the
+      // current input's truth (byte-identical semantics to before).
       if (!safetyReady || freshCalibrationRequired) enterTrackingPause();
     } else if (state === "paused_tracking" && safetyReady && !freshCalibrationRequired && calibrationId !== null) {
+      // commitInput ran for THIS advance, so safetyReady/freshCalibrationRequired/
+      // calibrationId are the CURRENT input's truth (byte-identical to the original
+      // D1 guard, which already evaluated post-commit values): once upstream
+      // publishes recovered truth the tracking_resume countdown starts from this
+      // frame instead of waiting for an unreachable scored frame.
       beginCountdown("tracking_resume");
     } else if (state === "calibrating" && safetyReady && calibrationId !== null) {
       pauseReason = null;
