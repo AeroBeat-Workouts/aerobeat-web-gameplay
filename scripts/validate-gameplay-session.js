@@ -830,6 +830,88 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-2", "full T-pose mints a new calibrationId");
 }
 
+// D1 recovery seam (mobile-menu + shell-matrix reds): after a tracking loss the
+// input service commits a NEW calibrationId before the next scored frame arrives,
+// so the snapshot's calibration jumps generations in a single advance. The
+// coordinator must treat that as FRESH CALIBRATION TRUTH (recalibration complete),
+// not keep re-pausing on a stale latched guard — the previous behavior froze the
+// session in paused_tracking forever. Exact expected semantics:
+//   • playing→paused_tracking on the loss frame (clean D1 pause);
+//   • the recalibrated snapshot resumes via the tracking_resume countdown;
+//   • repeated frames with the same new-generation evidence are idempotent.
+// The production input service can never hand over cross-generation evidence
+// (its commit drops the old frame — see the input repo oracle), so the only
+// reachable shape here is evidence tagged with the fresh id.
+{
+  const freshFrame = (calibrationId) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId, measuredSourceFrameId: `measured-frame:cam:${calibrationId}`, measurementTimestampMs: 5000, provenance: "measured", activeBoxingActions: [], anchors: Object.entries({ nose: 1, left_shoulder: 4, right_shoulder: 7, left_elbow: 4, right_elbow: 7, left_wrist: 5, right_wrist: 6 }).map(([name, cell]) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId, measurementTimestampMs: 5000, valid: true, confidence: 1, rawX: .5, rawY: .5, x: .5, y: .5, cell, subcell: cell + 1 })), entries: [] });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "recovery-seam" });
+  readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
+  // Live scoring on cal-1, then the tracking-loss frame (null evidence, paused+fresh).
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("frame-live", 4000, ["hook_left"])) });
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, true), input: input(4500, null, { paused: true, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "tracking loss pauses cleanly during play");
+  assert.equal(coordinator.getSnapshot().session.pauseReason, "tracking_lost_recalibration_required");
+  assert.equal(coordinator.getSnapshot().safety.freshCalibrationRequired, true);
+  // Recalibration commits cal-2; its first published snapshot already carries
+  // fresh=false with the new-generation evidence (service dropped the stale frame).
+  coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, freshFrame("cal-2"), { calibrationId: "cal-2", readiness: "countdown" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown", "freshly recalibrated truth resumes via tracking_resume countdown");
+  assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+  assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-2");
+  // Repeated display frames publish the same new-generation evidence (idempotent).
+  coordinator.advance({ timestampMs: 5100, clock: clock(1000, false), input: input(5100, freshFrame("cal-2"), { calibrationId: "cal-2", readiness: "countdown" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown");
+  // Walk the wall-clock countdown against the frozen audio clock to completion;
+  // the app then starts audio on the very next display frame (the browser seam's
+  // syncAudioForGameplay), which this unit models as the clock flipping to
+  // playing while the timeline is still at the pause position.
+  for (const ts of [60_000, 61_000, 62_000]) coordinator.advance({ timestampMs: ts, clock: clock(1000, false) });
+  coordinator.advance({ timestampMs: 70_000, clock: clock(1000, true) });
+  assert.equal(coordinator.getSnapshot().session.state, "playing", "audio start lands the session in steady play at the frozen timeline");
+  assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 1000);
+}
+
+// The mirror half of the seam (shell-matrix's exact shape): from paused_tracking,
+// a RECOVERED input snapshot — fresh cleared, no pause flags, live calibrated
+// evidence on the SAME generation (the anchor-freeze partial auto-recovery that
+// never mints a new id) — must resume via the tracking_resume countdown instead
+// of parking in paused_tracking forever.
+{
+  const recoveredFrame = ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: "measured-frame:cam:recovered", measurementTimestampMs: 5000, provenance: "measured", activeBoxingActions: [], anchors: Object.entries({ nose: 1, left_shoulder: 4, right_shoulder: 7, left_elbow: 4, right_elbow: 7, left_wrist: 5, right_wrist: 6 }).map(([name, cell]) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: 5000, valid: true, confidence: 1, rawX: .5, rawY: .5, x: .5, y: .5, cell, subcell: cell + 1 })), entries: [] });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "resume-seam" });
+  readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, null, { paused: true, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking");
+  // Partial auto-recovery clears freshCalibrationRequired without minting a new id;
+  // its first scored frame carries live evidence on the same generation.
+  coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, recoveredFrame, { calibrationId: "cal-1", readiness: "countdown" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown", "recovered same-generation truth resumes via tracking_resume countdown");
+  assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+  // The recovery countdown must walk its digits on a CONTINUOUS wall clock (the
+  // suite proves the full digit dwell end-to-end; here each step needs ≥1000ms of
+  // monotonic advance from the prior commit) and complete at the pause position.
+  // Walk against a CONTINUOUS wall clock. Each step needs ≥1000ms from the prior
+  // commit; note t=6000 lands exactly at the countdown start and is the first
+  // dwell tick (still "three"), so the full walk spans four steps.
+  // A subsequent display frame must not throw (the old frozen-clock symptom) — the
+  // session is parked awaiting the app's audio-start commit (paused_manual here in
+  // this minimal unit; playing after the seam starts audio in the browser suites).
+  coordinator.advance({ timestampMs: 5500, clock: clock(1000, false) });
+  assert.ok(["countdown", "paused_manual", "playing"].includes(coordinator.getSnapshot().session.state), "post-recovery frames advance without rejection");
+}
+
+// The public input contract itself stays strict: evidence whose calibrationId does
+// not match the snapshot's live calibration is a hard violation. The assembly seam
+// routes any such throw to its error path instead of swallowing it, so a regression
+// like the stale-evidence freeze surfaces instead of freezing the session silently.
+{
+  const mismatched = (calibrationId) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId, measuredSourceFrameId: "measured-frame:cam:pre-loss", measurementTimestampMs: 4000, provenance: "measured", activeBoxingActions: [], anchors: Object.entries({ nose: 1, left_shoulder: 4, right_shoulder: 7, left_elbow: 4, right_elbow: 7, left_wrist: 5, right_wrist: 6 }).map(([name, cell]) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId, measurementTimestampMs: 4000, valid: true, confidence: 1, rawX: .5, rawY: .5, x: .5, y: .5, cell, subcell: cell + 1 })), entries: [] });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "identity-contract" });
+  readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, true), input: input(4500, null, { paused: true, fresh: true }) });
+  assert.throws(() => coordinator.advance({ timestampMs: 5500, clock: clock(1000, false), input: input(5500, mismatched("cal-9"), { calibrationId: "cal-2", readiness: "countdown" }) }), /Input evidence must belong to the snapshot calibration/u, "cross-generation evidence against a live calibrationId is a contract violation");
+}
+
 // Paused future swap preserves judged and active IDs, replaces only future events.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "swap" });
