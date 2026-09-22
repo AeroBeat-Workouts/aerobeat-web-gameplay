@@ -830,6 +830,24 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-2", "full T-pose mints a new calibrationId");
 }
 
+// Tracking safety must take precedence over a manual/menu pause. Closing the
+// menu while input still requires recalibration restores paused_tracking and its
+// cue; authoritative recovered truth on a new calibration generation can then
+// enter the normal tracking_resume countdown.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "paused-manual-safety-precedence" });
+  readyPlaying(coordinator, [event("late", 9000, "hook_left")]);
+  coordinator.pause(4000, "menu_open");
+  assert.equal(coordinator.getSnapshot().session.state, "paused_manual");
+  coordinator.advance({ timestampMs: 4500, clock: clock(1000, false), input: input(4500, null, { ready: false, fresh: true }) });
+  assert.equal(coordinator.getSnapshot().session.state, "paused_tracking", "unsafe input truth overrides paused_manual");
+  assert.equal(coordinator.getSnapshot().session.pauseReason, "tracking_lost_recalibration_required");
+  coordinator.advance({ timestampMs: 5000, clock: clock(1000, false), input: input(5000, null, { calibrationId: "cal-2", readiness: "countdown" }) });
+  assert.equal(coordinator.getSnapshot().session.state, "countdown", "new-generation recovered truth reaches tracking_resume");
+  assert.equal(coordinator.getSnapshot().countdown.reason, "tracking_resume");
+  assert.equal(coordinator.getSnapshot().countdown.calibrationId, "cal-2");
+}
+
 // D1 recovery seam (mobile-menu + shell-matrix reds): after a tracking loss the
 // input service commits a NEW calibrationId before the next scored frame arrives,
 // so the snapshot's calibration jumps generations in a single advance. The

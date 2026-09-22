@@ -643,9 +643,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function enforceSafety() {
     if (sessionPurpose === "visual_test") return;
-    if (state === "playing" || state === "countdown") {
+    if (state === "playing" || state === "countdown" || state === "paused_manual") {
       // commitInput already ran for THIS advance: these branches evaluate the
-      // current input's truth (byte-identical semantics to before).
+      // current input's truth. Tracking safety takes precedence over a manual
+      // pause so closing the menu while recalibration is required restores the
+      // tracking pause/cue rather than preserving stale paused_manual truth.
       if (!safetyReady || freshCalibrationRequired) enterTrackingPause();
     } else if (state === "paused_tracking" && safetyReady && !freshCalibrationRequired && calibrationId !== null) {
       // commitInput ran for THIS advance, so safetyReady/freshCalibrationRequired/
