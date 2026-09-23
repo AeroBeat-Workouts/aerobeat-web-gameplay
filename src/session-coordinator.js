@@ -38,6 +38,7 @@ import {
 /** @typedef {Readonly<{songTimeMs:number,measurementTimestampMs:number,sourceFrameId:string,sourceIdentity:string,calibrationId:string,sx:number,sy:number}>} ColliderSample */
 /** @typedef {{coverage: readonly Readonly<{startMs:number,endMs:number}>[], contact: readonly Readonly<{startMs:number,endMs:number}>[], firstContactTimelinePositionMs:number|null, contactEpisodeId:string|null, evidenceFrameId:string|null, calibrationId:string|null, consequenceApplied:boolean}} ObstacleState */
 /** @typedef {{leftCoverage: readonly Readonly<{startMs:number,endMs:number}>[],rightCoverage:readonly Readonly<{startMs:number,endMs:number}>[],contactTimelinePositionMs:number|null,consequenceApplied:boolean}} BombState */
+/** @typedef {Readonly<{schema:"aerobeat/visual_test_interaction",version:1,mode:"production_judgement",epoch:number,activationTimelineMs:number}>} VisualTestInteraction */
 
 const FLOW_COLLIDER_RULESET = "flow_colliders_v1";
 /** Retired Flow Grid ruleset, still accepted as a flow-mode variant input for historical reads. */
@@ -175,6 +176,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let pendingHazardBreak = false;
   let pendingBombContacts = 0;
   let pendingObstacleContacts = 0;
+  let visualTestInteraction = /** @type {VisualTestInteraction | null} */ (null);
+  let lastVisualTestInteractionEpoch = /** @type {number | null} */ (null);
+  const visualTestExcludedEventIds = new Set();
   let snapshot = makeSnapshot(null);
 
   const service = Object.freeze({
@@ -306,6 +310,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     state = "paused_manual";
     pauseReason = boundedReason(reason);
     clearContinuousCollisionHistory();
+    deactivateVisualTestInteraction();
     publish(null);
     return snapshot;
   }
@@ -341,22 +346,25 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /**
    * Advance deterministic state using one audio-clock and optional input sample.
    *
-   * @param {{timestampMs: number, clock: unknown, input?: unknown, lease?: unknown}} frame
+   * @param {{timestampMs: number, clock: unknown, input?: unknown, lease?: unknown, interaction?: unknown}} frame
    */
   function advance(frame) {
     assertOpen();
-    const safeFrame = requireDataRecordFields(frame, "advance_frame_invalid", ["timestampMs", "clock", "input", "lease"]);
+    const safeFrame = requireDataRecordFields(frame, "advance_frame_invalid", ["timestampMs", "clock", "input", "lease", "interaction"]);
     const nextTimestampMs = requireNonNegativeNumber(safeFrame.timestampMs, "timestamp_invalid");
     if (nextTimestampMs < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back");
     const clock = normalizeClock(safeFrame.clock);
     const nextLease = safeFrame.lease === undefined ? null : normalizeLeaseSnapshot(safeFrame.lease);
     const nextInput = safeFrame.input === undefined ? null : normalizeInputSnapshot(safeFrame.input);
+    const nextInteraction = safeFrame.interaction === undefined ? null : normalizeVisualTestInteraction(safeFrame.interaction);
     const enteredState = state;
     const enteredAsCountdown = enteredState === "countdown";
     const previousTimelinePositionMs = timelinePositionMs;
+    const interactionTransition = validateVisualTestInteractionFrame(nextInteraction, nextInput, clock, enteredState);
     timestampMs = nextTimestampMs;
     if (nextLease !== null) leaseSnapshot = nextLease;
-    if (nextInput !== null && sessionPurpose === "play") commitInput(nextInput);
+    if (nextInput !== null && (sessionPurpose === "play" || nextInteraction !== null)) commitInput(nextInput);
+    if (sessionPurpose === "visual_test" && nextInteraction === null) deactivateVisualTestInteraction();
     enforceLease();
     enforceSafety();
     if (enteredAsCountdown && state === "countdown") advanceCountdown(clock);
@@ -366,18 +374,22 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
           timelinePositionMs = clock.positionMs;
           state = "completed";
           pauseReason = null;
+          deactivateVisualTestInteraction();
         } else {
           state = "paused_manual";
           pauseReason = "audio_clock_not_playing";
           clearContinuousCollisionHistory();
+          deactivateVisualTestInteraction();
         }
       } else if (clock.positionMs < previousTimelinePositionMs) {
         state = "paused_manual";
         pauseReason = "audio_clock_rollback";
         clearContinuousCollisionHistory();
+        deactivateVisualTestInteraction();
       } else {
         timelinePositionMs = clock.positionMs;
-        if (sessionPurpose === "play") {
+        if (nextInteraction !== null && state === "playing") activateVisualTestInteraction(nextInteraction, interactionTransition);
+        if (productionJudgementEnabled()) {
           captureEvidenceForTimeline();
           if (variant?.rulesetId === FLOW_COLLIDER_RULESET) {
             evaluateFlowColliderNotesAndBombs();
@@ -397,7 +409,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
             evaluateFlowObstacles();
             judgeLiveEvents();
           }
-          judgeShadowEvents();
+          if (sessionPurpose === "play") judgeShadowEvents();
           /* L-F7 (0.0.61, 2dh7): completion counts each completed EVENT exactly
              once — the UNION of completion signals, not the sum. Boxing
              collider obstacle checkpoints (squat/weave) get BOTH a judgement
@@ -412,11 +424,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
              there. Suppressed flow obstacles (no_obstacles / obstacle_visual_only)
              still add flat, since no signal can ever cover them. */
           const completedEventIds = new Set(judgedIds);
+          for (const eventId of visualTestExcludedEventIds) completedEventIds.add(eventId);
           for (const outcome of obstacleOutcomes) completedEventIds.add(String(outcome.eventId));
           for (const outcome of hazardOutcomes) if (outcome.kind === "bomb") completedEventIds.add(String(outcome.eventId));
           if (events.length > 0 && completedEventIds.size + suppressedObstacleCount() >= events.length) {
             state = "completed";
             pauseReason = null;
+            deactivateVisualTestInteraction();
           }
         }
       }
@@ -446,6 +460,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     timelinePositionMs = clock.positionMs;
     if (enteredCompleted) { state = "paused_manual"; pauseReason = "explicit_seek"; }
     clearContinuousCollisionHistory();
+    deactivateVisualTestInteraction();
     publish(null);
     return snapshot;
   }
@@ -531,6 +546,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     state = "completed";
     pauseReason = null;
     clearContinuousCollisionHistory();
+    deactivateVisualTestInteraction();
     publish(null);
     return snapshot;
   }
@@ -570,10 +586,53 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     latestEvidence = null;
     lastInput = null;
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
+    visualTestInteraction = null;
     pauseReason = null;
     publish(null);
     listeners.clear();
   }
+
+  /**
+   * Validate the authority against the state entered by this frame without mutating coordinator truth.
+   * @param {VisualTestInteraction | null} interaction
+   * @param {DataRecord | null} normalizedInput
+   * @param {{positionMs:number,playing:boolean}} clock
+   * @param {AeroGameplaySessionState} enteredState
+   * @returns {boolean} true when this frame activates a new epoch
+   */
+  function validateVisualTestInteractionFrame(interaction, normalizedInput, clock, enteredState) {
+    if (interaction === null) return false;
+    if (sessionPurpose !== "visual_test") throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction authority requires the visual_test purpose");
+    if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && variant?.rulesetId !== BOXING_COLLIDER_RULESET) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a collider ruleset");
+    if (enteredState !== "playing" || !clock.playing) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a playing timeline");
+    if (normalizedInput === null || normalizedInput.candidate === null) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a strict input evidence snapshot");
+    if (visualTestInteraction !== null && interaction.epoch === visualTestInteraction.epoch) {
+      if (interaction.activationTimelineMs !== visualTestInteraction.activationTimelineMs) throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction activation is immutable within an epoch");
+      return false;
+    }
+    if (lastVisualTestInteractionEpoch !== null && interaction.epoch <= lastVisualTestInteractionEpoch) throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction epochs must increase across transitions");
+    if (interaction.activationTimelineMs !== clock.positionMs) throw gameplayError("visual_test_interaction_invalid", "A new Visual Test interaction epoch must activate at the authoritative timeline position");
+    return true;
+  }
+
+  /** @param {VisualTestInteraction} interaction @param {boolean} transition */
+  function activateVisualTestInteraction(interaction, transition) {
+    if (!transition) return;
+    clearContinuousCollisionHistory(true);
+    for (const event of events) if (Number(event.centerTimestampMs) <= interaction.activationTimelineMs) visualTestExcludedEventIds.add(String(event.eventId));
+    visualTestInteraction = interaction;
+    lastVisualTestInteractionEpoch = interaction.epoch;
+  }
+
+  function deactivateVisualTestInteraction() {
+    if (visualTestInteraction === null) return;
+    visualTestInteraction = null;
+    clearContinuousCollisionHistory(true);
+  }
+
+  function productionJudgementEnabled() { return sessionPurpose === "play" || (sessionPurpose === "visual_test" && visualTestInteraction !== null); }
+  /** @param {DataRecord} event */
+  function productionEventEligible(event) { return sessionPurpose === "play" || (visualTestInteraction !== null && !visualTestExcludedEventIds.has(String(event.eventId)) && Number(event.centerTimestampMs) > visualTestInteraction.activationTimelineMs); }
 
   /** @param {unknown} value @returns {DataRecord} */
   function normalizeInputSnapshot(value) {
@@ -686,6 +745,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       state = "paused_manual";
       pauseReason = "media_lease_unavailable";
       clearContinuousCollisionHistory();
+      deactivateVisualTestInteraction();
     }
   }
 
@@ -739,12 +799,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function suppressedObstacleCount() { return variant?.mode === "flow" && (variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) ? events.filter((event) => event.type === "obstacle").length : 0; }
 
   function evaluateFlowObstacles() {
-    if (!variant || variant.mode !== "flow" || sessionPurpose !== "play" || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) return;
+    if (!variant || variant.mode !== "flow" || !productionJudgementEnabled() || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) return;
     // kpxg (0.0.61): flow walls finalize into `hazardOutcomes` (kind "wall"),
     // never `obstacleOutcomes`, so the `obstacleOutcomes` scan alone let every
     // expired wall re-finalize every tick. Exclude finalized wall ids via the
     // O(1) `finalizedObstacleIds` Set so each wall finalizes exactly once.
-    const obstacles = events.filter((event) => event.type === "obstacle" && !finalizedObstacleIds.has(String(event.eventId)) && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
+    const obstacles = events.filter((event) => productionEventEligible(event) && event.type === "obstacle" && !finalizedObstacleIds.has(String(event.eventId)) && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
@@ -846,8 +906,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * still close out on every no-sample early-return path.
    */
   function evaluateBoxingObstacles() {
-    if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || sessionPurpose !== "play") return;
-    const obstacles = events.filter((event) => (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
+    if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || !productionJudgementEnabled()) return;
+    const obstacles = events.filter((event) => productionEventEligible(event) && (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
     const sample = latestEvidence ? measuredNoseSample(/** @type {DataRecord} */ (latestEvidence), timelinePositionMs, timestampMs) : null;
@@ -1063,7 +1123,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     exposedRightWristHistory = rightWristHistory;
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
     for (const event of events) {
-      if (judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
+      if (!productionEventEligible(event) || judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
       const eventSettings = flowColliderSettingsForEvent(event);
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
@@ -1118,7 +1178,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
   function evaluateColliderBombs(left, right, priorLeft, priorRight, evaluateLeft, evaluateRight) {
-    for (const bomb of events.filter((event) => event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
+    for (const bomb of events.filter((event) => productionEventEligible(event) && event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
       const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = Number(bomb.centerTimestampMs) + windowMs;
       let tracker = bombStates.get(eventId) ?? { leftCoverage: Object.freeze([]), rightCoverage: Object.freeze([]), contactTimelinePositionMs: null, consequenceApplied: false };
       const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
@@ -1142,6 +1202,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function finalizeColliderEvents() {
     if (!variant || variant.rulesetId !== FLOW_COLLIDER_RULESET) return;
     for (const event of events) {
+      if (!productionEventEligible(event)) continue;
       const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const late = Number(event.centerTimestampMs) + Number(settings.timingWindowMs);
       if (event.type === "note" && !judgedIds.has(eventId) && timelinePositionMs > late) recordJudgementAt(event, "miss", colliderMissDiagnostics(event), null, false, null);
       else if ((event.type === "arc" || event.type === "burst") && !judgedIds.has(eventId) && timelinePositionMs >= Number(event.centerTimestampMs)) recordJudgement(event, "ignored", Object.freeze([]), null, false);
@@ -1229,7 +1290,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean}[]} */ const guardCandidates = [];
     for (const event of events) {
-      if (judgedIds.has(String(event.eventId))) continue;
+      if (!productionEventEligible(event) || judgedIds.has(String(event.eventId))) continue;
       const action = expectedAction(event);
       if (PUNCH_ACTIONS.includes(action)) {
         const hand = action.endsWith("_right") ? "right" : "left";
@@ -1284,7 +1345,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const gesture = guardGestureFromEvidence(/** @type {DataRecord} */ (latestEvidence));
     if (gesture !== true) return;
     for (const event of events) {
-      if (judgedIds.has(String(event.eventId))) continue;
+      if (!productionEventEligible(event) || judgedIds.has(String(event.eventId))) continue;
       const action = expectedAction(event);
       if (action !== "guard" && action !== "crossed_guard") continue;
       const checkpoint = /** @type {DataRecord | undefined} */ (event.checkpoint);
@@ -1309,6 +1370,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function finalizeBoxingColliderEvents() {
     if (!variant || variant.rulesetId !== BOXING_COLLIDER_RULESET) return;
     for (const event of events) {
+      if (!productionEventEligible(event)) continue;
       const eventId = String(event.eventId);
       if (judgedIds.has(eventId)) continue;
       const settings = boxingColliderSettingsForEvent(event);
@@ -1358,7 +1420,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const match = matchEvent(event, shadow, latestEvidence, lastInput);
         if (match.hit) {
           shadowConsumed.add(key);
-          shadowJudgements.push(makeJudgement(event, shadow, "hit", match.diagnostics, latestEvidence, latestEvidenceTimelineMs, timelinePositionMs, true));
+          shadowJudgements.push(makeJudgement(event, shadow, "hit", match.diagnostics, latestEvidence, latestEvidenceTimelineMs, timelinePositionMs, true, sessionPurpose));
         }
       }
     }
@@ -1402,7 +1464,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function recordJudgementAt(event, result, diagnostics, evidence, shadow, evidenceTimelineMs) {
     const eventVariant = variantForEvent(event);
     const eventProfile = profileForEvent(event);
-    const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidenceTimelineMs, timelinePositionMs, shadow);
+    const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidenceTimelineMs, timelinePositionMs, shadow, sessionPurpose);
     if (shadow) shadowJudgements.push(judgement);
     else {
       judgements.push(judgement);
@@ -1474,7 +1536,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
@@ -1539,6 +1601,18 @@ function normalizeOptions(options) {
   const callback = values.onListenerError;
   if (callback !== undefined && typeof callback !== "function") throw gameplayError("gameplay_options_invalid", "Listener error hook must be a function");
   return Object.freeze({ sessionId: values.sessionId === undefined ? `session-${randomToken()}` : requireString(values.sessionId, "session_id_invalid"), instanceId: values.instanceId === undefined ? null : requireString(values.instanceId, "instance_id_invalid"), countdownStepMs: values.countdownStepMs === undefined ? 1000 : positiveNumber(values.countdownStepMs, "countdown_step_invalid"), onListenerError: /** @type {((error: unknown) => void) | undefined} */ (callback) });
+}
+
+/** @param {unknown} value @returns {VisualTestInteraction} */
+function normalizeVisualTestInteraction(value) {
+  const record = requireDataRecordFields(value, "visual_test_interaction_invalid", ["schema", "version", "mode", "epoch", "activationTimelineMs"]);
+  const required = ["schema", "version", "mode", "epoch", "activationTimelineMs"];
+  if (Reflect.ownKeys(record).length !== required.length || required.some((key) => !Object.hasOwn(record, key))) throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction authority requires every exact field");
+  if (record.schema !== "aerobeat/visual_test_interaction" || record.version !== 1 || record.mode !== "production_judgement") throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction authority identity is invalid");
+  if (!Number.isSafeInteger(record.epoch) || Number(record.epoch) < 0) throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction epoch must be a non-negative safe integer");
+  const activationTimelineMs = requireNonNegativeNumber(record.activationTimelineMs, "visual_test_interaction_invalid");
+  if (activationTimelineMs > Number.MAX_SAFE_INTEGER) throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction activation exceeds the safe timeline range");
+  return Object.freeze({ schema: "aerobeat/visual_test_interaction", version: 1, mode: "production_judgement", epoch: Number(record.epoch), activationTimelineMs });
 }
 
 /** @param {unknown} value @returns {{positionMs: number, playing: boolean, ended: boolean}} */
@@ -1877,12 +1951,12 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
   }
 }
 
-/** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @returns {AeroGameplayJudgement} */
-function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow) {
+/** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @param {AeroGameplaySessionPurpose} sessionPurpose @returns {AeroGameplayJudgement} */
+function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow, sessionPurpose) {
   const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? FLOW_COLLIDER_RULESET);
   const recipeId = /** @type {import("@aerobeat/web-contracts").AeroConversionRecipeId | null} */ (selectedVariant?.recipeId ?? null);
   const center = Number(event.centerTimestampMs);
-  return Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose: "play", eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow });
+  return /** @type {AeroGameplayJudgement} */ (Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow }));
 }
 
 /** @param {DataRecord} event */

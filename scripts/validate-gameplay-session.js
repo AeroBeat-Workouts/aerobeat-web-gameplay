@@ -39,7 +39,7 @@ function evidence(frameId, measured, actions, overrides = {}) {
 }
 
 function input(measured, latestEvidence, options = {}) {
-  return { calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: options.ready === false ? "calibration_required" : "countdown" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] };
+  return { ...(options.sourceIdentity === undefined ? {} : { sourceIdentity: options.sourceIdentity }), calibration: { calibrationId: options.calibrationId ?? "cal-1", readiness: options.ready === false ? "calibration_required" : "countdown" }, tracking: { gameplayPaused: options.paused === true, freshCalibrationRequired: options.fresh === true }, countdownFrozen: options.paused === true, latestEvidence, straightQualifications: options.qualifications ?? [] };
 }
 
 function config(events, selected = variant(), shadowVariants = []) {
@@ -47,6 +47,15 @@ function config(events, selected = variant(), shadowVariants = []) {
 }
 
 function clock(positionMs, playing, durationMs = null) { return { contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, ...(durationMs === null ? {} : { durationSeconds: durationMs / 1000, progress: durationMs === 0 ? 0 : Math.min(1, positionMs / durationMs) }), playing }; }
+
+function visualTestInteraction(epoch, activationTimelineMs) { return { schema: "aerobeat/visual_test_interaction", version: 1, mode: "production_judgement", epoch, activationTimelineMs }; }
+function productionInput(measured, latestEvidence, options = {}) { return input(measured, latestEvidence, { ...options, sourceIdentity: options.sourceIdentity ?? "visual-test-pointer" }); }
+function setAnchorPosition(sample, name, sx, sy) { const target = sample.anchors.find((entry) => entry.anchor === name); target.x = (sx + 0.5) / 4; target.y = (2.5 - sy) / 3; return sample; }
+function readyVisualTest(coordinator, events, selected) {
+  coordinator.configureContent(config(events, selected), { purpose: "visual_test" });
+  assert.equal(coordinator.requestStart(0, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" }).accepted, true);
+  assert.equal(coordinator.getSnapshot().session.state, "playing");
+}
 
 function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.configureContent(config(events, selected));
@@ -125,6 +134,138 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.destroy();
   assert.equal(coordinator.getSnapshot().session.state, "destroyed");
   assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
+}
+
+// Visual Test production judgement is an exact, explicit, future-only authority; absence retains zero outcomes.
+{
+  const flow = variant("flow_colliders_v1", null);
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-flow" });
+  readyVisualTest(coordinator, [
+    event("flow-left-a", 1000, "note", { hand: "left", placement: 5 }),
+    event("flow-left-b", 1000, "note", { hand: "left", placement: 5 }),
+    event("flow-miss", 1300, "note", { hand: "right", placement: 6 }),
+    event("flow-after-miss", 1600, "note", { hand: "left", placement: 5 })
+  ], flow);
+  const baseline = setAnchorPosition(evidence("visual-flow-base", 850, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 850, clock: clock(850, true), input: productionInput(850, baseline), interaction: visualTestInteraction(1, 850) });
+  assert.deepEqual(coordinator.getJudgements(), [], "activation frame only seeds collider history");
+  const chord = setAnchorPosition(evidence("visual-flow-chord", 1000, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), interaction: visualTestInteraction(1, 850) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["flow-left-a", "hit", "visual_test"], ["flow-left-b", "hit", "visual_test"]]);
+  const missFrame = setAnchorPosition(setAnchorPosition(evidence("visual-flow-miss", 1481, []), "left_wrist", 3.4, 2), "right_wrist", 3.4, 2);
+  coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, missFrame), interaction: visualTestInteraction(1, 850) });
+  const finalHit = setAnchorPosition(evidence("visual-flow-final", 1600, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, finalHit), interaction: visualTestInteraction(1, 850) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-miss", "miss"], ["flow-after-miss", "hit"]]);
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo })), [{ ranked: false, localOnly: true, hits: 3, misses: 1, combo: 1, maxCombo: 2 }]);
+}
+
+// Direction enforcement and exact activation exclusion use the unchanged Flow evaluator.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-flow-direction" });
+  readyVisualTest(coordinator, [event("excluded-at-activation", 900, "note", { hand: "left", placement: 5 }), event("direction-hit", 1000, "note", { hand: "left", placement: 5, direction: "right" })], variant("flow_colliders_v1", null));
+  const baseline = setAnchorPosition(evidence("direction-base", 900, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, baseline), interaction: visualTestInteraction(4, 900) });
+  const contact = setAnchorPosition(evidence("direction-contact", 1000, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, contact), interaction: visualTestInteraction(4, 900) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["direction-hit", "hit"]], "center <= activation never retro-misses and authored direction still scores");
+}
+
+// Boxing Collider chords and misses use the same production evaluator and local-only score path.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-boxing" });
+  readyVisualTest(coordinator, [
+    event("boxing-left", 1000, "straight_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } }),
+    event("boxing-right", 1000, "straight_right", { spatialTarget: { targetCell: 6, acceptedSubcells: [], sourceCell: -1 } }),
+    event("boxing-miss", 1300, "straight_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } })
+  ], variant("boxing_collider_v1", null));
+  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, evidence("boxing-base", 900, [])), interaction: visualTestInteraction(1, 900) });
+  const chord = evidence("boxing-chord", 1000, []);
+  setAnchorPosition(chord, "left_wrist", 1, 1); setAnchorPosition(chord, "right_wrist", 2, 1);
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), interaction: visualTestInteraction(1, 900) });
+  coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, evidence("boxing-late", 1481, [])), interaction: visualTestInteraction(1, 900) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["boxing-left", "hit", "visual_test"], ["boxing-right", "hit", "visual_test"], ["boxing-miss", "miss", "visual_test"]]);
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo]), [[false, true, 2, 1, 0, 2]]);
+}
+
+// Authority boundary rejects malformed/automatic/unauthorized calls transactionally without invoking accessors.
+{
+  const flow = variant("flow_colliders_v1", null);
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-boundary" });
+  readyVisualTest(coordinator, [event("future", 500, "note", { hand: "left", placement: 5 })], flow);
+  const strictInput = productionInput(0, evidence("strict", 0, []));
+  const before = coordinator.getSnapshot();
+  assert.throws(() => coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: { ...visualTestInteraction(1, 0), extra: true } }), /unknown or symbolic fields/u);
+  assert.equal(coordinator.getSnapshot(), before);
+  assert.throws(() => coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: { ...visualTestInteraction(1, 0), mode: "automatic_feedback" } }), /identity is invalid/u);
+  assert.throws(() => coordinator.advance({ timestampMs: 0, clock: clock(0, true), interaction: visualTestInteraction(1, 0) }), /strict input evidence/u);
+  let accessorCalls = 0; const hostile = { schema: "aerobeat/visual_test_interaction", version: 1, mode: "production_judgement", epoch: 1 };
+  Object.defineProperty(hostile, "activationTimelineMs", { enumerable: true, get() { accessorCalls += 1; return 0; } });
+  assert.throws(() => coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: hostile }), /accessors or hidden fields/u);
+  assert.equal(accessorCalls, 0);
+  coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: visualTestInteraction(1, 0) });
+  assert.throws(() => coordinator.advance({ timestampMs: 1, clock: clock(1, true), input: productionInput(1, evidence("strict-2", 1, [])), interaction: visualTestInteraction(1, 1) }), /immutable within an epoch/u);
+
+  const play = createAeroGameplaySessionCoordinator({ sessionId: "play-authority-rejected", countdownStepMs: 1 });
+  readyPlaying(play, [event("play", 500, "straight_left")]);
+  assert.throws(() => play.advance({ timestampMs: 3001, clock: clock(4, true), input: input(3001, evidence("play-authority", 3001, [])), interaction: visualTestInteraction(1, 4) }), /visual_test purpose/u);
+
+  const nonCollider = createAeroGameplaySessionCoordinator({ sessionId: "visual-non-collider" });
+  readyVisualTest(nonCollider, [event("grid", 500, "hook_left")], variant());
+  assert.throws(() => nonCollider.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: visualTestInteraction(1, 0) }), /collider ruleset/u);
+}
+
+// Pause/seek/resume and epoch/source/frame discontinuities cannot bridge history or retroactively score.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-lifecycle" });
+  readyVisualTest(coordinator, [event("past-after-seek", 500, "note", { hand: "left", placement: 5 }), event("future-after-seek", 1200, "note", { hand: "left", placement: 5 }), event("later-after-rollback", 2000, "note", { hand: "right", placement: 6 })], variant("flow_colliders_v1", null));
+  const first = setAnchorPosition(evidence("life-base", 0, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: productionInput(0, first), interaction: visualTestInteraction(1, 0) });
+  coordinator.pause(100, "menu");
+  coordinator.synchronizePausedClock({ timestampMs: 101, clock: clock(1000, false) });
+  coordinator.resume(102);
+  assert.throws(() => coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, evidence("stale-epoch", 1000, [])), interaction: visualTestInteraction(1, 1000) }), /epochs must increase/u);
+  const seed = setAnchorPosition(evidence("life-seed", 1000, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, seed), interaction: visualTestInteraction(2, 1000) });
+  const duplicate = setAnchorPosition(evidence("life-seed", 1100, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, duplicate), interaction: visualTestInteraction(2, 1000) });
+  assert.deepEqual(coordinator.getJudgements(), [], "duplicate identity cannot bridge the recovery baseline");
+  const stale = setAnchorPosition(evidence("life-stale", 900, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1149, clock: clock(1149, true), input: productionInput(900, stale), interaction: visualTestInteraction(2, 1000) });
+  assert.deepEqual(coordinator.getJudgements(), [], "stale evidence cannot score or bridge history");
+  const sourceSeed = setAnchorPosition(evidence("life-source-seed", 1150, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 1150, clock: clock(1150, true), input: productionInput(1150, sourceSeed, { sourceIdentity: "source-b" }), interaction: visualTestInteraction(2, 1000) });
+  assert.deepEqual(coordinator.getJudgements(), [], "source transition re-baselines without a swept hit");
+  const hit = setAnchorPosition(evidence("life-hit", 1200, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1200, clock: clock(1200, true), input: productionInput(1200, hit, { sourceIdentity: "source-b" }), interaction: visualTestInteraction(2, 1000) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["future-after-seek", "hit"]]);
+  coordinator.advance({ timestampMs: 1201, clock: clock(1199, true), input: productionInput(1201, evidence("rollback", 1201, [])), interaction: visualTestInteraction(2, 1000) });
+  assert.deepEqual([coordinator.getSnapshot().session.state, coordinator.getSnapshot().session.pauseReason, coordinator.getJudgements().length], ["paused_manual", "audio_clock_rollback", 1]);
+}
+
+// The authority changes only truthful purpose: normalized production judgement and score semantics retain Play golden parity.
+{
+  const selected = variant("flow_colliders_v1", null);
+  const events = [event("golden-parity", 1000, "note", { hand: "left", placement: 5 })];
+  const play = createAeroGameplaySessionCoordinator({ sessionId: "golden-play", countdownStepMs: 1 });
+  readyPlaying(play, events, selected);
+  const playBase = setAnchorPosition(evidence("golden-play-base", 3900, []), "left_wrist", 3.4, 2);
+  play.advance({ timestampMs: 3900, clock: clock(900, true), input: productionInput(3900, playBase) });
+  const playHit = setAnchorPosition(evidence("golden-play-hit", 4000, []), "left_wrist", 1, 1);
+  play.advance({ timestampMs: 4000, clock: clock(1000, true), input: productionInput(4000, playHit) });
+
+  const visual = createAeroGameplaySessionCoordinator({ sessionId: "golden-visual" });
+  readyVisualTest(visual, events, selected);
+  const visualBase = setAnchorPosition(evidence("golden-visual-base", 900, []), "left_wrist", 3.4, 2);
+  visual.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, visualBase), interaction: visualTestInteraction(1, 900) });
+  const visualHit = setAnchorPosition(evidence("golden-visual-hit", 1000, []), "left_wrist", 1, 1);
+  visual.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, visualHit), interaction: visualTestInteraction(1, 900) });
+
+  const judgementTruth = (entry) => ({ eventId: entry.eventId, rulesetId: entry.rulesetId, recipeId: entry.recipeId, result: entry.result, beatCenterTimestampMs: entry.beatCenterTimestampMs, committedTimelinePositionMs: entry.committedTimelinePositionMs, timingOffsetMs: entry.timingOffsetMs, diagnostics: entry.diagnostics, shadow: entry.shadow });
+  assert.deepEqual(judgementTruth(visual.getJudgements()[0]), judgementTruth(play.getJudgements()[0]));
+  assert.deepEqual([play.getJudgements()[0].sessionPurpose, visual.getJudgements()[0].sessionPurpose], ["play", "visual_test"]);
+  const scoreTruth = (entry) => ({ hits: entry.hits, misses: entry.misses, ignored: entry.ignored, score: entry.score, combo: entry.combo, maxCombo: entry.maxCombo, obstacleContacts: entry.obstacleContacts, bombContacts: entry.bombContacts });
+  assert.deepEqual(scoreTruth(visual.getScorePartitions()[0]), scoreTruth(play.getScorePartitions()[0]));
 }
 
 // Purpose-aware configuration never publishes Play calibration for Test and preserves an active Visual Test across exact ruleset replacement.

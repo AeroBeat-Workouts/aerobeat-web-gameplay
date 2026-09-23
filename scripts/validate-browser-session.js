@@ -14,7 +14,7 @@ const server = createServer(async (request, response) => {
     const path = request.url === "/" ? null : request.url?.split("?")[0] ?? null;
     if (path === null) {
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-contracts/obstacle-contracts":"/contracts/src/obstacle-contracts.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
+      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-contracts/equipment-contracts":"/contracts/src/equipment-contracts.js","@aerobeat/web-contracts/obstacle-contracts":"/contracts/src/obstacle-contracts.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
         import { createAeroGameplaySessionCoordinator, createAeroPrototypeProfileRegistry } from "/gameplay/src/index.js";
         const HASH = "a".repeat(64);
         const runtime = createAeroGameplaySessionCoordinator({ sessionId: "browser" });
