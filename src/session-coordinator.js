@@ -5,6 +5,7 @@ import {
   conversionRecipeIds,
   isContentHash,
   isGameplayEvidenceSnapshot,
+  isResolvedEquipmentPose,
   isGameplaySessionStartRequest,
   isMediaLeaseSnapshot,
   isPrototypeTuningIdentity,
@@ -14,8 +15,9 @@ import {
 } from "@aerobeat/web-contracts";
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
-import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, gloveBoxContactsBoxingTarget, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, saberCapsuleContactsFlowTarget, saberDirectionFromWristHistory } from "./flow-collider-collision.js";
+import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
+import { equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -39,6 +41,7 @@ import {
 /** @typedef {{coverage: readonly Readonly<{startMs:number,endMs:number}>[], contact: readonly Readonly<{startMs:number,endMs:number}>[], firstContactTimelinePositionMs:number|null, contactEpisodeId:string|null, evidenceFrameId:string|null, calibrationId:string|null, consequenceApplied:boolean}} ObstacleState */
 /** @typedef {{leftCoverage: readonly Readonly<{startMs:number,endMs:number}>[],rightCoverage:readonly Readonly<{startMs:number,endMs:number}>[],contactTimelinePositionMs:number|null,consequenceApplied:boolean}} BombState */
 /** @typedef {Readonly<{schema:"aerobeat/visual_test_interaction",version:1,mode:"production_judgement",epoch:number,activationTimelineMs:number}>} VisualTestInteraction */
+/** @typedef {import("@aerobeat/web-contracts").AeroResolvedEquipmentPose} AeroResolvedEquipmentPose */
 
 const FLOW_COLLIDER_RULESET = "flow_colliders_v1";
 /** Retired Flow Grid ruleset, still accepted as a flow-mode variant input for historical reads. */
@@ -154,19 +157,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const hazardOutcomes = /** @type {DataRecord[]} */ ([]);
   let previousLeftWristSample = /** @type {ColliderSample | null} */ (null);
   let previousRightWristSample = /** @type {ColliderSample | null} */ (null);
-  /** 0.0.61: bounded per-wrist judge-space history (last ~150ms, ascending
-   * measurement timestamps) feeding the pure `saberDirectionFromWristHistory`
-   * oracle so the gameplay saber capsule uses the EXACT direction the
-   * assembly orients the visible beam with. */
+  /** Bounded per-wrist judge-space history (last ~150ms, ascending
+   * measurement timestamps) retained for authored cut-direction continuity. */
   let leftWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
   let rightWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
-  /** 0.0.61 (chgy): per-wrist wrist-history captured at the exact flow hit
-   * point — the PRE-push frozen arrays the saber capsule orients from. The
-   * assembly re-derives the beam direction with the SAME pure
-   * `saberDirectionFromWristHistory` and the SAME `timestampMs` this history
-   * was judged with, so the visible beam is the hit volume verbatim
-   * (visual == hit). `null` until the first flow collider frame is evaluated;
-   * cleared with the collider state. */
+  /** Pre-push per-wrist histories retained as immutable diagnostics for
+   * authored direction decisions. Resolved equipment poses, not these arrays,
+   * are the sole collision-volume authority. */
   let exposedLeftWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>> | null} */ (null);
   let exposedRightWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>> | null} */ (null);
   let lastColliderFrame = /** @type {Readonly<{frameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string,frozenTickId:number | null}> | null} */ (null);
@@ -179,6 +176,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let visualTestInteraction = /** @type {VisualTestInteraction | null} */ (null);
   let lastVisualTestInteractionEpoch = /** @type {number | null} */ (null);
   const visualTestExcludedEventIds = new Set();
+  let equipmentConfigIdentityValue = /** @type {string | null} */ (null);
+  let frameEquipmentPoses = /** @type {ReadonlyMap<string, AeroResolvedEquipmentPose>} */ (new Map());
   let snapshot = makeSnapshot(null);
 
   const service = Object.freeze({
@@ -346,11 +345,11 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /**
    * Advance deterministic state using one audio-clock and optional input sample.
    *
-   * @param {{timestampMs: number, clock: unknown, input?: unknown, lease?: unknown, interaction?: unknown}} frame
+   * @param {{timestampMs: number, clock: unknown, input?: unknown, lease?: unknown, interaction?: unknown, equipmentPoses?: unknown}} frame
    */
   function advance(frame) {
     assertOpen();
-    const safeFrame = requireDataRecordFields(frame, "advance_frame_invalid", ["timestampMs", "clock", "input", "lease", "interaction"]);
+    const safeFrame = requireDataRecordFields(frame, "advance_frame_invalid", ["timestampMs", "clock", "input", "lease", "interaction", "equipmentPoses"]);
     const nextTimestampMs = requireNonNegativeNumber(safeFrame.timestampMs, "timestamp_invalid");
     if (nextTimestampMs < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back");
     const clock = normalizeClock(safeFrame.clock);
@@ -361,7 +360,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const enteredAsCountdown = enteredState === "countdown";
     const previousTimelinePositionMs = timelinePositionMs;
     const interactionTransition = validateVisualTestInteractionFrame(nextInteraction, nextInput, clock, enteredState);
+    const nextEquipmentPoses = validateEquipmentPoseFrame(safeFrame.equipmentPoses, nextInput, clock, nextTimestampMs, enteredState, nextInteraction, nextLease);
     timestampMs = nextTimestampMs;
+    frameEquipmentPoses = new Map();
     if (nextLease !== null) leaseSnapshot = nextLease;
     if (nextInput !== null && (sessionPurpose === "play" || nextInteraction !== null)) commitInput(nextInput);
     if (sessionPurpose === "visual_test" && nextInteraction === null) deactivateVisualTestInteraction();
@@ -390,6 +391,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         timelinePositionMs = clock.positionMs;
         if (nextInteraction !== null && state === "playing") activateVisualTestInteraction(nextInteraction, interactionTransition);
         if (productionJudgementEnabled()) {
+          activateEquipmentPoses(nextEquipmentPoses);
           captureEvidenceForTimeline();
           if (variant?.rulesetId === FLOW_COLLIDER_RULESET) {
             evaluateFlowColliderNotesAndBombs();
@@ -587,6 +589,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     lastInput = null;
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
     visualTestInteraction = null;
+    frameEquipmentPoses = new Map();
     pauseReason = null;
     publish(null);
     listeners.clear();
@@ -633,6 +636,73 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function productionJudgementEnabled() { return sessionPurpose === "play" || (sessionPurpose === "visual_test" && visualTestInteraction !== null); }
   /** @param {DataRecord} event */
   function productionEventEligible(event) { return sessionPurpose === "play" || (visualTestInteraction !== null && !visualTestExcludedEventIds.has(String(event.eventId)) && Number(event.centerTimestampMs) > visualTestInteraction.activationTimelineMs); }
+
+  /**
+   * @param {unknown} value
+   * @param {DataRecord | null} normalizedInput
+   * @param {{positionMs:number,playing:boolean}} clock
+   * @param {number} nextTimestampMs
+   * @param {AeroGameplaySessionState} enteredState
+   * @param {VisualTestInteraction | null} interaction
+   * @param {DataRecord | null} nextLease
+   * @returns {ReadonlyMap<string, AeroResolvedEquipmentPose>}
+   */
+  function validateEquipmentPoseFrame(value, normalizedInput, clock, nextTimestampMs, enteredState, interaction, nextLease) {
+    const colliderRuleset = variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET;
+    if (!colliderRuleset) {
+      if (value !== undefined) throw gameplayError("equipment_poses_invalid", "Equipment poses are accepted only by collider rulesets");
+      return new Map();
+    }
+    const playSafetyPauseFrame = sessionPurpose === "play" && normalizedInput !== null && (normalizedInput.trackingPaused === true || normalizedInput.upstreamFreshRequired === true || normalizedInput.nextCalibrationId === null || (normalizedInput.readiness !== "ready" && normalizedInput.readiness !== "countdown"));
+    const activelyEvaluating = enteredState === "playing" && clock.playing && clock.positionMs >= timelinePositionMs && (sessionPurpose === "play" || interaction !== null) && !playSafetyPauseFrame && hasRequiredLeaseSnapshot(nextLease ?? leaseSnapshot);
+    if (value === undefined) {
+      if (activelyEvaluating) throw gameplayError("equipment_poses_invalid", "Active collider evaluation requires exact equipment poses");
+      return new Map();
+    }
+    const copy = cloneGameplayData(value, "equipment_poses_invalid", 128);
+    if (!Array.isArray(copy) || copy.length !== 2) throw gameplayError("equipment_poses_invalid", "Equipment poses require exactly one left and one right wrist pose");
+    const poses = new Map();
+    for (const entry of copy) {
+      if (!isResolvedEquipmentPose(entry)) throw gameplayError("equipment_poses_invalid", "Equipment pose does not satisfy the resolved pose contract");
+      const pose = /** @type {AeroResolvedEquipmentPose} */ (entry);
+      if (poses.has(pose.role)) throw gameplayError("equipment_poses_invalid", "Equipment pose roles must be unique");
+      poses.set(pose.role, pose);
+    }
+    if (!poses.has("left_wrist") || !poses.has("right_wrist")) throw gameplayError("equipment_poses_invalid", "Equipment poses require both wrist roles");
+    if (!activelyEvaluating) return poses;
+    if (normalizedInput === null || normalizedInput.candidate === null) throw gameplayError("equipment_poses_invalid", "Active collider equipment poses require current measured evidence");
+    const expectedMode = variant?.mode;
+    const inputRecord = /** @type {DataRecord} */ (normalizedInput.input);
+    const evidenceRecord = /** @type {DataRecord} */ (normalizedInput.candidate);
+    const identities = new Set();
+    for (const role of ["left_wrist", "right_wrist"]) {
+      const pose = /** @type {AeroResolvedEquipmentPose} */ (poses.get(role));
+      if (pose.mode !== expectedMode) throw gameplayError("equipment_poses_invalid", "Equipment pose mode must match the selected collider variant");
+      const sample = measuredColliderSample(evidenceRecord, inputRecord, role, clock.positionMs, nextTimestampMs);
+      if (sample === null) throw gameplayError("equipment_poses_invalid", "Equipment pose requires a current valid measured wrist");
+      if (Math.abs(pose.anchor.x - sample.sx) > equipmentPoseAnchorEpsilonWu || Math.abs(pose.anchor.y - sample.sy) > equipmentPoseAnchorEpsilonWu || Math.abs(pose.anchor.z) > equipmentPoseAnchorEpsilonWu) throw gameplayError("equipment_poses_invalid", "Equipment pose anchor must match its measured wrist in judge space");
+      identities.add(pose.configIdentity.value);
+    }
+    if (identities.size !== 1) throw gameplayError("equipment_poses_invalid", "Equipment pose roles must share one config identity");
+    const identity = [...identities][0];
+    if (equipmentConfigIdentityValue !== null && identity !== equipmentConfigIdentityValue) throw gameplayError("equipment_config_identity_locked", "Equipment config identity is locked for the complete run");
+    return poses;
+  }
+
+  /** @param {ReadonlyMap<string, AeroResolvedEquipmentPose>} poses */
+  function activateEquipmentPoses(poses) {
+    if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && variant?.rulesetId !== BOXING_COLLIDER_RULESET) { frameEquipmentPoses = new Map(); return; }
+    if (poses.size !== 2) throw gameplayError("equipment_poses_invalid", "Collider evaluation requires exact equipment poses");
+    frameEquipmentPoses = poses;
+    if (equipmentConfigIdentityValue === null) equipmentConfigIdentityValue = /** @type {AeroResolvedEquipmentPose} */ (poses.get("left_wrist")).configIdentity.value;
+  }
+
+  /** @param {"left_wrist" | "right_wrist"} role */
+  function equipmentPoseForRole(role) {
+    const pose = frameEquipmentPoses.get(role);
+    if (!pose) throw gameplayError("equipment_poses_invalid", "Collider equipment pose is unavailable");
+    return pose;
+  }
 
   /** @param {unknown} value @returns {DataRecord} */
   function normalizeInputSnapshot(value) {
@@ -733,10 +803,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     clearContinuousCollisionHistory();
   }
 
-  function hasRequiredLease() {
-    if (!leaseSnapshot || !instanceId) return true;
-    return leaseSnapshot.ownerInstanceId === instanceId && leaseSnapshot.state === "owned" && Array.isArray(leaseSnapshot.resources) && leaseSnapshot.resources.includes("audio") && (sessionPurpose === "visual_test" || leaseSnapshot.resources.includes("camera"));
+  /** @param {DataRecord | null} candidate */
+  function hasRequiredLeaseSnapshot(candidate) {
+    if (!candidate || !instanceId) return true;
+    return candidate.ownerInstanceId === instanceId && candidate.state === "owned" && Array.isArray(candidate.resources) && candidate.resources.includes("audio") && (sessionPurpose === "visual_test" || candidate.resources.includes("camera"));
   }
+  function hasRequiredLease() { return hasRequiredLeaseSnapshot(leaseSnapshot); }
 
   function enforceLease() {
     if (hasRequiredLease()) return;
@@ -1112,13 +1184,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
     const priorLeft = left === null || seedLeftOnly ? null : previousLeftWristSample; const priorRight = right === null || seedRightOnly ? null : previousRightWristSample;
-    // 0.0.61 (chgy): expose the PRE-push per-wrist wrist-history — the exact
-    // frozen arrays the saber capsule below orients from. The assembly
-    // re-derives the beam direction with the same pure
-    // `saberDirectionFromWristHistory` and the same `timestampMs`, so the
-    // visible beam is the hit volume verbatim (visual == hit). The arrays are
-    // frozen and only reassigned (pushed) after this point, so the captured
-    // reference is stable through the snapshot publish.
+    // Expose stable PRE-push histories for authored direction diagnostics.
+    // The resolved pose array is the sole collision-volume authority.
     exposedLeftWristHistory = leftWristHistory;
     exposedRightWristHistory = rightWristHistory;
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
@@ -1128,12 +1195,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
       if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
-      // 0.0.61 (GATE 1): the saber capsule is the SOLE flow hit detector —
-      // the wrist-in-cell point test and the swept segment are retired. The
-      // capsule is built from the SAME pure direction oracle the assembly
-      // uses to orient the visible beam, so visual == hit.
-      const saberDirection = saberDirectionFromWristHistory(hand === "right" ? rightWristHistory : leftWristHistory, timestampMs);
-      if (!saberCapsuleContactsFlowTarget(event, current, saberDirection, Number(eventSettings.timingWindowMs))) continue;
+      // The contract-resolved transformed 3D capsule is the sole Flow hit volume.
+      // Projection into judge XY naturally preserves local-axis roll and shortens
+      // under out-of-plane tilt; no renderer/GLB bounds or fixed fallback apply.
+      if (!resolvedSaberCapsuleContactsFlowTarget(event, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(eventSettings.timingWindowMs))) continue;
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
       candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
@@ -1184,11 +1249,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
       if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
       if (rightContinuous && priorRight && right) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
-      // 0.0.61 (GATE 1): bombs are detonated by the same saber capsule the
-      // notes use (either wrist owns the bomb), replacing the retired
-      // wrist-in-inflated-cell detector.
-      const leftContact = !evaluateLeft || left === null ? null : saberCapsuleContactsFlowTarget(bomb, left, saberDirectionFromWristHistory(leftWristHistory, timestampMs), windowMs) ? left.songTimeMs : null;
-      const rightContact = !evaluateRight || right === null ? null : saberCapsuleContactsFlowTarget(bomb, right, saberDirectionFromWristHistory(rightWristHistory, timestampMs), windowMs) ? right.songTimeMs : null;
+      // Bombs use the same exact resolved capsule as notes; either role owns contact.
+      const leftContact = !evaluateLeft || left === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs) ? left.songTimeMs : null;
+      const rightContact = !evaluateRight || right === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs) ? right.songTimeMs : null;
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };
@@ -1298,12 +1361,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
         const placement = Number(event.spatialTarget.targetCell);
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
-        // 0.0.61 (GATE 1): the glove box REPLACES the wrist-sample-in-box
-        // detector. Glove volume OVERLAPS the 1x1 reach-row target box within
-        // the inclusive timing window; overlap-only semantics are preserved
-        // (F3: no hand qualification, the opposite-hand guard below still
-        // reads only the own-hand sample).
-        if (!gloveBoxContactsBoxingTarget(target, current, Number(boxingColliderSettings.timingWindowMs))) continue;
+        // The exact contract-resolved 3D glove OBB is projected to its XY convex
+        // hull and SAT-tested against the target; no enclosing AABB fallback.
+        if (!resolvedGloveObbContactsBoxingTarget(target, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(boxingColliderSettings.timingWindowMs))) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
         candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
       } else if (action === "guard" || action === "crossed_guard") {
@@ -1313,10 +1373,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const leftTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(leftCell, reach) });
         const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(rightCell, reach) });
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
-        // 0.0.61 (GATE 1): guard poses judge through the SAME glove volume —
-        // both authored cells must be overlapped by their own hands' gloves.
-        const leftContact = left !== null && !seedLeftOnly && gloveBoxContactsBoxingTarget(leftTarget, left, windowMs);
-        const rightContact = right !== null && !seedRightOnly && gloveBoxContactsBoxingTarget(rightTarget, right, windowMs);
+        // Guard poses use each role's exact resolved glove hull.
+        const leftContact = left !== null && !seedLeftOnly && resolvedGloveObbContactsBoxingTarget(leftTarget, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs);
+        const rightContact = right !== null && !seedRightOnly && resolvedGloveObbContactsBoxingTarget(rightTarget, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs);
         if (!leftContact || !rightContact) continue;
         guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(left?.songTimeMs ?? 0, right?.songTimeMs ?? 0), leftContact: true, rightContact: true });
       }
@@ -1477,7 +1536,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
   function updateScore(result, scoreVariant, scoreProfile, settings, colliderSettings) {
     const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
-    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue);
     const current = scorePartition(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
     const next = { ...current };
     if (result === "hit") { next.hits += 1; next.combo += 1; next.score = finiteScore(next.score + Number(settings.hitPoints) + Math.max(0, next.combo - 1) * Number(settings.comboBonusPerHit)); next.maxCombo = Math.max(next.maxCombo, next.combo); }
@@ -1489,10 +1548,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
   function scorePartition(scoreVariant, scoreProfile, settings, colliderSettings = flowColliderSettings) {
     const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
-    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
+    const colliderRuleset = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET || scoreVariant.rulesetId === BOXING_COLLIDER_RULESET;
+    if (colliderRuleset && equipmentConfigIdentityValue === null) throw gameplayError("equipment_config_identity_missing", "Collider score partitions require locked equipment config identity");
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue);
     const colliderIdentity = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET ? flowColliderSettingsIdentity(resolvedColliderSettings) : null;
     const boxingIdentity = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettingsIdentity(resolvedColliderSettings) : null;
-    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ...(colliderIdentity === null ? {} : { flowColliderSettingsIdentity: colliderIdentity, bombContacts: 0 }), ...(boxingIdentity === null ? {} : { boxingColliderSettingsIdentity: boxingIdentity }), ranked: scoreVariant.rulesetId === FLOW_COLLIDER_RULESET || scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? false : scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
+    const equipmentIdentity = !colliderRuleset || equipmentConfigIdentityValue === null ? null : Object.freeze({ schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: equipmentConfigIdentityValue });
+    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ...(equipmentIdentity === null ? {} : { equipmentConfigIdentity: equipmentIdentity }), ...(colliderIdentity === null ? {} : { flowColliderSettingsIdentity: colliderIdentity, bombContacts: 0 }), ...(boxingIdentity === null ? {} : { boxingColliderSettingsIdentity: boxingIdentity }), ranked: colliderRuleset ? false : scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
   }
 
   /** @param {DataRecord} event @returns {readonly string[]} */
@@ -1527,16 +1589,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       judgements: Object.freeze([...judgements]), shadowJudgements: Object.freeze([...shadowJudgements]), obstacleOutcomes: Object.freeze([...obstacleOutcomes]), hazardOutcomes: Object.freeze([...hazardOutcomes]),
       hazardContact: Object.freeze({ active: occupiedObstacleIds.size > 0, sinceMs: hazardContactSinceMs, releasedAtMs: hazardContactReleasedAtMs }),
       // 0.0.61 (chgy): per-wrist PRE-push wrist-history for saber orientation.
-      // Exposed at the top level (NOT inside `session`, which is exact-key
-      // validated by the session contract) so the assembly can re-derive the
-      // EXACT hit direction with the shared `saberDirectionFromWristHistory`.
+      // Retained at the top level for authored-direction diagnostics only.
       saberWristHistory: Object.freeze({ left_wrist: exposedLeftWristHistory, right_wrist: exposedRightWristHistory }),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
     });
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
@@ -1975,8 +2035,8 @@ function defaultScoringSettings() { return Object.freeze({ comboBonusPerHit: 0, 
 function scoreSettingsIdentity(settings) { return `scoring-v1:${JSON.stringify(settings.hitPoints)},${JSON.stringify(settings.missPenalty)},${JSON.stringify(settings.comboBonusPerHit)}`; }
 /** @param {number} value */
 function finiteScore(value) { if (!Number.isFinite(value) || value < 0) throw gameplayError("score_value_invalid", "Score arithmetic must remain finite and non-negative"); return Object.is(value, -0) ? 0 : value; }
-/** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
-function scorePartitionKey(variant, profile, settings, colliderSettings = defaultFlowColliderSettings) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings), ...(variant.rulesetId === FLOW_COLLIDER_RULESET ? [flowColliderSettingsIdentity(colliderSettings)] : variant.rulesetId === BOXING_COLLIDER_RULESET ? [boxingColliderSettingsIdentity(colliderSettings)] : [])].join("|"); }
+/** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings @param {DataRecord} [colliderSettings] @param {string | null} [equipmentIdentity] */
+function scorePartitionKey(variant, profile, settings, colliderSettings = defaultFlowColliderSettings, equipmentIdentity = null) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; const colliderRuleset = variant.rulesetId === FLOW_COLLIDER_RULESET || variant.rulesetId === BOXING_COLLIDER_RULESET; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings), ...(colliderRuleset ? [`equipment-config-sha256:${equipmentIdentity ?? "missing"}`] : []), ...(variant.rulesetId === FLOW_COLLIDER_RULESET ? [flowColliderSettingsIdentity(colliderSettings)] : variant.rulesetId === BOXING_COLLIDER_RULESET ? [boxingColliderSettingsIdentity(colliderSettings)] : [])].join("|"); }
 /** @param {DataRecord} variant */
 function publicVariant(variant) { return Object.freeze({ variantId: variant.variantId, chartId: variant.chartId, mode: variant.mode, rulesetId: variant.rulesetId, recipeId: variant.recipeId, modifierIds: variant.modifierIds, ranked: variant.ranked, localOnly: variant.localOnly, mapHash: variant.mapHash, scoreIdentityHash: variant.scoreIdentityHash, provenance: variant.provenance }); }
 /** @param {"three" | "two" | "one" | "complete" | "cancelled"} state @param {AeroCountdownReason | null} reason @param {number | null} value @param {number} timestampMs @param {string | null} calibrationId */

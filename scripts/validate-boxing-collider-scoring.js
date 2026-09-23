@@ -28,6 +28,14 @@ const beat = (eventId, centerTimestampMs, type, extra = {}) => {
 const anchor = (name, measured, sx, sy) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x: (sx + 0.5) / 4, y: (2.5 - sy) / 3, cell: 5, subcell: 20 });
 const poseAnchor = (name, measured, x, y, overrides = {}) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor: name, calibrationId: "cal-1", measurementTimestampMs: measured, valid: true, confidence: 1, rawX: 0.5, rawY: 0.5, x, y, cell: 5, subcell: 20, ...overrides });
 const evidence = (frameId, measured, left, right, nose, extras = []) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: [], anchors: [anchor("nose", measured, ...nose), anchor("left_shoulder", measured, 0, 0), anchor("right_shoulder", measured, 3, 0), anchor("left_elbow", measured, 0, 0), anchor("right_elbow", measured, 3, 0), anchor("left_wrist", measured, ...left), anchor("right_wrist", measured, ...right), ...extras], entries: [] });
+const EQUIPMENT_CONFIG_IDENTITY = Object.freeze({ schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: "b".repeat(64) });
+function equipmentPosesForEvidence(sample, mode = "boxing") {
+  return ["left_wrist", "right_wrist"].map((role) => {
+    const measuredWrist = sample.anchors.find((entry) => entry.anchor === role);
+    assert.ok(measuredWrist, `measured ${role} required for equipment pose`);
+    return { role, mode, anchor: { x: measuredWrist.x * 4 - 0.5, y: 2.5 - measuredWrist.y * 3, z: 0 }, scale: 1, orientation: { x: 0, y: 0, z: 0, w: 1 }, geometryIdentity: mode === "flow" ? "aerobeat/saber_capsule_v1" : "aerobeat/glove_obb_v1", configIdentity: EQUIPMENT_CONFIG_IDENTITY };
+  });
+}
 const input = (measured, latest, overrides = {}) => ({ sourceIdentity: overrides.sourceIdentity ?? "camera-a", calibration: { calibrationId: overrides.calibrationId ?? "cal-1", readiness: overrides.ready === false ? "not_ready" : "countdown" }, tracking: { gameplayPaused: overrides.gameplayPaused === true, freshCalibrationRequired: overrides.freshCalibrationRequired === true }, countdownFrozen: false, latestEvidence: latest, straightQualifications: overrides.qualifications ?? [] });
 const config = (events, boxingColliderSettings) => ({ packageId: "package", selectedVariant: variant(), resolvedEvents: events, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false }, ...(boxingColliderSettings ? { boxingColliderSettings } : {}) });
 const clock = (ms, playing) => ({ contextTimeSeconds: ms / 1000, positionSeconds: ms / 1000, playing });
@@ -47,7 +55,7 @@ function ready(events, boxingColliderSettings) {
 function send(c, songMs, left, right, nose, frameId, options = {}) {
   const sample = evidence(frameId ?? `f-${songMs}`, songMs, left, right, nose, options.extras ?? []);
   if (options.disableWrist) for (const name of options.disableWrist) { const a = sample.anchors.find((entry) => entry.anchor === name); a.valid = false; a.x = null; a.y = null; a.cell = null; a.subcell = null; }
-  c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, sample, options.inputOverrides ?? {}) });
+  c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, sample, options.inputOverrides ?? {}), equipmentPoses: equipmentPosesForEvidence(sample) });
   return sample;
 }
 const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]);
@@ -336,7 +344,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const stampPose = (songMs, p) => Object.fromEntries(Object.entries(p).map(([key, value]) => [key, { ...value, measurementTimestampMs: songMs }]));
   const gestureEvidence = (songMs, p) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: `gf-${songMs}-${Math.random().toString(36).slice(2, 8)}`, measurementTimestampMs: songMs, provenance: "measured", activeBoxingActions: [], anchors: [p.nose, p.leftElbow, p.rightElbow, p.leftWrist, p.rightWrist].map((entry) => ({ ...entry, measurementTimestampMs: songMs })).filter(Boolean), entries: [] });
   void stampPose;
-  const gestureSend = (c, songMs, p) => c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, gestureEvidence(songMs, p)) });
+  const gestureSend = (c, songMs, p) => { const sample = gestureEvidence(songMs, p); return c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, sample), equipmentPoses: equipmentPosesForEvidence(sample) }); };
 
   // Gesture in the instantaneous-checkpoint window -> Count. Wrists at x 0.4/
   // 0.6 with the nose's y satisfy the gesture (sepX 0.2 clean-FP inside, nose
@@ -349,11 +357,10 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const gIn = ready([guardBeat()], gestureConfig);
   gestureSend(gIn, 1000, raisedGuardPose);
   assert.deepEqual(judgementsAt(gIn), [["gg", "hit", []]], "gesture inside the checkpoint window counts");
-  // Gesture out of window (after it) -> miss at strict past window; no
-  // evidence ever arrived, so the diagnostic is no_input.
+  // A non-gesture frame after the window commits the miss at the strict late bound.
   const gOutLate = ready([guardBeat()], gestureConfig);
-  gOutLate.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, null) });
-  assert.deepEqual(judgementsAt(gOutLate), [["gg", "miss", ["no_input"]]], "miss only strict past the guard window");
+  gestureSend(gOutLate, 1181, droppedArms);
+  assert.deepEqual(judgementsAt(gOutLate), [["gg", "miss", ["wrong_collider"]]], "miss only strict past the guard window");
   // Gesture early, before the window opens -> no count yet.
   const gOutEarly = ready([guardBeat()], gestureConfig);
   gestureSend(gOutEarly, 819, raisedFists);
@@ -368,8 +375,8 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   // landmark is represented by a sub-threshold-confidence anchor — exactly
   // what the gesture port's measured-anchor read rejects (confidence < 0.5).
   const lowConfidencePose = { ...raisedFists, leftWrist: { ...raisedFists.leftWrist, confidence: 0.4 } };
-  gestureSend(gMissing, 1000, lowConfidencePose);
-  assert.equal(gMissing.getJudgements().length, 0, "sub-threshold landmark produces no gesture Count");
+  assert.throws(() => gestureSend(gMissing, 1000, lowConfidencePose), /current valid measured wrist/u, "active collider frames reject a sub-threshold wrist before gesture scoring");
+  assert.equal(gMissing.getJudgements().length, 0, "rejected sub-threshold landmark produces no gesture Count");
   // A fresh non-gesture frame past the late boundary still produces exactly
   // one semantic-only miss.
   gestureSend(gMissing, 1181, droppedArms);
@@ -395,7 +402,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const gCollisionIgnores = ready([guardBeat()]);
   gestureSend(gCollisionIgnores, 1000, droppedOffCells);
   assert.equal(gCollisionIgnores.getJudgements().length, 0, "collision mode ignores the pose with wrists off the authored cells");
-  gCollisionIgnores.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, null) });
+  gestureSend(gCollisionIgnores, 1181, droppedOffCells);
   assert.equal(gCollisionIgnores.getJudgements()[0]?.result, "miss", "collision mode still misses an off-cell frame");
 }
 
@@ -504,33 +511,35 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.deepEqual(judgementsAt(straight), [["no-hold", "hit", []]], "straight counts on pure overlap without any hold evidence");
   // Providing qualification evidence is not required (and is ignored) for this ruleset.
   const qualified = ready([beat("no-hold-2", 1000, "straight_right", { placement: 6 })]);
-  qualified.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, evidence("fh", 1000, [1, 1], [2, 1], [3, 2]), { qualifications: [{ hand: "right", semanticQualified: false, semanticStartTimestampMs: null, semanticDurationMs: 0, spatialQualified: false, spatialStartTimestampMs: null, spatialDurationMs: 0, acceptedSubcellColumns: [] }] }) });
+  const qualifiedSample = evidence("fh", 1000, [1, 1], [2, 1], [3, 2]);
+  qualified.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, qualifiedSample, { qualifications: [{ hand: "right", semanticQualified: false, semanticStartTimestampMs: null, semanticDurationMs: 0, spatialQualified: false, spatialStartTimestampMs: null, spatialDurationMs: 0, acceptedSubcellColumns: [] }] }), equipmentPoses: equipmentPosesForEvidence(qualifiedSample) });
   assert.deepEqual(judgementsAt(qualified), [["no-hold-2", "hit", []]], "absence of straight qualification still counts");
 }
 
 // --- Miss diagnostics: semantic codes only ------------------------------------------------------
 {
+  // The active collider boundary now rejects absent, stale, and calibration-
+  // mismatched evidence before scoring because exact equipment poses must resolve
+  // against two current measured wrists. Rejected calls remain transactional;
+  // a later current off-target frame still commits the intended miss.
   const noInput = ready([beat("diag-none", 1000, "straight_left", { placement: 5 })]);
-  noInput.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, null) });
-  assert.deepEqual(judgementsAt(noInput), [["diag-none", "miss", ["no_input"]]]);
+  assert.throws(() => noInput.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, null), equipmentPoses: [] }), /exactly one left and one right wrist pose|current measured evidence/u);
+  assert.equal(noInput.getJudgements().length, 0);
+  send(noInput, 1181, [-0.4, 1], [3, 1], [3, 2], "diag-none-current");
+  assert.deepEqual(judgementsAt(noInput), [["diag-none", "miss", ["wrong_collider"]]]);
   const stale = ready([beat("diag-stale", 1000, "straight_left", { placement: 5 })]);
   const staleSample = evidence("stale-frame", 1000, [1, 1], [3, 1], [3, 2]);
-  stale.advance({ timestampMs: 1150, clock: clock(1150, true), input: input(1150, staleSample) });
+  assert.throws(() => stale.advance({ timestampMs: 1150, clock: clock(1150, true), input: input(1150, staleSample), equipmentPoses: equipmentPosesForEvidence(staleSample) }), /current valid measured wrist/u);
   assert.equal(stale.getJudgements().length, 0);
-  stale.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, staleSample) });
-  assert.deepEqual(judgementsAt(stale), [["diag-stale", "miss", ["stale_input"]]], "evidence age >= 150ms reports stale_input");
-  // A calibration-mismatch frame is also stale by construction (the evidence
-  // arrives with a different calibrationId, which clears the sample history),
-  // so the first semantic diagnostic in priority order is stale_input — the
-  // approved semantic code set still bounds what the public surface reports.
+  send(stale, 1181, [-0.4, 1], [3, 1], [3, 2], "diag-stale-current");
+  assert.deepEqual(judgementsAt(stale), [["diag-stale", "miss", ["wrong_collider"]]], "rejected stale evidence cannot mutate judgement truth");
   const mismatch = ready([beat("diag-cal", 1000, "straight_left", { placement: 5 })]);
   const mismatchSample = evidence("cal-frame", 1000, [1, 1], [3, 1], [3, 2]);
   mismatchSample.calibrationId = "cal-2"; for (const entry of mismatchSample.anchors) entry.calibrationId = "cal-2";
-  mismatch.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, mismatchSample, { calibrationId: "cal-2" }) });
-  mismatch.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, mismatchSample, { calibrationId: "cal-2" }) });
-  const mismatchResult = judgementsAt(mismatch)[0];
-  assert.equal(mismatchResult[1], "miss");
-  assert.ok(["stale_input", "calibration_mismatch"].includes(mismatchResult[2][0]), `diagnostic is an approved semantic code: ${JSON.stringify(mismatchResult[2])}`);
+  assert.throws(() => mismatch.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, mismatchSample), equipmentPoses: equipmentPosesForEvidence(mismatchSample) }), /snapshot calibration/u);
+  assert.equal(mismatch.getJudgements().length, 0);
+  send(mismatch, 1181, [-0.4, 1], [3, 1], [3, 2], "diag-cal-current");
+  assert.deepEqual(judgementsAt(mismatch), [["diag-cal", "miss", ["wrong_collider"]]], "rejected calibration mismatch cannot mutate judgement truth");
   const wrongC = ready([beat("diag-wrong", 1000, "straight_left", { placement: 5 })]);
   send(wrongC, 1000, [-0.4, 1], [3, 1], [3, 2]);
   send(wrongC, 1181, [-0.4, 1], [3, 1], [3, 2]);
@@ -564,7 +573,8 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   flow.advance({ timestampMs: 1, clock: clock(0, false) });
   flow.advance({ timestampMs: 2, clock: clock(0, false) });
   flow.advance({ timestampMs: 3, clock: clock(0, false) });
-  flow.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, evidence("ff", 1000, [1, 1], [3, 1], [3, 2])) });
+  const flowSample = evidence("ff", 1000, [1, 1], [3, 1], [3, 2]);
+  flow.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, flowSample), equipmentPoses: equipmentPosesForEvidence(flowSample, "flow") });
   assert.deepEqual(flow.getJudgements().map((j) => [j.eventId, j.result]), [["f-note", "hit"]], "flow scoring untouched by the boxing lane");
   const flowPartition = flow.getScorePartitions()[0];
   assert.equal(typeof flowPartition.flowColliderSettingsIdentity, "string");

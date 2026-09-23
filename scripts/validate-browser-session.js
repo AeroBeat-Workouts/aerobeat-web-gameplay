@@ -14,13 +14,26 @@ const server = createServer(async (request, response) => {
     const path = request.url === "/" ? null : request.url?.split("?")[0] ?? null;
     if (path === null) {
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-contracts/equipment-contracts":"/contracts/src/equipment-contracts.js","@aerobeat/web-contracts/obstacle-contracts":"/contracts/src/obstacle-contracts.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
+      response.end(`<!doctype html><meta charset="utf-8"><script type="importmap">{"imports":{"@aerobeat/web-contracts":"/contracts/src/index.js","@aerobeat/web-contracts/equipment-contracts":"/contracts/src/equipment-contracts.js","@aerobeat/web-contracts/equipment-pose-contracts":"/contracts/src/equipment-pose-contracts.js","@aerobeat/web-contracts/obstacle-contracts":"/contracts/src/obstacle-contracts.js","@aerobeat/web-hash":"/hash/src/index.js"}}</script><script type="module">
+        import { createResolvedEquipmentPose } from "@aerobeat/web-contracts/equipment-pose-contracts";
         import { createAeroGameplaySessionCoordinator, createAeroPrototypeProfileRegistry } from "/gameplay/src/index.js";
         const HASH = "a".repeat(64);
+        const equipmentConfigIdentity = Object.freeze({ schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: "b".repeat(64) });
         const runtime = createAeroGameplaySessionCoordinator({ sessionId: "browser" });
         const variant = { variantId: "browser-variant", chartId: "browser-chart", mode: "boxing", rulesetId: "boxing_semantic_track_v1", recipeId: "row_family_balanced_height_v1", modifierIds: [], ranked: false, mapHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, scoreIdentityHash: { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }, provenance: { kind: "authored" } };
         const clock = (positionMs, playing) => ({ contextTimeSeconds: positionMs / 1000, positionSeconds: positionMs / 1000, playing });
         const input = (calibrationId, paused = false, fresh = false) => ({ calibration: { calibrationId, readiness: fresh ? "calibration_required" : "countdown" }, tracking: { gameplayPaused: paused, freshCalibrationRequired: fresh }, countdownFrozen: paused, latestEvidence: null, straightQualifications: [] });
+        const measuredAnchor = (anchor, calibrationId, measurementTimestampMs, sx, sy) => ({ schema: "aerobeat/body_grid_anchor_snapshot", version: 1, anchor, calibrationId, measurementTimestampMs, valid: true, confidence: 1, rawX: (sx + 0.5) / 4, rawY: (2.5 - sy) / 3, x: (sx + 0.5) / 4, y: (2.5 - sy) / 3, cell: 5, subcell: 20 });
+        const colliderFrame = (calibrationId, measurementTimestampMs) => {
+          const positions = { nose: [3, 2], left_shoulder: [0, 0], right_shoulder: [3, 0], left_elbow: [0, 0], right_elbow: [3, 0], left_wrist: [-0.4, 1], right_wrist: [3.4, 1] };
+          const anchors = Object.entries(positions).map(([anchor, [sx, sy]]) => measuredAnchor(anchor, calibrationId, measurementTimestampMs, sx, sy));
+          const latestEvidence = { schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId, measuredSourceFrameId: "browser-frame-" + measurementTimestampMs, measurementTimestampMs, provenance: "measured", activeBoxingActions: [], anchors, entries: [] };
+          const equipmentPoses = ["left_wrist", "right_wrist"].map((role) => {
+            const wrist = anchors.find((entry) => entry.anchor === role);
+            return createResolvedEquipmentPose({ role, mode: "flow", anchor: { x: wrist.x * 4 - 0.5, y: 2.5 - wrist.y * 3, z: 0 }, scale: 1, orientation: { x: 0, y: 0, z: 0, w: 1 }, geometryIdentity: "aerobeat/saber_capsule_v1", configIdentity: equipmentConfigIdentity });
+          });
+          return { input: { ...input(calibrationId), sourceIdentity: "browser-camera", latestEvidence }, equipmentPoses };
+        };
         const states = [runtime.getSnapshot().session.state];
         runtime.configureContent({ packageId: "browser-package", selectedVariant: variant, resolvedEvents: [] });
         states.push(runtime.getSnapshot().session.state);
@@ -65,7 +78,8 @@ const server = createServer(async (request, response) => {
         flowRuntime.advance({ timestampMs: 1000, clock: clock(0, false) });
         flowRuntime.advance({ timestampMs: 2000, clock: clock(0, false) });
         flowRuntime.advance({ timestampMs: 3000, clock: clock(0, false) });
-        flowRuntime.advance({ timestampMs: 4000, clock: clock(1200, true), input: input("flow-cal") });
+        const activeFlowFrame = colliderFrame("flow-cal", 4000);
+        flowRuntime.advance({ timestampMs: 4000, clock: clock(1200, true), input: activeFlowFrame.input, equipmentPoses: activeFlowFrame.equipmentPoses });
         const ignoredFlowResults = flowRuntime.getJudgements().map((entry) => [entry.eventId, entry.result]);
         const ignoredBombHazard = flowRuntime.getHazardOutcomes().some((outcome) => outcome.kind === "bomb");
         const profiles = createAeroPrototypeProfileRegistry();

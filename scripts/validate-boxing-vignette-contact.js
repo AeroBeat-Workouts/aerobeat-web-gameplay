@@ -56,6 +56,15 @@ function evidence(frameId, measured, sx, sy) {
   return { schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: [], anchors: [anchor("nose", measured, sx, sy), anchor("left_shoulder", measured, 0, 0), anchor("right_shoulder", measured, 3, 0), anchor("left_elbow", measured, 0, 0), anchor("right_elbow", measured, 3, 0), anchor("left_wrist", measured, 1, 1), anchor("right_wrist", measured, 3, 1)], entries: [] };
 }
 
+const EQUIPMENT_CONFIG_IDENTITY = Object.freeze({ schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: "b".repeat(64) });
+function equipmentPosesForEvidence(sample) {
+  return ["left_wrist", "right_wrist"].map((role) => {
+    const measuredWrist = sample.anchors.find((entry) => entry.anchor === role);
+    assert.ok(measuredWrist, `measured ${role} required for equipment pose`);
+    return { role, mode: "boxing", anchor: { x: measuredWrist.x * 4 - 0.5, y: 2.5 - measuredWrist.y * 3, z: 0 }, scale: 1, orientation: { x: 0, y: 0, z: 0, w: 1 }, geometryIdentity: "aerobeat/glove_obb_v1", configIdentity: EQUIPMENT_CONFIG_IDENTITY };
+  });
+}
+
 function input(measured, latest) {
   return { sourceIdentity: "camera-a", calibration: { calibrationId: "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: false, freshCalibrationRequired: false }, countdownFrozen: false, latestEvidence: latest, straightQualifications: [] };
 }
@@ -76,7 +85,8 @@ function ready(events, id = "b12") {
 
 /** Send one measured frame at wall time == song time with a nose at canonical sx/sy. */
 function send(c, songMs, sx, sy, frameId) {
-  c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, evidence(frameId ?? `f-${songMs}`, songMs, sx, sy)) });
+  const sample = evidence(frameId ?? `f-${songMs}`, songMs, sx, sy);
+  c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, sample), equipmentPoses: equipmentPosesForEvidence(sample) });
 }
 
 // --- Real collision: nose enters the wall -> contact outcome + active hazardContact ---
@@ -188,11 +198,11 @@ function send(c, songMs, sx, sy, frameId) {
   const punch = evidence("b12sc-3", 1950, 2, 1.5);
   punch.anchors.find((entry) => entry.anchor === "left_wrist").x = (1 + 0.5) / 4;
   punch.anchors.find((entry) => entry.anchor === "left_wrist").y = (2.5 - 1) / 3;
-  c.advance({ timestampMs: 1950, clock: clock(1950, true), input: input(1950, punch) });
+  c.advance({ timestampMs: 1950, clock: clock(1950, true), input: input(1950, punch), equipmentPoses: equipmentPosesForEvidence(punch) });
   const punchEnd = evidence("b12sc-4", 2000, 2, 1.5);
   punchEnd.anchors.find((entry) => entry.anchor === "left_wrist").x = (1 + 0.5) / 4;
   punchEnd.anchors.find((entry) => entry.anchor === "left_wrist").y = (2.5 - 1) / 3;
-  c.advance({ timestampMs: 2000, clock: clock(2000, true), input: input(2000, punchEnd) });
+  c.advance({ timestampMs: 2000, clock: clock(2000, true), input: input(2000, punchEnd), equipmentPoses: equipmentPosesForEvidence(punchEnd) });
   const judgements = c.getJudgements().map((entry) => [entry.eventId, entry.result]);
   // The straight note scores hit; the weave_right checkpoint may be judged
   // (hit or miss) through tryHit independently of the head collision.
@@ -212,7 +222,7 @@ function send(c, songMs, sx, sy, frameId) {
 {
   const frozenEvidence = (heldFrameId, heldTs, sx, sy, tick) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", provenance: "frozen", frozenTickId: tick, measuredSourceFrameId: heldFrameId, measurementTimestampMs: heldTs, activeBoxingActions: [], anchors: [anchor("nose", heldTs, sx, sy), anchor("left_shoulder", heldTs, 0, 0), anchor("right_shoulder", heldTs, 3, 0), anchor("left_elbow", heldTs, 0, 0), anchor("right_elbow", heldTs, 3, 0), anchor("left_wrist", heldTs, 1, 1), anchor("right_wrist", heldTs, 3, 1)], entries: [] });
   /** Send a frozen re-publication of the held frame at wall time == song time. */
-  const sendFrozen = (c, songMs, heldFrameId, heldTs, sx, sy, tick) => { c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, frozenEvidence(heldFrameId, heldTs, sx, sy, tick)) }); };
+  const sendFrozen = (c, songMs, heldFrameId, heldTs, sx, sy, tick) => { const sample = frozenEvidence(heldFrameId, heldTs, sx, sy, tick); c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: input(songMs, sample), equipmentPoses: equipmentPosesForEvidence(sample) }); };
 
   // (a) The held nose is INSIDE the wall column for the whole freeze. The first
   // frozen tick (the wall activates at song 1000) is what sets firstContact — the

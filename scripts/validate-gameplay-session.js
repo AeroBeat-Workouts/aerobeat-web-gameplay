@@ -50,6 +50,10 @@ function clock(positionMs, playing, durationMs = null) { return { contextTimeSec
 
 function visualTestInteraction(epoch, activationTimelineMs) { return { schema: "aerobeat/visual_test_interaction", version: 1, mode: "production_judgement", epoch, activationTimelineMs }; }
 function productionInput(measured, latestEvidence, options = {}) { return input(measured, latestEvidence, { ...options, sourceIdentity: options.sourceIdentity ?? "visual-test-pointer" }); }
+function equipmentPosesForEvidence(sample, mode, options = {}) {
+  const identity = { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: options.identity ?? "b".repeat(64) };
+  return ["left_wrist", "right_wrist"].map((role) => { const anchor = sample.anchors.find((entry) => entry.anchor === role); return { role, mode, anchor: { x: anchor.x * 4 - 0.5, y: 2.5 - anchor.y * 3, z: 0 }, scale: options.scale ?? 1, orientation: options.orientation ?? { x: 0, y: 0, z: 0, w: 1 }, geometryIdentity: mode === "flow" ? "aerobeat/saber_capsule_v1" : "aerobeat/glove_obb_v1", configIdentity: identity }; });
+}
 function setAnchorPosition(sample, name, sx, sy) { const target = sample.anchors.find((entry) => entry.anchor === name); target.x = (sx + 0.5) / 4; target.y = (2.5 - sy) / 3; return sample; }
 function readyVisualTest(coordinator, events, selected) {
   coordinator.configureContent(config(events, selected), { purpose: "visual_test" });
@@ -147,15 +151,15 @@ function readyPlaying(coordinator, events, selected = variant()) {
     event("flow-after-miss", 1600, "note", { hand: "left", placement: 5 })
   ], flow);
   const baseline = setAnchorPosition(evidence("visual-flow-base", 850, []), "left_wrist", 0, 1);
-  coordinator.advance({ timestampMs: 850, clock: clock(850, true), input: productionInput(850, baseline), interaction: visualTestInteraction(1, 850) });
+  coordinator.advance({ timestampMs: 850, clock: clock(850, true), input: productionInput(850, baseline), equipmentPoses: equipmentPosesForEvidence(baseline, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements(), [], "activation frame only seeds collider history");
   const chord = setAnchorPosition(evidence("visual-flow-chord", 1000, []), "left_wrist", 1, 1);
-  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), interaction: visualTestInteraction(1, 850) });
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), equipmentPoses: equipmentPosesForEvidence(chord, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["flow-left-a", "hit", "visual_test"], ["flow-left-b", "hit", "visual_test"]]);
   const missFrame = setAnchorPosition(setAnchorPosition(evidence("visual-flow-miss", 1481, []), "left_wrist", 3.4, 2), "right_wrist", 3.4, 2);
-  coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, missFrame), interaction: visualTestInteraction(1, 850) });
+  coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, missFrame), equipmentPoses: equipmentPosesForEvidence(missFrame, "flow"), interaction: visualTestInteraction(1, 850) });
   const finalHit = setAnchorPosition(evidence("visual-flow-final", 1600, []), "left_wrist", 1, 1);
-  coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, finalHit), interaction: visualTestInteraction(1, 850) });
+  coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, finalHit), equipmentPoses: equipmentPosesForEvidence(finalHit, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-miss", "miss"], ["flow-after-miss", "hit"]]);
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo })), [{ ranked: false, localOnly: true, hits: 3, misses: 1, combo: 1, maxCombo: 2 }]);
 }
@@ -165,9 +169,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-flow-direction" });
   readyVisualTest(coordinator, [event("excluded-at-activation", 900, "note", { hand: "left", placement: 5 }), event("direction-hit", 1000, "note", { hand: "left", placement: 5, direction: "right" })], variant("flow_colliders_v1", null));
   const baseline = setAnchorPosition(evidence("direction-base", 900, []), "left_wrist", 0, 1);
-  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, baseline), interaction: visualTestInteraction(4, 900) });
+  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, baseline), equipmentPoses: equipmentPosesForEvidence(baseline, "flow"), interaction: visualTestInteraction(4, 900) });
   const contact = setAnchorPosition(evidence("direction-contact", 1000, []), "left_wrist", 1, 1);
-  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, contact), interaction: visualTestInteraction(4, 900) });
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, contact), equipmentPoses: equipmentPosesForEvidence(contact, "flow"), interaction: visualTestInteraction(4, 900) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["direction-hit", "hit"]], "center <= activation never retro-misses and authored direction still scores");
 }
 
@@ -179,11 +183,13 @@ function readyPlaying(coordinator, events, selected = variant()) {
     event("boxing-right", 1000, "straight_right", { spatialTarget: { targetCell: 6, acceptedSubcells: [], sourceCell: -1 } }),
     event("boxing-miss", 1300, "straight_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } })
   ], variant("boxing_collider_v1", null));
-  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, evidence("boxing-base", 900, [])), interaction: visualTestInteraction(1, 900) });
+  const boxingBase = evidence("boxing-base", 900, []);
+  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, boxingBase), equipmentPoses: equipmentPosesForEvidence(boxingBase, "boxing"), interaction: visualTestInteraction(1, 900) });
   const chord = evidence("boxing-chord", 1000, []);
   setAnchorPosition(chord, "left_wrist", 1, 1); setAnchorPosition(chord, "right_wrist", 2, 1);
-  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), interaction: visualTestInteraction(1, 900) });
-  coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, evidence("boxing-late", 1481, [])), interaction: visualTestInteraction(1, 900) });
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), equipmentPoses: equipmentPosesForEvidence(chord, "boxing"), interaction: visualTestInteraction(1, 900) });
+  const boxingLate = evidence("boxing-late", 1481, []);
+  coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, boxingLate), equipmentPoses: equipmentPosesForEvidence(boxingLate, "boxing"), interaction: visualTestInteraction(1, 900) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["boxing-left", "hit", "visual_test"], ["boxing-right", "hit", "visual_test"], ["boxing-miss", "miss", "visual_test"]]);
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo]), [[false, true, 2, 1, 0, 2]]);
 }
@@ -193,7 +199,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const flow = variant("flow_colliders_v1", null);
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-boundary" });
   readyVisualTest(coordinator, [event("future", 500, "note", { hand: "left", placement: 5 })], flow);
-  const strictInput = productionInput(0, evidence("strict", 0, []));
+  const strictEvidence = evidence("strict", 0, []);
+  const strictInput = productionInput(0, strictEvidence);
+  const strictPoses = equipmentPosesForEvidence(strictEvidence, "flow");
   const before = coordinator.getSnapshot();
   assert.throws(() => coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: { ...visualTestInteraction(1, 0), extra: true } }), /unknown or symbolic fields/u);
   assert.equal(coordinator.getSnapshot(), before);
@@ -203,7 +211,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   Object.defineProperty(hostile, "activationTimelineMs", { enumerable: true, get() { accessorCalls += 1; return 0; } });
   assert.throws(() => coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: hostile }), /accessors or hidden fields/u);
   assert.equal(accessorCalls, 0);
-  coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, interaction: visualTestInteraction(1, 0) });
+  coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: strictInput, equipmentPoses: strictPoses, interaction: visualTestInteraction(1, 0) });
   assert.throws(() => coordinator.advance({ timestampMs: 1, clock: clock(1, true), input: productionInput(1, evidence("strict-2", 1, [])), interaction: visualTestInteraction(1, 1) }), /immutable within an epoch/u);
 
   const play = createAeroGameplaySessionCoordinator({ sessionId: "play-authority-rejected", countdownStepMs: 1 });
@@ -220,26 +228,27 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-lifecycle" });
   readyVisualTest(coordinator, [event("past-after-seek", 500, "note", { hand: "left", placement: 5 }), event("future-after-seek", 1200, "note", { hand: "left", placement: 5 }), event("later-after-rollback", 2000, "note", { hand: "right", placement: 6 })], variant("flow_colliders_v1", null));
   const first = setAnchorPosition(evidence("life-base", 0, []), "left_wrist", 0, 1);
-  coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: productionInput(0, first), interaction: visualTestInteraction(1, 0) });
+  coordinator.advance({ timestampMs: 0, clock: clock(0, true), input: productionInput(0, first), equipmentPoses: equipmentPosesForEvidence(first, "flow"), interaction: visualTestInteraction(1, 0) });
   coordinator.pause(100, "menu");
   coordinator.synchronizePausedClock({ timestampMs: 101, clock: clock(1000, false) });
   coordinator.resume(102);
   assert.throws(() => coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, evidence("stale-epoch", 1000, [])), interaction: visualTestInteraction(1, 1000) }), /epochs must increase/u);
   const seed = setAnchorPosition(evidence("life-seed", 1000, []), "left_wrist", 0, 1);
-  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, seed), interaction: visualTestInteraction(2, 1000) });
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, seed), equipmentPoses: equipmentPosesForEvidence(seed, "flow"), interaction: visualTestInteraction(2, 1000) });
   const duplicate = setAnchorPosition(evidence("life-seed", 1100, []), "left_wrist", 1, 1);
-  coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, duplicate), interaction: visualTestInteraction(2, 1000) });
+  coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, duplicate), equipmentPoses: equipmentPosesForEvidence(duplicate, "flow"), interaction: visualTestInteraction(2, 1000) });
   assert.deepEqual(coordinator.getJudgements(), [], "duplicate identity cannot bridge the recovery baseline");
   const stale = setAnchorPosition(evidence("life-stale", 900, []), "left_wrist", 1, 1);
-  coordinator.advance({ timestampMs: 1149, clock: clock(1149, true), input: productionInput(900, stale), interaction: visualTestInteraction(2, 1000) });
-  assert.deepEqual(coordinator.getJudgements(), [], "stale evidence cannot score or bridge history");
-  const sourceSeed = setAnchorPosition(evidence("life-source-seed", 1150, []), "left_wrist", 0, 1);
-  coordinator.advance({ timestampMs: 1150, clock: clock(1150, true), input: productionInput(1150, sourceSeed, { sourceIdentity: "source-b" }), interaction: visualTestInteraction(2, 1000) });
+  assert.throws(() => coordinator.advance({ timestampMs: 1149, clock: clock(1149, true), input: productionInput(900, stale), equipmentPoses: equipmentPosesForEvidence(stale, "flow"), interaction: visualTestInteraction(2, 1000) }), /current valid measured wrist/u);
+  assert.deepEqual(coordinator.getJudgements(), [], "stale evidence rejects transactionally and cannot bridge history");
+  const sourceSeed = setAnchorPosition(evidence("life-source-seed", 1150, []), "left_wrist", -0.5, 1);
+  coordinator.advance({ timestampMs: 1150, clock: clock(1150, true), input: productionInput(1150, sourceSeed, { sourceIdentity: "source-b" }), equipmentPoses: equipmentPosesForEvidence(sourceSeed, "flow"), interaction: visualTestInteraction(2, 1000) });
   assert.deepEqual(coordinator.getJudgements(), [], "source transition re-baselines without a swept hit");
   const hit = setAnchorPosition(evidence("life-hit", 1200, []), "left_wrist", 1, 1);
-  coordinator.advance({ timestampMs: 1200, clock: clock(1200, true), input: productionInput(1200, hit, { sourceIdentity: "source-b" }), interaction: visualTestInteraction(2, 1000) });
+  coordinator.advance({ timestampMs: 1200, clock: clock(1200, true), input: productionInput(1200, hit, { sourceIdentity: "source-b" }), equipmentPoses: equipmentPosesForEvidence(hit, "flow"), interaction: visualTestInteraction(2, 1000) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["future-after-seek", "hit"]]);
-  coordinator.advance({ timestampMs: 1201, clock: clock(1199, true), input: productionInput(1201, evidence("rollback", 1201, [])), interaction: visualTestInteraction(2, 1000) });
+  const rollback = evidence("rollback", 1201, []);
+  coordinator.advance({ timestampMs: 1201, clock: clock(1199, true), input: productionInput(1201, rollback), equipmentPoses: equipmentPosesForEvidence(rollback, "flow"), interaction: visualTestInteraction(2, 1000) });
   assert.deepEqual([coordinator.getSnapshot().session.state, coordinator.getSnapshot().session.pauseReason, coordinator.getJudgements().length], ["paused_manual", "audio_clock_rollback", 1]);
 }
 
@@ -250,16 +259,16 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const play = createAeroGameplaySessionCoordinator({ sessionId: "golden-play", countdownStepMs: 1 });
   readyPlaying(play, events, selected);
   const playBase = setAnchorPosition(evidence("golden-play-base", 3900, []), "left_wrist", 3.4, 2);
-  play.advance({ timestampMs: 3900, clock: clock(900, true), input: productionInput(3900, playBase) });
+  play.advance({ timestampMs: 3900, clock: clock(900, true), input: productionInput(3900, playBase), equipmentPoses: equipmentPosesForEvidence(playBase, "flow") });
   const playHit = setAnchorPosition(evidence("golden-play-hit", 4000, []), "left_wrist", 1, 1);
-  play.advance({ timestampMs: 4000, clock: clock(1000, true), input: productionInput(4000, playHit) });
+  play.advance({ timestampMs: 4000, clock: clock(1000, true), input: productionInput(4000, playHit), equipmentPoses: equipmentPosesForEvidence(playHit, "flow") });
 
   const visual = createAeroGameplaySessionCoordinator({ sessionId: "golden-visual" });
   readyVisualTest(visual, events, selected);
   const visualBase = setAnchorPosition(evidence("golden-visual-base", 900, []), "left_wrist", 3.4, 2);
-  visual.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, visualBase), interaction: visualTestInteraction(1, 900) });
+  visual.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, visualBase), equipmentPoses: equipmentPosesForEvidence(visualBase, "flow"), interaction: visualTestInteraction(1, 900) });
   const visualHit = setAnchorPosition(evidence("golden-visual-hit", 1000, []), "left_wrist", 1, 1);
-  visual.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, visualHit), interaction: visualTestInteraction(1, 900) });
+  visual.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, visualHit), equipmentPoses: equipmentPosesForEvidence(visualHit, "flow"), interaction: visualTestInteraction(1, 900) });
 
   const judgementTruth = (entry) => ({ eventId: entry.eventId, rulesetId: entry.rulesetId, recipeId: entry.recipeId, result: entry.result, beatCenterTimestampMs: entry.beatCenterTimestampMs, committedTimelinePositionMs: entry.committedTimelinePositionMs, timingOffsetMs: entry.timingOffsetMs, diagnostics: entry.diagnostics, shadow: entry.shadow });
   assert.deepEqual(judgementTruth(visual.getJudgements()[0]), judgementTruth(play.getJudgements()[0]));
@@ -503,21 +512,23 @@ function readyPlaying(coordinator, events, selected = variant()) {
   readyPlaying(coordinator, [event("wrong-flow", 500, "note", { hand: "left", placement: 5, direction: "up" }), event("flow-bomb", 900, "bomb", { placement: 6 })], flow);
   const sample = evidence("frame-flow-wrong", 3500, []);
   sample.entries = [{ schema: "aerobeat/body_grid_cell_entry", version: 1, anchor: "left_wrist", calibrationId: "cal-1", measurementTimestampMs: 3500, fromCell: 1, toCell: 5, direction: "down", provenance: "measured" }];
-  coordinator.advance({ timestampMs: 3500, clock: clock(681, true), input: input(3500, sample) });
-  coordinator.advance({ timestampMs: 3700, clock: clock(900, true), input: input(3700, null) });
+  coordinator.advance({ timestampMs: 3500, clock: clock(681, true), input: productionInput(3500, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow") });
+  const settle = setAnchorPosition(setAnchorPosition(evidence("frame-flow-settle", 3700, []), "left_wrist", -0.5, 2), "right_wrist", -0.5, 2);
+  coordinator.advance({ timestampMs: 3700, clock: clock(900, true), input: productionInput(3700, settle), equipmentPoses: equipmentPosesForEvidence(settle, "flow") });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["wrong-flow", "miss"]], "unscored expired note commits; the bomb settles separately as a flow hazard outcome");
 }
 // Bombs and walls settle exclusively through flow hazard outcomes under the swept colliders ruleset.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-hazard-settlement" });
   readyPlaying(coordinator, [event("hazard-bomb", 500, "bomb", { placement: 6 }), canonicalFlowEvent("hazard-wall", 800, { start: 2, end: 4, type: "obstacle", sourceGeometry: { schema: "aerobeat/obstacle_source_geometry", version: 1, coordinateSpace: "beatsaber_v3_obstacle_rect", kind: "v3_rect", x: 0, y: 0, width: 4, height: 1 }, gameplayGeometry: { schema: "aerobeat/obstacle_gameplay_geometry", version: 1, coordinateSpace: "aerobeat_top_left_grid", x: 0, y: 0, width: 4, height: 1 }, gridMask: [0, 1, 2, 3] }, 1200)], variant("flow_colliders_v1"));
-  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: input(3500, evidence("frame-hazard", 3500, [])) });
+  const hazardStart = evidence("frame-hazard", 3500, []);
+  coordinator.advance({ timestampMs: 3500, clock: clock(500, true), input: productionInput(3500, hazardStart), equipmentPoses: equipmentPosesForEvidence(hazardStart, "flow") });
   for (const [wallMs, songMs] of [[4200, 800], [5000, 1250]]) {
     const sample = evidence(`frame-hazard-${songMs}`, wallMs, []);
-
-    coordinator.advance({ timestampMs: wallMs, clock: clock(songMs, true), input: input(wallMs, sample) });
+    coordinator.advance({ timestampMs: wallMs, clock: clock(songMs, true), input: productionInput(wallMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow") });
   }
-  coordinator.advance({ timestampMs: 6000, clock: clock(1400, true), input: input(6000, null) });
+  const hazardSettle = evidence("frame-hazard-settle", 6000, []);
+  coordinator.advance({ timestampMs: 6000, clock: clock(1400, true), input: productionInput(6000, hazardSettle), equipmentPoses: equipmentPosesForEvidence(hazardSettle, "flow") });
   const hazards = coordinator.getHazardOutcomes();
   assert.equal(hazards.some((outcome) => outcome.kind === "bomb"), true, "bomb contact avoided or contacted settles as a hazard outcome");
   assert.equal(hazards.some((outcome) => outcome.kind === "wall"), true, "wall interval settles as a hazard outcome");
@@ -535,7 +546,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   ];
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-canonical-non-notes" });
   readyPlaying(coordinator, valid, flow);
-  coordinator.advance({ timestampMs: 5000, clock: clock(1300, true), input: input(5000, null) });
+  const canonicalSettle = evidence("canonical-settle", 5000, []);
+  coordinator.advance({ timestampMs: 5000, clock: clock(1300, true), input: productionInput(5000, canonicalSettle), equipmentPoses: equipmentPosesForEvidence(canonicalSettle, "flow") });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["canonical-arc", "ignored"], ["canonical-burst", "ignored"]], "bombs no longer receive ignored judgements; arcs and bursts remain non-scoring");
   assert.equal(coordinator.getHazardOutcomes().some((outcome) => outcome.kind === "bomb"), true, "the swept bomb settles through a flow hazard outcome");
   assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "swept wall contact settles as a flow hazard outcome, not an obstacle outcome");
@@ -562,9 +574,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
   for (const offset of [16, 32, 48]) {
     const sample = evidence(`frame-${offset}`, 3600 + offset, []);
     sample.anchors.find((entry) => entry.anchor === "nose").x = 0.125;
-    coordinator.advance({ timestampMs: 3600 + offset, clock: clock(690 + offset / 4, true), input: input(3600 + offset, sample) });
+    coordinator.advance({ timestampMs: 3600 + offset, clock: clock(690 + offset / 4, true), input: productionInput(3600 + offset, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow") });
   }
-  coordinator.advance({ timestampMs: 5000, clock: clock(900, true), input: input(5000, null) });
+  const settlement = evidence("wall-settlement", 5000, []);
+  coordinator.advance({ timestampMs: 5000, clock: clock(900, true), input: productionInput(5000, settlement), equipmentPoses: equipmentPosesForEvidence(settlement, "flow") });
   assert.deepEqual(coordinator.getObstacleOutcomes(), [], "flow walls never emit legacy obstacle outcomes under the colliders ruleset");
   assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "the wall interval settles exactly once through a flow hazard outcome");
   assert.equal(coordinator.getJudgements().length, 0, "walls and bombs never produce synthetic note judgements");
@@ -587,13 +600,13 @@ function readyPlaying(coordinator, events, selected = variant()) {
     base.anchors.find((a) => a.anchor === "nose").x = 0.125;
     base.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput, equipmentPoses: equipmentPosesForEvidence(base, "flow") });
     // Enter: nose inside at timeline 750
     const inside = evidence("hc-in", 3800, []);
     inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const inInput = input(3800, inside); inInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inInput });
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inInput, equipmentPoses: equipmentPosesForEvidence(inside, "flow") });
     // sinceMs is the exact segment-clip entry point
     const enterHc = c.getSnapshot().hazardContact;
     assert.equal(enterHc.active, true, "enter: active");
@@ -604,7 +617,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     outside.anchors.find((a) => a.anchor === "nose").x = 0.125;
     outside.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const outInput = input(3900, outside); outInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3900, clock: clock(850, true), input: outInput });
+    c.advance({ timestampMs: 3900, clock: clock(850, true), input: outInput, equipmentPoses: equipmentPosesForEvidence(outside, "flow") });
     // releasedAtMs clamped to interval end (800) because exit is beyond the wall;
     // sinceMs is retained from the entry (L-B3) so the renderer can recompute the
     // release-moment pulse phase from (sinceMs, releasedAtMs, params).
@@ -626,13 +639,13 @@ function readyPlaying(coordinator, events, selected = variant()) {
     base.anchors.find((a) => a.anchor === "nose").x = 0.125;
     base.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput, equipmentPoses: equipmentPosesForEvidence(base, "flow") });
     // Enter A at 750
     const inA = evidence("hc-replace-in", 3800, []);
     inA.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inA.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const inAInput = input(3800, inA); inAInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inAInput });
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inAInput, equipmentPoses: equipmentPosesForEvidence(inA, "flow") });
     const enterHc = c.getSnapshot().hazardContact;
     assert.equal(enterHc.active, true, "enter A: active");
     assert.equal(enterHc.releasedAtMs, null, "enter A: releasedAtMs null");
@@ -642,7 +655,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     inB.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inB.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const inBInput = input(3900, inB); inBInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3900, clock: clock(780, true), input: inBInput });
+    c.advance({ timestampMs: 3900, clock: clock(780, true), input: inBInput, equipmentPoses: equipmentPosesForEvidence(inB, "flow") });
     const hc = c.getSnapshot().hazardContact;
     assert.equal(hc.active, true, "still active after replacement");
     assert.equal(hc.sinceMs, enterSinceMs, "sinceMs stays at original episode start across replacement");
@@ -652,7 +665,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     outB.anchors.find((a) => a.anchor === "nose").x = 0.125;
     outB.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const outBInput = input(4000, outB); outBInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 4000, clock: clock(820, true), input: outBInput });
+    c.advance({ timestampMs: 4000, clock: clock(820, true), input: outBInput, equipmentPoses: equipmentPosesForEvidence(outB, "flow") });
     assert.equal(c.getSnapshot().hazardContact.active, false, "exit B: inactive");
     assert.equal(c.getSnapshot().hazardContact.sinceMs, enterSinceMs, "exit B: sinceMs stays at the original episode start (retained across replacement + release)");
     assert.ok(c.getSnapshot().hazardContact.releasedAtMs !== null, "exit B: releasedAtMs set");
@@ -667,13 +680,13 @@ function readyPlaying(coordinator, events, selected = variant()) {
     base.anchors.find((a) => a.anchor === "nose").x = 0.125;
     base.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput, equipmentPoses: equipmentPosesForEvidence(base, "flow") });
     // Enter at 750
     const inside = evidence("hc-pause-in", 3800, []);
     inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const pauseInput = input(3800, inside); pauseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3800, clock: clock(750, true), input: pauseInput });
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: pauseInput, equipmentPoses: equipmentPosesForEvidence(inside, "flow") });
     assert.equal(c.getSnapshot().hazardContact.active, true, "active before pause");
     c.pause(3900);
     assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "pause clears hazardContact");
@@ -710,12 +723,12 @@ function readyPlaying(coordinator, events, selected = variant()) {
     base.anchors.find((a) => a.anchor === "nose").x = 0.125;
     base.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const baseInput = input(3100, base); baseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3100, clock: clock(150, true, 500), input: baseInput });
+    c.advance({ timestampMs: 3100, clock: clock(150, true, 500), input: baseInput, equipmentPoses: equipmentPosesForEvidence(base, "flow") });
     const inside = evidence("hc-end-in", 3200, []);
     inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const endInput = input(3200, inside); endInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3200, clock: clock(250, true, 500), input: endInput });
+    c.advance({ timestampMs: 3200, clock: clock(250, true, 500), input: endInput, equipmentPoses: equipmentPosesForEvidence(inside, "flow") });
     assert.equal(c.getSnapshot().hazardContact.active, true, "active during play before completion");
     c.stop(4000);
     assert.equal(c.getSnapshot().session.state, "completed");
@@ -727,31 +740,34 @@ function readyPlaying(coordinator, events, selected = variant()) {
     const c = createAeroGameplaySessionCoordinator({ sessionId: "hc-hostile" });
     const wall = canonicalFlowEvent("hc-hostile-wall", 700, { start: 1.4, end: 1.45, type: "obstacle", ...wallGeometry }, 725);
     readyPlaying(c, [wall], flow);
-    // No input evidence → stays inactive
-    c.advance({ timestampMs: 3800, clock: clock(700, true), input: input(3800, null) });
-    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "no evidence: hazardContact stays inactive");
+    // Current wrist evidence with an unavailable nose keeps the presentation state inactive.
+    const inactive = evidence("hc-hostile-inactive", 3800, []);
+    inactive.anchors.find((a) => a.anchor === "nose").confidence = 0.49;
+    c.advance({ timestampMs: 3800, clock: clock(700, true), input: productionInput(3800, inactive, { sourceIdentity: "src-1" }), equipmentPoses: equipmentPosesForEvidence(inactive, "flow") });
+    assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "unavailable nose evidence: hazardContact stays inactive");
     // Baseline outside at 700
     const base = evidence("hc-hostile-base", 3900, []);
     base.anchors.find((a) => a.anchor === "nose").x = 0.125;
     base.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const baseInput = input(3900, base); baseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3900, clock: clock(700, true), input: baseInput });
+    c.advance({ timestampMs: 3900, clock: clock(700, true), input: baseInput, equipmentPoses: equipmentPosesForEvidence(base, "flow") });
     assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "baseline outside: still inactive");
     // Enter at 712
     const inside = evidence("hc-hostile-in", 4000, []);
     inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const hostileInput = input(4000, inside); hostileInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 4000, clock: clock(712, true), input: hostileInput });
+    c.advance({ timestampMs: 4000, clock: clock(712, true), input: hostileInput, equipmentPoses: equipmentPosesForEvidence(inside, "flow") });
     const hostileEntry = c.getSnapshot().hazardContact;
     assert.equal(hostileEntry.active, true, "active after valid enter");
     assert.ok(typeof hostileEntry.sinceMs === "number" && Number.isFinite(hostileEntry.sinceMs) && hostileEntry.sinceMs >= 700 && hostileEntry.sinceMs <= 712, `hostile: finite entry sinceMs (${hostileEntry.sinceMs})`);
     // Stale evidence (>150ms gap) severs → inactive
-    const stale = evidence("hc-hostile-stale", 4200, []);
+    const stale = evidence("hc-hostile-stale", 4400, []);
     stale.anchors.find((a) => a.anchor === "nose").x = 0.4;
     stale.anchors.find((a) => a.anchor === "nose").y = 0.3;
-    const staleInput = input(4200, stale); staleInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 4400, clock: clock(720, true), input: staleInput });
+    stale.anchors.find((a) => a.anchor === "nose").measurementTimestampMs = 4200;
+    const staleInput = input(4400, stale); staleInput.sourceIdentity = "src-1";
+    c.advance({ timestampMs: 4400, clock: clock(720, true), input: staleInput, equipmentPoses: equipmentPosesForEvidence(stale, "flow") });
     assert.equal(c.getSnapshot().hazardContact.active, false, "stale evidence severs: hazardContact inactive");
     // L-B2/L-B3 (0.0.61): the severing path must publish the release boundary, not only
     // drop occupation; sinceMs is retained so the renderer's release-moment pulse phase
@@ -774,14 +790,14 @@ function readyPlaying(coordinator, events, selected = variant()) {
     base.anchors.find((a) => a.anchor === "nose").x = 0.125;
     base.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const baseInput = input(3700, base); baseInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput });
+    c.advance({ timestampMs: 3700, clock: clock(700, true), input: baseInput, equipmentPoses: equipmentPosesForEvidence(base, "flow") });
     assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: null, releasedAtMs: null }, "gap: idle before any contact");
     // Enter at 750
     const inside = evidence("hc-gap-in", 3800, []);
     inside.anchors.find((a) => a.anchor === "nose").x = 0.4;
     inside.anchors.find((a) => a.anchor === "nose").y = 0.3;
     const inInput = input(3800, inside); inInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inInput });
+    c.advance({ timestampMs: 3800, clock: clock(750, true), input: inInput, equipmentPoses: equipmentPosesForEvidence(inside, "flow") });
     const enterHc = c.getSnapshot().hazardContact;
     assert.equal(enterHc.active, true, "gap: active inside the wall");
     assert.ok(Number.isFinite(enterHc.sinceMs) && enterHc.sinceMs >= 700 && enterHc.sinceMs <= 750, `gap: sinceMs is the clipped entry (${enterHc.sinceMs})`);
@@ -794,7 +810,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     gap.anchors.find((a) => a.anchor === "nose").x = 0.125;
     gap.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const gapInput = input(4000, gap); gapInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 4000, clock: clock(950, true), input: gapInput });
+    c.advance({ timestampMs: 4000, clock: clock(950, true), input: gapInput, equipmentPoses: equipmentPosesForEvidence(gap, "flow") });
     const gapHc = c.getSnapshot().hazardContact;
     assert.equal(gapHc.active, false, "gap: occupied severed after the non-continuous sample gap");
     assert.equal(gapHc.sinceMs, gapEntrySinceMs, "gap: sinceMs retained from the episode entry after the severing gap");
@@ -805,7 +821,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
     after.anchors.find((a) => a.anchor === "nose").x = 0.125;
     after.anchors.find((a) => a.anchor === "nose").y = 0.5;
     const afterInput = input(4300, after); afterInput.sourceIdentity = "src-1";
-    c.advance({ timestampMs: 4300, clock: clock(1250, true), input: afterInput });
+    c.advance({ timestampMs: 4300, clock: clock(1250, true), input: afterInput, equipmentPoses: equipmentPosesForEvidence(after, "flow") });
     assert.deepEqual(c.getSnapshot().hazardContact, { active: false, sinceMs: gapEntrySinceMs, releasedAtMs: 950 }, "gap: finalize does not overwrite the published release tick or the retained entry sinceMs");
     const wallOutcomes = c.getHazardOutcomes().filter((outcome) => outcome.kind === "wall" && outcome.eventId === "hc-gap-wall");
     assert.equal(wallOutcomes.length, 1, "gap: the wall settles exactly once");
@@ -823,49 +839,51 @@ function readyPlaying(coordinator, events, selected = variant()) {
     readyPlaying(coordinator, [wall()], flow);
     const outsideBefore = setNose(evidence(`boundary-outside-${label}`, 3750, []), 0.125);
     outsideBefore.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
-    coordinator.advance({ timestampMs: 3750, clock: clock(640, true), input: input(3750, outsideBefore) });
-    const insideSample = setNose(evidence(`boundary-inside-${label}`, 3850, []), 0.4);
-    insideSample.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
-    coordinator.advance({ timestampMs: 3850, clock: clock(705, true), input: input(3850, insideSample) });
-    const holdInside = setNose(evidence(`boundary-hold-${label}`, 3950, []), 0.4);
-    holdInside.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
-    coordinator.advance({ timestampMs: 3950, clock: clock(760, true), input: input(3950, holdInside) });
+    coordinator.advance({ timestampMs: 3750, clock: clock(640, true), input: productionInput(3750, outsideBefore), equipmentPoses: equipmentPosesForEvidence(outsideBefore, "flow") });
+    const insideSample = setNose(evidence(`boundary-inside-${label}`, 3850, []), 0.125);
+    insideSample.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
+    coordinator.advance({ timestampMs: 3850, clock: clock(705, true), input: productionInput(3850, insideSample), equipmentPoses: equipmentPosesForEvidence(insideSample, "flow") });
+    const holdInside = setNose(evidence(`boundary-hold-${label}`, 3950, []), 0.125);
+    holdInside.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
+    coordinator.advance({ timestampMs: 3950, clock: clock(760, true), input: productionInput(3950, holdInside), equipmentPoses: equipmentPosesForEvidence(holdInside, "flow") });
     const first = setNose(evidence("boundary-before", 4000, []), 0.125);
-    coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, first) });
+    coordinator.advance({ timestampMs: 4000, clock: clock(680, true), input: productionInput(4000, first), equipmentPoses: equipmentPosesForEvidence(first, "flow") });
     insert(coordinator, first);
     const second = setNose(evidence("boundary-after", secondTimestampMs, []), 0.875);
     second.calibrationId = secondCalibrationId;
     for (const anchorEntry of second.anchors) anchorEntry.calibrationId = secondCalibrationId;
-    coordinator.advance({ timestampMs: secondTimestampMs, clock: clock(740, true), input: input(secondTimestampMs, second, { calibrationId: secondCalibrationId }) });
+    coordinator.advance({ timestampMs: secondTimestampMs, clock: clock(740, true), input: productionInput(secondTimestampMs, second, { calibrationId: secondCalibrationId }), equipmentPoses: equipmentPosesForEvidence(second, "flow") });
     assert.equal(coordinator.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, `${label} must settle the wall exactly once; severs prevent clipping but never duplicate or suppress a settled interval`);
     assert.equal(coordinator.getScorePartitions().length, 0, `${label} uncertainty is nonpenalizing`);
     assert.equal(coordinator.getJudgements().length, 0, `${label} cannot create note truth`);
   };
-  assertSevered("invalid-fresh", (coordinator) => { const invalid = setNose(evidence("boundary-invalid", 4010, []), 0.5); invalid.anchors.find((entry) => entry.anchor === "nose").confidence = 0.49; coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4010, invalid) }); });
-  assertSevered("invalid-duplicate", (coordinator) => { const invalid = setNose(evidence("boundary-before", 4000, []), 0.125); invalid.anchors.find((entry) => entry.anchor === "nose").confidence = 0.49; coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4000, invalid) }); });
-  assertSevered("conflicting-duplicate", (coordinator) => { const conflicting = setNose(evidence("boundary-before", 4000, []), 0.5); coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4000, conflicting) }); });
-  assertSevered("stale-duplicate", (coordinator, first) => coordinator.advance({ timestampMs: 4151, clock: clock(700, true), input: input(4000, first) }), 4160);
-  assertSevered("measurement-rollback", (coordinator) => coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: input(3990, setNose(evidence("boundary-rollback", 3990, []), 0.125)) }));
+  assertSevered("invalid-fresh", (coordinator) => { const invalid = setNose(evidence("boundary-invalid", 4010, []), 0.5); invalid.anchors.find((entry) => entry.anchor === "nose").confidence = 0.49; coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: productionInput(4010, invalid), equipmentPoses: equipmentPosesForEvidence(invalid, "flow") }); });
+  assertSevered("invalid-duplicate", (coordinator) => { const invalid = setNose(evidence("boundary-before", 4000, []), 0.125); invalid.anchors.find((entry) => entry.anchor === "nose").confidence = 0.49; coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: productionInput(4000, invalid), equipmentPoses: equipmentPosesForEvidence(invalid, "flow") }); });
+  assertSevered("conflicting-duplicate", (coordinator) => { const conflicting = setNose(evidence("boundary-before", 4000, []), 0.5); coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: productionInput(4000, conflicting), equipmentPoses: equipmentPosesForEvidence(conflicting, "flow") }); });
+  assertSevered("stale-nose", (coordinator) => { const stale = setNose(evidence("boundary-stale-nose", 4151, []), 0.125); stale.anchors.find((entry) => entry.anchor === "nose").measurementTimestampMs = 4000; coordinator.advance({ timestampMs: 4151, clock: clock(700, true), input: productionInput(4151, stale), equipmentPoses: equipmentPosesForEvidence(stale, "flow") }); }, 4160);
+  assertSevered("measurement-rollback", (coordinator) => { const rollback = setNose(evidence("boundary-rollback", 3990, []), 0.125); coordinator.advance({ timestampMs: 4010, clock: clock(690, true), input: productionInput(3990, rollback), equipmentPoses: equipmentPosesForEvidence(rollback, "flow") }); });
   assertSevered("gap-over-150ms", () => {}, 4160);
-  assertSevered("calibration-change", (coordinator) => { const changed = setNose(evidence("boundary-calibration", 4010, []), 0.125); changed.calibrationId = "cal-2"; for (const anchorEntry of changed.anchors) anchorEntry.calibrationId = "cal-2"; coordinator.advance({ timestampMs: 4010, clock: clock(730, true), input: input(4010, changed, { calibrationId: "cal-2" }) }); }, 4060, "cal-2");
+  assertSevered("calibration-change", (coordinator) => { const changed = setNose(evidence("boundary-calibration", 4010, []), 0.125); changed.calibrationId = "cal-2"; for (const anchorEntry of changed.anchors) anchorEntry.calibrationId = "cal-2"; coordinator.advance({ timestampMs: 4010, clock: clock(730, true), input: productionInput(4010, changed, { calibrationId: "cal-2" }), equipmentPoses: equipmentPosesForEvidence(changed, "flow") }); }, 4060, "cal-2");
 
   const lost = createAeroGameplaySessionCoordinator({ sessionId: "boundary-tracking-loss" });
   readyPlaying(lost, [wall()], flow);
   const lostOutside = setNose(evidence("lost-outside", 3750, []), 0.125);
   lostOutside.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
-  lost.advance({ timestampMs: 3750, clock: clock(640, true), input: input(3750, lostOutside) });
-  const lostInside = setNose(evidence("lost-inside", 3850, []), 0.4);
-  lostInside.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
-  lost.advance({ timestampMs: 3850, clock: clock(705, true), input: input(3850, lostInside) });
-  const lostHold = setNose(evidence("lost-hold", 3950, []), 0.4);
-  lostHold.anchors.find((entry) => entry.anchor === "nose").y = 0.3;
-  lost.advance({ timestampMs: 3950, clock: clock(760, true), input: input(3950, lostHold) });
-  lost.advance({ timestampMs: 4000, clock: clock(680, true), input: input(4000, setNose(evidence("lost-before", 4000, []), 0.125)) });
-  lost.advance({ timestampMs: 4010, clock: clock(690, true), input: input(4010, null, { paused: true, fresh: true }) });
+  lost.advance({ timestampMs: 3750, clock: clock(640, true), input: productionInput(3750, lostOutside), equipmentPoses: equipmentPosesForEvidence(lostOutside, "flow") });
+  const lostInside = setNose(evidence("lost-inside", 3850, []), 0.125);
+  lostInside.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
+  lost.advance({ timestampMs: 3850, clock: clock(705, true), input: productionInput(3850, lostInside), equipmentPoses: equipmentPosesForEvidence(lostInside, "flow") });
+  const lostHold = setNose(evidence("lost-hold", 3950, []), 0.125);
+  lostHold.anchors.find((entry) => entry.anchor === "nose").y = 0.5;
+  lost.advance({ timestampMs: 3950, clock: clock(760, true), input: productionInput(3950, lostHold), equipmentPoses: equipmentPosesForEvidence(lostHold, "flow") });
+  const lostBefore = setNose(evidence("lost-before", 4000, []), 0.125);
+  lost.advance({ timestampMs: 4000, clock: clock(680, true), input: productionInput(4000, lostBefore), equipmentPoses: equipmentPosesForEvidence(lostBefore, "flow") });
+  const lostFrame = evidence("lost-frame", 4010, []);
+  lost.advance({ timestampMs: 4010, clock: clock(690, true), input: productionInput(4010, lostFrame, { paused: true, fresh: true }), equipmentPoses: equipmentPosesForEvidence(lostFrame, "flow") });
   const recovered = setNose(evidence("lost-after", 7030, []), 0.875); recovered.calibrationId = "cal-2"; for (const anchorEntry of recovered.anchors) anchorEntry.calibrationId = "cal-2";
   lost.advance({ timestampMs: 4020, clock: clock(680, false), input: input(4020, null, { calibrationId: "cal-2" }) });
   lost.advance({ timestampMs: 5020, clock: clock(680, false) }); lost.advance({ timestampMs: 6020, clock: clock(680, false) }); lost.advance({ timestampMs: 7020, clock: clock(680, false) });
-  lost.advance({ timestampMs: 7030, clock: clock(740, true), input: input(7030, recovered, { calibrationId: "cal-2" }) });
+  lost.advance({ timestampMs: 7030, clock: clock(740, true), input: productionInput(7030, recovered, { calibrationId: "cal-2" }), equipmentPoses: equipmentPosesForEvidence(recovered, "flow") });
   assert.equal(lost.getHazardOutcomes().filter((outcome) => outcome.kind === "wall").length, 1, "tracking loss still settles the wall interval exactly once");
   assert.equal(lost.getScorePartitions().length, 0);
 }
@@ -1380,9 +1398,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
     return c;
   };
   /** Wall time == song time, measured frame (fresh, age 0). */
-  const sendMeasured = (c, songMs, left, right, frameId) => c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: fInput(fEvidence(frameId, songMs, left, right)) });
+  const sendMeasured = (c, songMs, left, right, frameId) => { const sample = fEvidence(frameId, songMs, left, right); return c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: fInput(sample), equipmentPoses: equipmentPosesForEvidence(sample, c.getSnapshot().selectedVariant.mode) }); };
   /** Frozen re-publication of the held frame (heldTs < songMs, tick = episode ordinal). */
-  const sendFrozen = (c, songMs, heldTs, left, right, tick) => c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: fInput(fEvidence("held-1", heldTs, left, right, tick)) });
+  const sendFrozen = (c, songMs, heldTs, left, right, tick) => { const sample = fEvidence("held-1", heldTs, left, right, tick); return c.advance({ timestampMs: songMs, clock: clock(songMs, true), input: fInput(sample), equipmentPoses: equipmentPosesForEvidence(sample, c.getSnapshot().selectedVariant.mode) }); };
   const straightRight = (eventId) => event(eventId, 1000, "straight_right", { spatialTarget: { targetCell: 6, acceptedSubcells: [], sourceCell: -1 } });
   /** Far-future decoy note so a chart's last judged event never completes the session. */
   const future = (eventId) => event(eventId, 5000, "straight_right", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } });
@@ -1467,11 +1485,11 @@ function readyPlaying(coordinator, events, selected = variant()) {
     const c = readyB("hostile", [straightRight("fr-hostile"), future("fr-hostile-future")], bcolVariant);
     sendMeasured(c, 600, [0, 0], [2, 1], "fr-hostile-f1");
     const badTick = fEvidence("held-1", 600, [0, 0], [2, 1], 0);
-    assert.throws(() => c.advance({ timestampMs: 850, clock: clock(850, true), input: fInput(badTick) }), /public contract/u, "frozenTickId must be a positive integer");
+    assert.throws(() => c.advance({ timestampMs: 850, clock: clock(850, true), input: fInput(badTick), equipmentPoses: equipmentPosesForEvidence(badTick, "boxing") }), /public contract/u, "frozenTickId must be a positive integer");
     const staleCal = fEvidence("held-1", 600, [0, 0], [2, 1], 1);
     staleCal.anchors.find((a) => a.anchor === "right_wrist").calibrationId = "cal-other";
-    c.advance({ timestampMs: 850, clock: clock(850, true), input: fInput(staleCal) });
-    assert.equal(c.getJudgements().length, 0, "frozen frame with a calibration-mismatched anchor yields no sample");
+    assert.throws(() => c.advance({ timestampMs: 850, clock: clock(850, true), input: fInput(staleCal), equipmentPoses: equipmentPosesForEvidence(staleCal, "boxing") }), /current valid measured wrist/u, "a calibration-mismatched wrist cannot authorize an equipment pose");
+    assert.equal(c.getJudgements().length, 0, "rejected frozen frame leaves judgement truth unchanged");
     assert.equal(c.getSnapshot().session.state, "playing");
     sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
     assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result]), [["fr-hostile", "hit"]], "the next clean frozen tick still scores");
