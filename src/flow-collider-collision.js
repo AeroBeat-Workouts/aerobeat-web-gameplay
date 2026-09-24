@@ -74,7 +74,10 @@ const DIRECTIONS = Object.freeze({
  * allowed to age past it by design — and the held position is scored at the
  * current song position because it represents the athlete's current pose.
  * Every other validation (exact anchor name, valid + confidence, finite
- * normalized coordinates, calibration/timestamp equality) stays identical.
+ * coordinates, calibration/timestamp equality) stays identical. Wrist
+ * coordinates may be finite and off-grid because exact resolved equipment
+ * geometry decides collider contact; nose coordinates remain grid-bounded for
+ * body/obstacle semantics.
  *
  * @param {DataRecord} evidence @param {DataRecord} input @param {WristName | "nose"} anchorName @param {number} timelinePositionMs @param {number} frameTimestampMs
  * @returns {ColliderSample | null}
@@ -85,7 +88,9 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
   const anchor = evidence.anchors.find((entry) => entry && typeof entry === "object" && /** @type {DataRecord} */ (entry).anchor === anchorName);
   if (!anchor || typeof anchor !== "object") return null;
   const point = /** @type {DataRecord} */ (anchor);
-  if (point.valid !== true || typeof point.confidence !== "number" || point.confidence < 0.5 || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1 || point.calibrationId !== evidence.calibrationId || point.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
+  const finitePosition = typeof point.x === "number" && typeof point.y === "number" && Number.isFinite(point.x) && Number.isFinite(point.y);
+  const gridBoundedPosition = anchorName !== "nose" || finitePosition && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
+  if (point.valid !== true || typeof point.confidence !== "number" || point.confidence < 0.5 || !finitePosition || !gridBoundedPosition || point.calibrationId !== evidence.calibrationId || point.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
   const ageMs = frameTimestampMs - evidence.measurementTimestampMs;
   if (!Number.isFinite(ageMs) || ageMs < 0) return null;
   // Frozen frames hold the last measured position, so the held timestamp

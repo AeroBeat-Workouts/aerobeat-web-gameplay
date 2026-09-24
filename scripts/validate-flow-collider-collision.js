@@ -53,7 +53,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 }
 
 
-// Measured-only extraction rejects stale/future/invalid/bounds/calibration and source omissions.
+// Measured-only extraction rejects stale/future/invalid/non-finite/calibration and source omissions.
 {
   const sample=evidence("frame",1000,[1,1]); const wrapped={sourceIdentity:"camera-a"};
   assert.ok(measuredColliderSample(sample,wrapped,"left_wrist",1000,1000));
@@ -63,7 +63,8 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.equal(measuredColliderSample({...sample,provenance:"predicted"},wrapped,"left_wrist",1000,1000),null);
   assert.equal(measuredColliderSample(sample,{},"left_wrist",1000,1000),null);
   const bad=evidence("bad",1000,[1,1]);bad.anchors.find(a=>a.anchor==="left_wrist").confidence=.49;assert.equal(measuredColliderSample(bad,wrapped,"left_wrist",1000,1000),null);
-  const out=evidence("out",1000,[1,1]);out.anchors.find(a=>a.anchor==="left_wrist").x=1.01;assert.equal(measuredColliderSample(out,wrapped,"left_wrist",1000,1000),null);
+  const offGrid=evidence("off-grid",1000,[1,1]);const offGridWrist=offGrid.anchors.find(a=>a.anchor==="left_wrist");offGridWrist.x=1.01;offGridWrist.cell=null;offGridWrist.subcell=null;assert.ok(measuredColliderSample(offGrid,wrapped,"left_wrist",1000,1000));
+  const nonFinite=evidence("non-finite",1000,[1,1]);nonFinite.anchors.find(a=>a.anchor==="left_wrist").x=Number.POSITIVE_INFINITY;assert.equal(measuredColliderSample(nonFinite,wrapped,"left_wrist",1000,1000),null);
 }
 
 // Eight-way authored vectors, exact tolerance, minimum travel, and identity continuity.
