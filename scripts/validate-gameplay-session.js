@@ -232,7 +232,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.pause(100, "menu");
   coordinator.synchronizePausedClock({ timestampMs: 101, clock: clock(1000, false) });
   coordinator.resume(102);
-  assert.throws(() => coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, evidence("stale-epoch", 1000, [])), interaction: visualTestInteraction(1, 1000) }), /epochs must increase/u);
+  const staleEpoch = evidence("stale-epoch", 1000, []);
+  assert.throws(() => coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, staleEpoch), equipmentPoses: equipmentPosesForEvidence(staleEpoch, "flow"), interaction: visualTestInteraction(1, 1000) }), /epochs must increase/u);
   const seed = setAnchorPosition(evidence("life-seed", 1000, []), "left_wrist", 0, 1);
   coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, seed), equipmentPoses: equipmentPosesForEvidence(seed, "flow"), interaction: visualTestInteraction(2, 1000) });
   const duplicate = setAnchorPosition(evidence("life-seed", 1100, []), "left_wrist", 1, 1);
@@ -1286,6 +1287,33 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 0);
   coordinator.synchronizePausedClock({ timestampMs: 3500, clock: clock(2000, false) });
   assert.equal(coordinator.getSnapshot().session.timelinePositionMs, 2000);
+}
+
+// T7 clean active scrub clears score and skipped truth while retaining calibration.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "active-play-seek" });
+  readyPlaying(coordinator, [event("scored", 1000, "hook_left"), event("skipped", 2000, "hook_left"), event("future", 4000, "hook_left")]);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, evidence("scored-frame", 4000, ["hook_left"])) });
+  assert.deepEqual(coordinator.getSnapshot().judgedEventIds, ["scored"]);
+  const calibration = coordinator.getSnapshot().session.calibrationId;
+  const beforeSeek = coordinator.getSnapshot();
+  assert.throws(() => coordinator.seekTo(-1), /non-negative/u);
+  assert.equal(coordinator.getSnapshot(), beforeSeek, "invalid seek is transactional");
+  coordinator.seekTo(2500);
+  const scrubbed = coordinator.getSnapshot();
+  assert.equal(scrubbed.session.state, "playing");
+  assert.equal(scrubbed.session.timelinePositionMs, 2500);
+  assert.equal(scrubbed.session.calibrationId, calibration);
+  assert.equal(scrubbed.safety.ready, true);
+  assert.equal(scrubbed.countdown.state, "inactive");
+  assert.deepEqual(scrubbed.judgedEventIds, []);
+  assert.deepEqual(scrubbed.judgements, []);
+  assert.deepEqual(scrubbed.scorePartitions, []);
+  coordinator.advance({ timestampMs: 5000, clock: clock(3000, true), input: input(5000, null) });
+  assert.deepEqual(coordinator.getSnapshot().judgedEventIds, [], "skipped events never become phantom misses");
+  coordinator.seekTo(500);
+  coordinator.advance({ timestampMs: 6000, clock: clock(1000, true), input: input(6000, evidence("replay-frame", 6000, ["hook_left"])) });
+  assert.deepEqual(coordinator.getSnapshot().judgedEventIds, ["scored"], "backward scrub permits new scoring of replayed events");
 }
 
 // Failed configuration and frame validation are transactional and publish no hidden state.

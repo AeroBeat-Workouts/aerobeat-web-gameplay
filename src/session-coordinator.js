@@ -176,6 +176,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let visualTestInteraction = /** @type {VisualTestInteraction | null} */ (null);
   let lastVisualTestInteractionEpoch = /** @type {number | null} */ (null);
   const visualTestExcludedEventIds = new Set();
+  let seekExcludedThroughMs = -1;
   let equipmentConfigIdentityValue = /** @type {string | null} */ (null);
   let frameEquipmentPoses = /** @type {ReadonlyMap<string, AeroResolvedEquipmentPose>} */ (new Map());
   let snapshot = makeSnapshot(null);
@@ -187,6 +188,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     resume,
     advance,
     synchronizePausedClock,
+    seekTo,
     applyFutureContent,
     setActiveEventIds,
     setLeaseSnapshot,
@@ -455,17 +457,55 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function synchronizePausedClock(frame) {
     assertConfigured();
     if (state !== "paused_manual" && state !== "completed") throw gameplayError("session_state_invalid", "Paused clock synchronization requires a manual pause or completed session");
-    const enteredCompleted = state === "completed";
     const safeFrame = requireDataRecordFields(frame, "paused_clock_frame_invalid", ["timestampMs", "clock"]);
     const nextTimestampMs = requireNonNegativeNumber(safeFrame.timestampMs, "timestamp_invalid");
     if (nextTimestampMs < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back");
     const clock = normalizeClock(safeFrame.clock);
     if (clock.playing) throw gameplayError("paused_clock_not_frozen", "Paused clock synchronization requires a stopped audio clock");
     timestampMs = nextTimestampMs;
-    timelinePositionMs = clock.positionMs;
-    if (enteredCompleted) { state = "paused_manual"; pauseReason = "explicit_seek"; }
+    return seekTo(clock.positionMs);
+  }
+
+  /**
+   * Explicit clean scrub, including during active play. Past events are excluded
+   * rather than retroactively judged; every accumulated run outcome is discarded.
+   * The caller must seek the audio clock to the same position before the next frame.
+   *
+   * @param {number} targetMs
+   */
+  function seekTo(targetMs) {
+    assertConfigured();
+    const positionMs = requireNonNegativeNumber(targetMs, "seek_position_invalid");
+    if (positionMs > Number.MAX_SAFE_INTEGER) throw gameplayError("seek_position_invalid", "Seek position exceeds the safe gameplay range");
+    const previousState = state;
+    const previousReason = pauseReason;
+    const previousCalibrationId = calibrationId;
+    const previousInvalidatedCalibrationId = invalidatedCalibrationId;
+    const previousSafetyReady = safetyReady;
+    const previousFreshCalibrationRequired = freshCalibrationRequired;
+    const previousVisualTestEpoch = lastVisualTestInteractionEpoch;
+    const previousEquipmentConfigIdentity = equipmentConfigIdentityValue;
+    generation += 1;
+    clearRunTruth();
+    timelinePositionMs = positionMs;
+    countdownTimelinePositionMs = positionMs;
+    seekExcludedThroughMs = positionMs;
+    lastVisualTestInteractionEpoch = previousVisualTestEpoch;
+    equipmentConfigIdentityValue = previousEquipmentConfigIdentity;
+    calibrationId = previousCalibrationId;
+    invalidatedCalibrationId = previousInvalidatedCalibrationId;
+    safetyReady = previousSafetyReady;
+    freshCalibrationRequired = previousFreshCalibrationRequired;
+    countdown = inactiveCountdown(timestampMs);
+    countdownReason = null;
+    // A seek from an active run remains active; a completed run becomes a
+    // manually paused seek, as it does through synchronizePausedClock.
+    state = previousState === "completed" || previousState === "countdown" ? "paused_manual" : previousState;
+    pauseReason = previousState === "completed" || previousState === "countdown" ? "explicit_seek" : previousReason;
     clearContinuousCollisionHistory();
-    deactivateVisualTestInteraction();
+    // A frame at/after the destination must not synthesize misses for skipped
+    // events. Backward seeks rebuild this boundary from the new position.
+    for (const event of events) if (Number(event.centerTimestampMs) <= positionMs) visualTestExcludedEventIds.add(String(event.eventId));
     publish(null);
     return snapshot;
   }
@@ -638,7 +678,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function productionJudgementEnabled() { return sessionPurpose === "play" || (sessionPurpose === "visual_test" && visualTestInteraction !== null); }
   /** @param {DataRecord} event */
-  function productionEventEligible(event) { return sessionPurpose === "play" || (visualTestInteraction !== null && !visualTestExcludedEventIds.has(String(event.eventId)) && Number(event.centerTimestampMs) > visualTestInteraction.activationTimelineMs); }
+  function productionEventEligible(event) { return !visualTestExcludedEventIds.has(String(event.eventId)) && (sessionPurpose === "play" || (visualTestInteraction !== null && Number(event.centerTimestampMs) > visualTestInteraction.activationTimelineMs)); }
 
   /**
    * @param {unknown} value
@@ -1456,7 +1496,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function judgeLiveEvents() {
     for (const event of events) {
       const eventId = String(event.eventId);
-      if (judgedIds.has(eventId)) continue;
+      if (!productionEventEligible(event) || judgedIds.has(eventId)) continue;
       const center = Number(event.centerTimestampMs);
       const eventVariant = variantForEvent(event);
       if (eventVariant.mode === "flow" && event.type !== "note") {
@@ -1481,6 +1521,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       for (const eventValue of shadowEvents) {
         if (!isPlainRecord(eventValue)) continue;
         const event = /** @type {DataRecord} */ (eventValue);
+        if (Number(event.centerTimestampMs) <= seekExcludedThroughMs) continue;
         const key = `${String(shadow.variantId)}:${String(event.eventId)}:${latestEvidence.measuredSourceFrameId}`;
         if (shadowConsumed.has(key)) continue;
         const center = Number(event.centerTimestampMs);
@@ -1605,7 +1646,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
