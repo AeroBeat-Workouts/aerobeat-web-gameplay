@@ -682,6 +682,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const pose = /** @type {AeroResolvedEquipmentPose} */ (poses.get(role));
       if (pose.mode !== expectedMode) throw gameplayError("equipment_poses_invalid", "Equipment pose mode must match the selected collider variant");
       const sample = measuredColliderSample(evidenceRecord, inputRecord, role, clock.positionMs, nextTimestampMs);
+      // Calibrated pre-hysteresis loss is represented by the input's held
+      // frozen evidence. It must pass the SAME pose/sample identity and anchor
+      // checks as latched F4; never accept an arbitrary cached pose on loss.
       if (sample === null) throw gameplayError("equipment_poses_invalid", "Equipment pose requires a current valid measured wrist");
       if (Math.abs(pose.anchor.x - sample.sx) > equipmentPoseAnchorEpsilonWu || Math.abs(pose.anchor.y - sample.sy) > equipmentPoseAnchorEpsilonWu || Math.abs(pose.anchor.z) > equipmentPoseAnchorEpsilonWu) throw gameplayError("equipment_poses_invalid", "Equipment pose anchor must match its measured wrist in judge space");
       identities.add(pose.configIdentity.value);
