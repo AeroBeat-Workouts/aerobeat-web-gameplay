@@ -87,11 +87,15 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
 // --- Settings contract -------------------------------------------------------
 {
   const exact = createBoxingColliderSettings(settings());
-  assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderDepthBackward", "colliderDepthForward", "colliderRadius", "colliderScale", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
+  assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderDepthBackward", "colliderDepthForward", "colliderRadius", "colliderScale", "colliderVisible", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
   // 0.0.53: the authored-direction toggle is enforced by default (both flow and
   // boxing mirrors); directionToleranceDegrees stays at 45.
   assert.equal(defaultBoxingColliderSettings.enforceAuthoredDirection, true, "boxing default enforces authored direction");
   assert.equal(defaultBoxingColliderSettings.directionToleranceDegrees, 45, "default tolerance stays 45");
+  assert.equal(exact.colliderVisible,false,"boxing visibility defaults off");
+  assert.equal(createBoxingColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field boxing volume accepted");
+  assert.throws(()=>createBoxingColliderSettings(settings({colliderVisible:0})),/visibility/u);
+  assert.equal(boxingColliderSettingsIdentity(settings({colliderVisible:true})),boxingColliderSettingsIdentity(settings({colliderVisible:false})),"visibility does not partition scoring");
   assert.equal(boxingColliderSettingsIdentity(settings()), boxingColliderSettingsIdentity(createBoxingColliderSettings()));
   assert.notEqual(boxingColliderSettingsIdentity(settings({ topRowReachWU: 0.5 })), boxingColliderSettingsIdentity(settings()));
   assert.notEqual(boxingColliderSettingsIdentity(settings({ bottomRowReachWU: 0.75 })), boxingColliderSettingsIdentity(settings()));

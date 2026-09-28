@@ -308,7 +308,10 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 // Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
 {
   assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},colliderDepthForward:{minimum:1,maximum:4},colliderDepthBackward:{minimum:1,maximum:4}});
-  assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
+  assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(publicDefaultFlowColliderSettings.colliderVisible,false);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
+  assert.equal(createFlowColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field volume accepted");
+  assert.throws(()=>createFlowColliderSettings(settings({colliderVisible:null})),/visibility/u);
+  assert.equal(flowColliderSettingsIdentity(settings({colliderVisible:true})),flowColliderSettingsIdentity(settings({colliderVisible:false})),"wireframe visibility never changes scoring identity");
   assert.throws(()=>createFlowColliderSettings({...publicDefaultFlowColliderSettings,extra:true}),/every exact field/u);const accessor={...publicDefaultFlowColliderSettings};Object.defineProperty(accessor,"colliderRadius",{enumerable:true,get(){throw new Error("must not execute");}});assert.throws(()=>createFlowColliderSettings(accessor),/accessors/u);
 }
 

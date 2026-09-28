@@ -51,7 +51,8 @@ export const boxingColliderReachBounds = aeroRowReachBounds;
 export const boxingGuardCountModes = aeroGuardCountModes;
 
 const LEGACY_SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs", "topRowReachWU", "bottomRowReachWU", "guardCountMode"]);
-const SETTING_KEYS = Object.freeze([...LEGACY_SETTING_KEYS, "colliderScale", "colliderDepthForward", "colliderDepthBackward"]);
+const PRE_VISIBILITY_SETTING_KEYS = Object.freeze([...LEGACY_SETTING_KEYS, "colliderScale", "colliderDepthForward", "colliderDepthBackward"]);
+const SETTING_KEYS = Object.freeze([...PRE_VISIBILITY_SETTING_KEYS, "colliderVisible"]);
 
 /** Exact default settings: Flow Colliders profile + reach 0.25/0.25 + collision guards. */
 export const defaultBoxingColliderSettings = Object.freeze({
@@ -73,7 +74,7 @@ export const defaultBoxingColliderSettings = Object.freeze({
 export function createBoxingColliderSettings(value = defaultBoxingColliderSettings) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new TypeError("Boxing Collider settings must be a plain record");
   const keys = Reflect.ownKeys(value);
-  const exactKeys = keys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : SETTING_KEYS;
+  const exactKeys = keys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : keys.length === PRE_VISIBILITY_SETTING_KEYS.length ? PRE_VISIBILITY_SETTING_KEYS : SETTING_KEYS;
   if (keys.length !== exactKeys.length || keys.some((key) => typeof key !== "string" || !exactKeys.includes(key))) throw new TypeError("Boxing Collider settings require every exact field and no extras");
   /** @type {Record<string, unknown>} */ const record = {};
   for (const key of exactKeys) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Boxing Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
@@ -82,10 +83,12 @@ export function createBoxingColliderSettings(value = defaultBoxingColliderSettin
   const colliderRadius = boundedSetting(record.colliderRadius, flowColliderSettingsBounds.colliderRadius, "collider radius");
   const directionToleranceDegrees = boundedSetting(record.directionToleranceDegrees, flowColliderSettingsBounds.directionToleranceDegrees, "direction tolerance");
   const timingWindowMs = boundedSetting(record.timingWindowMs, flowColliderSettingsBounds.timingWindowMs, "timing window");
+  if (record.colliderVisible !== undefined && typeof record.colliderVisible !== "boolean") throw new TypeError("Boxing Collider visibility must be boolean");
+  const colliderVisible = record.colliderVisible ?? false;
   const colliderScale = boundedSetting(record.colliderScale ?? 1, flowColliderSettingsBounds.colliderScale, "collider scale");
   const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, flowColliderSettingsBounds.colliderDepthForward, "forward depth");
   const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, flowColliderSettingsBounds.colliderDepthBackward, "backward depth");
-  return Object.freeze({ schema: "aerobeat/flow_collider_settings", version: 1, algorithm: "swept_athlete_plane_v1", colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, topRowReachWU: setup.topRowReachWU, bottomRowReachWU: setup.bottomRowReachWU, guardCountMode: setup.guardCountMode, colliderScale, colliderDepthForward, colliderDepthBackward });
+  return Object.freeze({ schema: "aerobeat/flow_collider_settings", version: 1, algorithm: "swept_athlete_plane_v1", colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, topRowReachWU: setup.topRowReachWU, bottomRowReachWU: setup.bottomRowReachWU, guardCountMode: setup.guardCountMode, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward });
 }
 
 /** @param {unknown} value @param {Readonly<{minimum:number,maximum:number}>} bounds @param {string} label */
@@ -112,7 +115,7 @@ export function normalizeReachAndGuardMode(value) {
  * @param {unknown} settings
  * @returns {string}
  */
-export function boxingColliderSettingsIdentity(settings) { const exact = createBoxingColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; return `sha256:${new Sha256().update(JSON.stringify((legacy ? LEGACY_SETTING_KEYS : SETTING_KEYS).map((key) => exact[key]))).digestHex()}`; }
+export function boxingColliderSettingsIdentity(settings) { const exact = createBoxingColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; return `sha256:${new Sha256().update(JSON.stringify((legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS).map((key) => exact[key]))).digestHex()}`; }
 
 /**
  * Judge-plane target center for a Boxing Collider placement. The X is the
