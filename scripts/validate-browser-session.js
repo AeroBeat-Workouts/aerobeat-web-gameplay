@@ -115,7 +115,7 @@ try {
   await page.goto(`http://127.0.0.1:${address.port}/`);
   await page.waitForFunction(() => "result" in window);
   const result = await page.evaluate(() => window.result);
-  assert.deepEqual(result, { states: ["idle", "calibrating", "countdown", "playing", "paused_tracking", "paused_tracking", "countdown"], recoverySequence: [3, 2, 2, 1, "playing"], frozen: true, serializable: "browser", countdownReason: "tracking_resume", malformedFlowRejected: true, malformedFlowTransactional: true, ignoredFlowResults: [["browser-arc", "ignored"], ["browser-burst", "ignored"]], ignoredBombHazard: true, visualProfile: "aero.visual.compact", scoringProfile: "aero.scoring.prototype-wide", regenerationRequired: true, bundleHash: "sha256:81df0fa01910c08bac660c036be23a1ac1bf3f0e8f62ad3355b9e8362b20ae37" });
+  assert.deepEqual(result, { states: ["idle", "calibrating", "countdown", "playing", "paused_tracking", "paused_tracking", "countdown"], recoverySequence: [3, 2, 2, 1, "playing"], frozen: true, serializable: "browser", countdownReason: "tracking_resume", malformedFlowRejected: true, malformedFlowTransactional: true, ignoredFlowResults: [["browser-arc", "ignored"], ["browser-burst", "ignored"]], ignoredBombHazard: true, visualProfile: "aero.visual.compact", scoringProfile: "aero.scoring.prototype-wide", regenerationRequired: true, bundleHash: "sha256:2e21f3ea0037f25b6e4c24032402a7663a098bc6f4cfc5e0ca34409b2e83d4ff" });
   assert.deepEqual(consoleNoise, []);
 } finally {
   await browser.close();

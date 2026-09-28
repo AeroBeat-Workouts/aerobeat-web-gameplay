@@ -14,6 +14,8 @@ assert.equal(registry.getActive("live_visual").profile.profileId, "aero.visual.d
 assert.equal(registry.getActive("between_run_ruleset").settings.hitPoints, 1);
 assert.equal(registry.getSnapshot().regenerationRequired, false);
 assert.equal(registry.getActive("converter_regeneration").identity.regenerationRequired, false);
+assert.deepEqual(registry.getActive("converter_regeneration").settings, { guardRelocationRadius: 1, reachAllowanceSubcells: 0, uppercutOppositeLane: false, anyOppositeLane: true, guardSpacing: 1 });
+assert.deepEqual(registry.list().find((profile) => profile.profileId === "aero.converter.prototype-reach")?.settings, { guardRelocationRadius: 2, reachAllowanceSubcells: 1, uppercutOppositeLane: false, anyOppositeLane: true, guardSpacing: 1 });
 
 let listenerCalls = 0;
 const unsubscribe = registry.subscribe(() => { listenerCalls += 1; });
@@ -27,9 +29,9 @@ assert.equal(registry.getActive("between_run_ruleset").settings.hitPoints, 1.25)
 registry.select("aero.converter.prototype-reach");
 assert.equal(registry.getSnapshot().regenerationRequired, true);
 assert.equal(registry.getActive("converter_regeneration").identity.regenerationRequired, true);
-assert.equal(registry.getSnapshot().pendingConverterHash, "e37f8b527ed5ce86738ce22007fc963f83bccd737893fb4728d3b83eaa044eea");
+assert.equal(registry.getSnapshot().pendingConverterHash, "152e8d9a5c208605dcd36521d4befbc8c7868cdaac66ed4d552025feb560c56c");
 assert.throws(() => registry.select("aero.converter.prototype-reach", { regeneratedPackageProfileHash: "0".repeat(64) }), (error) => error?.code === "profile_provenance_hash_mismatch");
-registry.select("aero.converter.prototype-reach", { regeneratedPackageProfileHash: "e37f8b527ed5ce86738ce22007fc963f83bccd737893fb4728d3b83eaa044eea" });
+registry.select("aero.converter.prototype-reach", { regeneratedPackageProfileHash: registry.getSnapshot().pendingConverterHash ?? "" });
 assert.equal(registry.getSnapshot().regenerationRequired, false);
 assert.equal(registry.getActive("converter_regeneration").identity.regenerationRequired, false);
 assert.equal(registry.getSnapshot().pendingConverterHash, null);
@@ -111,6 +113,51 @@ rejectAtomically(classSettings);
 const byteSettings = structuredClone(fixture);
 byteSettings.profiles[0].settings = new Uint8Array([1]);
 rejectAtomically(byteSettings);
+
+// Optional converter fields are strictly typed, while older profiles can omit them.
+function converterDefaults(settings) {
+  return fixture.profiles.map((profile) => ({
+    profileId: profile.profileId,
+    profileVersion: profile.profileVersion,
+    class: profile.class,
+    label: profile.label,
+    ...(profile.class === "converter_regeneration" ? { settings: { guardRelocationRadius: profile.settings.guardRelocationRadius, reachAllowanceSubcells: profile.settings.reachAllowanceSubcells, ...settings } } : { settings: profile.settings })
+  }));
+}
+const compatible = createAeroPrototypeProfileRegistry({ defaults: converterDefaults({}) });
+assert.deepEqual(compatible.getActive("converter_regeneration").settings, { guardRelocationRadius: 1, reachAllowanceSubcells: 0 });
+compatible.importProfiles(compatible.exportProfiles());
+assert.deepEqual(compatible.getActive("converter_regeneration").settings, { guardRelocationRadius: 1, reachAllowanceSubcells: 0 });
+compatible.destroy();
+for (const settings of [
+  { uppercutOppositeLane: true }, { uppercutOppositeLane: false },
+  { anyOppositeLane: true }, { anyOppositeLane: false },
+  { guardSpacing: 0 }, { guardSpacing: 2 },
+  { uppercutOppositeLane: true, anyOppositeLane: false, guardSpacing: 2 }
+]) {
+  const candidate = createAeroPrototypeProfileRegistry({ defaults: converterDefaults(settings) });
+  assert.deepEqual(candidate.getActive("converter_regeneration").settings, { guardRelocationRadius: 1, reachAllowanceSubcells: 0, ...settings });
+  candidate.importProfiles(candidate.exportProfiles());
+  candidate.destroy();
+}
+for (const settings of [
+  { uppercutOppositeLane: 1 }, { uppercutOppositeLane: "false" }, { uppercutOppositeLane: null },
+  { anyOppositeLane: 0 }, { anyOppositeLane: "true" }, { anyOppositeLane: null },
+  { guardSpacing: -1 }, { guardSpacing: 3 }, { guardSpacing: 0.5 }, { guardSpacing: "1" },
+  { uppercutOppositeLane: undefined }, { anyOppositeLane: undefined }, { guardSpacing: undefined },
+  { unexpected: true }, { guardRelocationRadius: undefined }
+]) {
+  assert.throws(() => createAeroPrototypeProfileRegistry({ defaults: converterDefaults(settings) }),
+    (error) => ["profile_setting_invalid", "profile_settings_invalid", "profile_defaults_invalid"].includes(error?.code));
+}
+for (const settings of [{ uppercutOppositeLane: 1 }, { anyOppositeLane: "true" }, { guardSpacing: 3 }, { unexpected: true }]) {
+  const invalid = structuredClone(fixture);
+  Object.assign(invalid.profiles[0].settings, settings);
+  rejectAtomically(rehashBundle(invalid));
+}
+const missingRequired = structuredClone(fixture);
+delete missingRequired.profiles[0].settings.guardRelocationRadius;
+rejectAtomically(rehashBundle(missingRequired), (error) => error?.code === "profile_settings_invalid");
 
 registry.reset();
 assert.deepEqual(registry.exportProfiles(), fixture);

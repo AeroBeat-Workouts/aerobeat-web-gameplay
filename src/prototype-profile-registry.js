@@ -17,8 +17,8 @@ const DEFAULT_DEFINITIONS = Object.freeze([
   Object.freeze({ profileId: "aero.visual.compact", profileVersion: "1.0.0", class: "live_visual", label: "Compact Visual (Experimental)", settings: Object.freeze({ motionIntensity: 0.8, roleScale: 0.86 }) }),
   Object.freeze({ profileId: "aero.scoring.locked", profileVersion: "1.0.0", class: "between_run_ruleset", label: "Locked Scoring (Experimental)", settings: Object.freeze({ comboBonusPerHit: 0, hitPoints: 1, missPenalty: 0 }) }),
   Object.freeze({ profileId: "aero.scoring.prototype-wide", profileVersion: "1.0.0", class: "between_run_ruleset", label: "Prototype Wide Scoring (Experimental)", settings: Object.freeze({ comboBonusPerHit: 0.05, hitPoints: 1.25, missPenalty: 0 }) }),
-  Object.freeze({ profileId: "aero.converter.canonical", profileVersion: "1.0.0", class: "converter_regeneration", label: "Canonical Converter (Experimental)", settings: Object.freeze({ guardRelocationRadius: 1, reachAllowanceSubcells: 0 }) }),
-  Object.freeze({ profileId: "aero.converter.prototype-reach", profileVersion: "1.0.0", class: "converter_regeneration", label: "Prototype Reach Converter (Experimental)", settings: Object.freeze({ guardRelocationRadius: 2, reachAllowanceSubcells: 1 }) })
+  Object.freeze({ profileId: "aero.converter.canonical", profileVersion: "1.0.0", class: "converter_regeneration", label: "Canonical Converter (Experimental)", settings: Object.freeze({ guardRelocationRadius: 1, reachAllowanceSubcells: 0, uppercutOppositeLane: false, anyOppositeLane: true, guardSpacing: 1 }) }),
+  Object.freeze({ profileId: "aero.converter.prototype-reach", profileVersion: "1.0.0", class: "converter_regeneration", label: "Prototype Reach Converter (Experimental)", settings: Object.freeze({ guardRelocationRadius: 2, reachAllowanceSubcells: 1, uppercutOppositeLane: false, anyOppositeLane: true, guardSpacing: 1 }) })
 ]);
 
 /**
@@ -201,10 +201,28 @@ function requireProfileClass(value) { if (!PROFILE_CLASSES.includes(/** @type {n
 function normalizeSettings(profileClass, value) {
   if (profileClass === "live_visual") { const record = exactSettings(value, ["motionIntensity", "roleScale"]); return Object.freeze({ motionIntensity: boundedNumber(record.motionIntensity, 0, 2), roleScale: boundedNumber(record.roleScale, 0.5, 1.5) }); }
   if (profileClass === "between_run_ruleset") { const record = exactSettings(value, ["comboBonusPerHit", "hitPoints", "missPenalty"]); return Object.freeze({ comboBonusPerHit: boundedNumber(record.comboBonusPerHit, 0, 10), hitPoints: boundedNumber(record.hitPoints, 0, 100), missPenalty: boundedNumber(record.missPenalty, 0, 100) }); }
-  const record = exactSettings(value, ["guardRelocationRadius", "reachAllowanceSubcells"]); return Object.freeze({ guardRelocationRadius: boundedInteger(record.guardRelocationRadius, 0, 8), reachAllowanceSubcells: boundedInteger(record.reachAllowanceSubcells, 0, 8) });
+  const record = exactSettings(value, ["guardRelocationRadius", "reachAllowanceSubcells"], ["uppercutOppositeLane", "anyOppositeLane", "guardSpacing"]);
+  return Object.freeze({
+    guardRelocationRadius: boundedInteger(record.guardRelocationRadius, 0, 8),
+    reachAllowanceSubcells: boundedInteger(record.reachAllowanceSubcells, 0, 8),
+    ...(Object.hasOwn(record, "uppercutOppositeLane") ? { uppercutOppositeLane: boundedBoolean(record.uppercutOppositeLane) } : {}),
+    ...(Object.hasOwn(record, "anyOppositeLane") ? { anyOppositeLane: boundedBoolean(record.anyOppositeLane) } : {}),
+    ...(Object.hasOwn(record, "guardSpacing") ? { guardSpacing: boundedInteger(record.guardSpacing, 0, 2) } : {})
+  });
 }
-/** @param {unknown} value @param {readonly string[]} keys */
-function exactSettings(value, keys) { const record = requireDataRecordFields(value, "profile_settings_invalid", keys); if (Reflect.ownKeys(record).length !== keys.length) throw gameplayError("profile_settings_invalid", "Profile settings must contain every exact field"); return record; }
+/**
+ * Require all base settings, admit only declared optional fields, and reject unknown keys.
+ * @param {unknown} value
+ * @param {readonly string[]} requiredKeys
+ * @param {readonly string[]} [optionalKeys]
+ */
+function exactSettings(value, requiredKeys, optionalKeys = []) {
+  const record = requireDataRecordFields(value, "profile_settings_invalid", [...requiredKeys, ...optionalKeys]);
+  if (requiredKeys.some((key) => !Object.hasOwn(record, key))) throw gameplayError("profile_settings_invalid", "Profile settings must contain every required field");
+  return record;
+}
+/** @param {unknown} value */
+function boundedBoolean(value) { if (typeof value !== "boolean") throw gameplayError("profile_setting_invalid", "Profile boolean setting is invalid"); return value; }
 /** @param {unknown} value @param {number} minimum @param {number} maximum */
 function boundedNumber(value, minimum, maximum) { if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) throw gameplayError("profile_setting_invalid", "Profile numeric setting is outside its bounds"); return Object.is(value, -0) ? 0 : value; }
 /** @param {unknown} value @param {number} minimum @param {number} maximum */
