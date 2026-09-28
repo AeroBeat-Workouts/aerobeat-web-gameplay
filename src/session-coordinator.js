@@ -189,6 +189,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     advance,
     synchronizePausedClock,
     seekTo,
+    seekAndPlay,
     applyFutureContent,
     setActiveEventIds,
     setLeaseSnapshot,
@@ -506,6 +507,36 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // A frame at/after the destination must not synthesize misses for skipped
     // events. Backward seeks rebuild this boundary from the new position.
     for (const event of events) if (Number(event.centerTimestampMs) <= positionMs) visualTestExcludedEventIds.add(String(event.eventId));
+    publish(null);
+    return snapshot;
+  }
+
+  /**
+   * Seek to a position and resume play immediately — no countdown, no
+   * calibration re-run. Preserves the existing calibration + safety state
+   * from the prior run. Used for rapid iteration / repeat playtesting after
+   * a song completes.
+   *
+   * @param {number} targetMs
+   */
+  function seekAndPlay(targetMs) {
+    seekTo(targetMs);
+    if (state !== "paused_manual") return snapshot;
+    if (!hasRequiredLease()) {
+      state = "paused_manual";
+      pauseReason = "media_lease_unavailable";
+      publish(null);
+      return snapshot;
+    }
+    if (!safetyReady || freshCalibrationRequired || calibrationId === null) {
+      state = freshCalibrationRequired ? "paused_tracking" : "calibrating";
+      pauseReason = "calibration_required";
+      publish(null);
+      return snapshot;
+    }
+    state = "playing";
+    pauseReason = null;
+    clearContinuousCollisionHistory();
     publish(null);
     return snapshot;
   }
