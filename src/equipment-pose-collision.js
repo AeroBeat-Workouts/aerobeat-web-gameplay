@@ -1,6 +1,6 @@
 // @ts-check
 
-import { resolveGloveObb, resolveSaberCapsule } from "@aerobeat/web-contracts";
+import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveObb, resolveSaberCapsule } from "@aerobeat/web-contracts";
 import { flowNoteCellBox } from "./flow-collider-collision.js";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
@@ -13,10 +13,9 @@ export const equipmentPoseAnchorEpsilonWu = 1e-6;
 
 /**
  * A beat approaches from future -Z, crosses the equipment judge plane at its
- * center timestamp, then exits through the past +Z face. The offset in ms is
- * proportional to world Z; timingWindowMs is the default half-depth in these
- * units (180ms on either side with depth multipliers 1). Inclusive faces remain
- * hittable; only a strict crossing of the back face commits a miss.
+ * center timestamp, then exits through the past +Z face. Contracts owns the
+ * world-Z volume: offset milliseconds multiplied by 0.006 world units/ms.
+ * Inclusive faces remain hittable; only strict back-face crossing misses.
  * @param {number} centerTimestampMs
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
@@ -24,8 +23,8 @@ export const equipmentPoseAnchorEpsilonWu = 1e-6;
  * @param {number} [depthBackward]
  */
 export function beatInsideColliderDepth(centerTimestampMs, songTimeMs, timingWindowMs, depthForward = 1, depthBackward = 1) {
-  const beatZ = songTimeMs - centerTimestampMs;
-  return beatZ >= -timingWindowMs * depthForward && beatZ <= timingWindowMs * depthBackward;
+  const bounds = resolveColliderBounds({ mode: "flow", center: { x: 0, y: 0, z: 0 }, halfWidth: 1, halfHeight: 1, settings: { ...colliderSettingsDefaults.flow, colliderDepthForward: depthForward, colliderDepthBackward: depthBackward }, timingWindowMs, speedWuPerMs: 0.006 });
+  return isPointInsideColliderBounds({ x: 0, y: 0, z: (songTimeMs - centerTimestampMs) * 0.006 }, bounds);
 }
 
 /** @param {number} centerTimestampMs @param {number} timingWindowMs @param {number} [depthBackward] */
@@ -43,14 +42,14 @@ export function colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, d
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
  */
 export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, timingWindowMs, volume = {}) {
-  if (!beatInsideColliderDepth(Number(event.centerTimestampMs), songTimeMs, timingWindowMs, volume.depthForward, volume.depthBackward)) return false;
-  const capsule = resolveSaberCapsule(pose);
   const box = flowNoteCellBox(event);
-  const scale = volume.scale ?? 1;
+  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
+  if (!isPointInsideColliderBounds({ x: box.centerX, y: box.centerY, z: (songTimeMs - Number(event.centerTimestampMs)) * 0.006 }, bounds)) return false;
+  const capsule = resolveSaberCapsule(pose);
   return segmentContactsRectangle(
     Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
     Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
-    Object.freeze({ minX: box.centerX - box.halfX * scale, maxX: box.centerX + box.halfX * scale, minY: box.centerY - box.halfY * scale, maxY: box.centerY + box.halfY * scale }),
+    bounds,
     capsule.radius
   );
 }
@@ -65,7 +64,8 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
  */
 export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, timingWindowMs, volume = {}) {
-  if (!beatInsideColliderDepth(target.centerTimestampMs, songTimeMs, timingWindowMs, volume.depthForward, volume.depthBackward)) return false;
+  const bounds = resolveTargetColliderBounds("boxing", target, { x: 0.5, y: 0.5 }, timingWindowMs, volume);
+  if (!isPointInsideColliderBounds({ x: target.x, y: target.y, z: (songTimeMs - target.centerTimestampMs) * 0.006 }, bounds)) return false;
   const obb = resolveGloveObb(pose);
   const corners = [];
   for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
@@ -75,14 +75,26 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
     }));
   }
   const hull = convexHull(corners);
-  const half = 0.5 * (volume.scale ?? 1);
   const rectangle = Object.freeze([
-    Object.freeze({ x: target.x - half, y: target.y - half }),
-    Object.freeze({ x: target.x + half, y: target.y - half }),
-    Object.freeze({ x: target.x + half, y: target.y + half }),
-    Object.freeze({ x: target.x - half, y: target.y + half })
+    Object.freeze({ x: bounds.minX, y: bounds.minY }),
+    Object.freeze({ x: bounds.maxX, y: bounds.minY }),
+    Object.freeze({ x: bounds.maxX, y: bounds.maxY }),
+    Object.freeze({ x: bounds.minX, y: bounds.maxY })
   ]);
   return convexPolygonsContact(hull, rectangle);
+}
+
+/**
+ * Use the single contracts volume authority for both modes. Visibility is
+ * presentation-only: toggling the wireframe cannot alter scoring.
+ * @param {"flow"|"boxing"} mode
+ * @param {Point2} center
+ * @param {Point2} halfSize
+ * @param {number} timingWindowMs
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ */
+function resolveTargetColliderBounds(mode, center, halfSize, timingWindowMs, volume) {
+  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: volume.scale ?? 1, colliderDepthForward: volume.depthForward ?? 1, colliderDepthBackward: volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
 }
 
 /** @param {Point2} start @param {Point2} end @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */

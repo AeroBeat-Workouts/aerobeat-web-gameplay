@@ -15,8 +15,8 @@ export const flowColliderSettingsBounds = Object.freeze({
   directionToleranceDegrees: Object.freeze({ minimum: 0, maximum: 90 }),
   timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 }),
   colliderScale: Object.freeze({ minimum: 0.25, maximum: 4 }),
-  colliderDepthForward: Object.freeze({ minimum: 0.25, maximum: 4 }),
-  colliderDepthBackward: Object.freeze({ minimum: 0.25, maximum: 4 })
+  colliderDepthForward: Object.freeze({ minimum: 1, maximum: 4 }),
+  colliderDepthBackward: Object.freeze({ minimum: 1, maximum: 4 })
 });
 export const defaultFlowColliderSettings = Object.freeze({
   schema: "aerobeat/flow_collider_settings",
