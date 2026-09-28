@@ -13,7 +13,10 @@ export const maximumColliderSampleGapMs = 150;
 export const flowColliderSettingsBounds = Object.freeze({
   colliderRadius: Object.freeze({ minimum: 0, maximum: 0.5 }),
   directionToleranceDegrees: Object.freeze({ minimum: 0, maximum: 90 }),
-  timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 })
+  timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 }),
+  colliderScale: Object.freeze({ minimum: 0.25, maximum: 4 }),
+  colliderDepthForward: Object.freeze({ minimum: 0.25, maximum: 4 }),
+  colliderDepthBackward: Object.freeze({ minimum: 0.25, maximum: 4 })
 });
 export const defaultFlowColliderSettings = Object.freeze({
   schema: "aerobeat/flow_collider_settings",
@@ -22,10 +25,14 @@ export const defaultFlowColliderSettings = Object.freeze({
   colliderRadius: 0.12,
   enforceAuthoredDirection: true,
   directionToleranceDegrees: 45,
-  timingWindowMs: 180
+  timingWindowMs: 180,
+  colliderScale: 1,
+  colliderDepthForward: 1,
+  colliderDepthBackward: 1
 });
 
-const SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs"]);
+const LEGACY_SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs"]);
+const SETTING_KEYS = Object.freeze([...LEGACY_SETTING_KEYS, "colliderScale", "colliderDepthForward", "colliderDepthBackward"]);
 
 /**
  * Construct one exact immutable settings record. Omission selects defaults; supplied
@@ -35,21 +42,25 @@ const SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderR
 export function createFlowColliderSettings(value = defaultFlowColliderSettings) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new TypeError("Flow Collider settings must be a plain record");
   const keys = Reflect.ownKeys(value);
-  if (keys.length !== SETTING_KEYS.length || keys.some((key) => typeof key !== "string" || !SETTING_KEYS.includes(key))) throw new TypeError("Flow Collider settings require every exact field and no extras");
+  const exactKeys = keys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : SETTING_KEYS;
+  if (keys.length !== exactKeys.length || keys.some((key) => typeof key !== "string" || !exactKeys.includes(key))) throw new TypeError("Flow Collider settings require every exact field and no extras");
   /** @type {Record<string, unknown>} */ const record = {};
-  for (const key of SETTING_KEYS) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Flow Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
+  for (const key of exactKeys) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Flow Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
   if (record.schema !== "aerobeat/flow_collider_settings" || record.version !== 1 || record.algorithm !== "swept_athlete_plane_v1" || typeof record.enforceAuthoredDirection !== "boolean") throw new TypeError("Flow Collider settings require the exact v1 algorithm contract");
   const colliderRadius = boundedSetting(record.colliderRadius, flowColliderSettingsBounds.colliderRadius, "collider radius");
   const directionToleranceDegrees = boundedSetting(record.directionToleranceDegrees, flowColliderSettingsBounds.directionToleranceDegrees, "direction tolerance");
   const timingWindowMs = boundedSetting(record.timingWindowMs, flowColliderSettingsBounds.timingWindowMs, "timing window");
-  return Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs });
+  const colliderScale = boundedSetting(record.colliderScale ?? 1, flowColliderSettingsBounds.colliderScale, "collider scale");
+  const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, flowColliderSettingsBounds.colliderDepthForward, "forward depth");
+  const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, flowColliderSettingsBounds.colliderDepthBackward, "backward depth");
+  return Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderScale, colliderDepthForward, colliderDepthBackward });
 }
 
 /** @param {unknown} value @param {Readonly<{minimum:number,maximum:number}>} bounds @param {string} label */
 function boundedSetting(value, bounds, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < bounds.minimum || value > bounds.maximum) throw new RangeError(`Flow Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
 
 /** @param {unknown} settings */
-export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); return `sha256:${new Sha256().update(JSON.stringify(SETTING_KEYS.map((key) => exact[key]))).digestHex()}`; }
+export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; return `sha256:${new Sha256().update(JSON.stringify((legacy ? LEGACY_SETTING_KEYS : SETTING_KEYS).map((key) => exact[key]))).digestHex()}`; }
 
 /**
  * Minimum judge-space displacement over the smoothing window before the

@@ -12,21 +12,45 @@ export const equipmentPoseContractsCommit = "51c2b42805f5aa008386dc8bc779cfad854
 export const equipmentPoseAnchorEpsilonWu = 1e-6;
 
 /**
+ * A beat approaches from future -Z, crosses the equipment judge plane at its
+ * center timestamp, then exits through the past +Z face. The offset in ms is
+ * proportional to world Z; timingWindowMs is the default half-depth in these
+ * units (180ms on either side with depth multipliers 1). Inclusive faces remain
+ * hittable; only a strict crossing of the back face commits a miss.
+ * @param {number} centerTimestampMs
+ * @param {number} songTimeMs
+ * @param {number} timingWindowMs
+ * @param {number} [depthForward]
+ * @param {number} [depthBackward]
+ */
+export function beatInsideColliderDepth(centerTimestampMs, songTimeMs, timingWindowMs, depthForward = 1, depthBackward = 1) {
+  const beatZ = songTimeMs - centerTimestampMs;
+  return beatZ >= -timingWindowMs * depthForward && beatZ <= timingWindowMs * depthBackward;
+}
+
+/** @param {number} centerTimestampMs @param {number} timingWindowMs @param {number} [depthBackward] */
+export function colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, depthBackward = 1) {
+  return centerTimestampMs + timingWindowMs * depthBackward;
+}
+
+/**
  * Test a contract-resolved 3D saber capsule after exact projection into judge XY.
  * Local-axis roll leaves the projection unchanged; out-of-plane tilt shortens it.
  * @param {DataRecord} event
  * @param {unknown} pose
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
  */
-export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, timingWindowMs) {
-  if (!insideTimingWindow(event, songTimeMs, timingWindowMs)) return false;
+export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, timingWindowMs, volume = {}) {
+  if (!beatInsideColliderDepth(Number(event.centerTimestampMs), songTimeMs, timingWindowMs, volume.depthForward, volume.depthBackward)) return false;
   const capsule = resolveSaberCapsule(pose);
   const box = flowNoteCellBox(event);
+  const scale = volume.scale ?? 1;
   return segmentContactsRectangle(
     Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
     Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
-    Object.freeze({ minX: box.centerX - box.halfX, maxX: box.centerX + box.halfX, minY: box.centerY - box.halfY, maxY: box.centerY + box.halfY }),
+    Object.freeze({ minX: box.centerX - box.halfX * scale, maxX: box.centerX + box.halfX * scale, minY: box.centerY - box.halfY * scale, maxY: box.centerY + box.halfY * scale }),
     capsule.radius
   );
 }
@@ -38,9 +62,10 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
  * @param {unknown} pose
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
  */
-export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, timingWindowMs) {
-  if (songTimeMs < target.centerTimestampMs - timingWindowMs || songTimeMs > target.centerTimestampMs + timingWindowMs) return false;
+export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, timingWindowMs, volume = {}) {
+  if (!beatInsideColliderDepth(target.centerTimestampMs, songTimeMs, timingWindowMs, volume.depthForward, volume.depthBackward)) return false;
   const obb = resolveGloveObb(pose);
   const corners = [];
   for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
@@ -50,19 +75,14 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
     }));
   }
   const hull = convexHull(corners);
+  const half = 0.5 * (volume.scale ?? 1);
   const rectangle = Object.freeze([
-    Object.freeze({ x: target.x - 0.5, y: target.y - 0.5 }),
-    Object.freeze({ x: target.x + 0.5, y: target.y - 0.5 }),
-    Object.freeze({ x: target.x + 0.5, y: target.y + 0.5 }),
-    Object.freeze({ x: target.x - 0.5, y: target.y + 0.5 })
+    Object.freeze({ x: target.x - half, y: target.y - half }),
+    Object.freeze({ x: target.x + half, y: target.y - half }),
+    Object.freeze({ x: target.x + half, y: target.y + half }),
+    Object.freeze({ x: target.x - half, y: target.y + half })
   ]);
   return convexPolygonsContact(hull, rectangle);
-}
-
-/** @param {DataRecord} event @param {number} songTimeMs @param {number} timingWindowMs */
-function insideTimingWindow(event, songTimeMs, timingWindowMs) {
-  const center = Number(event.centerTimestampMs);
-  return songTimeMs >= center - timingWindowMs && songTimeMs <= center + timingWindowMs;
 }
 
 /** @param {Point2} start @param {Point2} end @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */

@@ -60,10 +60,29 @@ function send(c, songMs, left, right, nose, frameId, options = {}) {
 }
 const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]);
 
+// Punches may hit through either depth face; an off-target punch misses only
+// after the +Z back face, and the two multipliers remain independent.
+{
+  const event = beat("depth-punch", 1000, "straight_left", { placement: 5 });
+  const early = ready([event], settings({ colliderDepthForward: 2 }));
+  send(early, 640, [1, 1], [3, 1], [3, 2]);
+  assert.deepEqual(early.getJudgements().map(j => j.result), ["hit"], "forward -Z face admits early punch");
+  const late = ready([event], settings({ colliderDepthBackward: 2 }));
+  send(late, 1360, [1, 1], [3, 1], [3, 2]);
+  assert.deepEqual(late.getJudgements().map(j => j.result), ["hit"], "backward +Z face admits late punch");
+  for (const [depth, boundary] of [[1, 1180], [2, 1360]]) {
+    const missed = ready([event], settings({ colliderDepthBackward: depth }));
+    send(missed, boundary, [3, 1], [3, 1], [3, 2]);
+    assert.equal(missed.getJudgements().length, 0, "inclusive back face remains pending");
+    send(missed, boundary + .001, [3, 1], [3, 1], [3, 2]);
+    assert.deepEqual(missed.getJudgements().map(j => j.result), ["miss"], "past back face commits miss");
+  }
+}
+
 // --- Settings contract -------------------------------------------------------
 {
   const exact = createBoxingColliderSettings(settings());
-  assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderRadius", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
+  assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderDepthBackward", "colliderDepthForward", "colliderRadius", "colliderScale", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
   // 0.0.53: the authored-direction toggle is enforced by default (both flow and
   // boxing mirrors); directionToleranceDegrees stays at 45.
   assert.equal(defaultBoxingColliderSettings.enforceAuthoredDirection, true, "boxing default enforces authored direction");

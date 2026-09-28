@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { equipmentEulerDegreesToQuaternion } from "@aerobeat/web-contracts";
-import { equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
+import { beatInsideColliderDepth, colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
 const HASH = "c".repeat(64);
 const identity = { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: HASH };
@@ -47,6 +47,30 @@ assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.2, y: 1.1, z: 0 
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.9, y: 1.9, z: 0 }, { orientation: orientation(0, 0, 45) })), false, "rotated-hull corner misses even though its enclosing AABB overlaps the target");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 820), true, "Boxing early timing boundary is inclusive");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180.001), false, "Boxing outside timing boundary misses");
+
+// Future beats arrive from -Z, cross zero at the center, then exit through +Z.
+// Independent multipliers extend only their corresponding face; default 1 keeps
+// approximately the prior 180ms either-side window without a separate bad area.
+for (const [mode, contact, target] of [
+  ["Flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent],
+  ["Boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]
+]) {
+  const equipment = pose("left_wrist", mode.toLowerCase(), { x: 1, y: 1, z: 0 });
+  assert.equal(contact(target, equipment, 819, 180), false, `${mode}: beyond front face cannot hit`);
+  assert.equal(contact(target, equipment, 820, 180), true, `${mode}: inclusive front face hits`);
+  assert.equal(contact(target, equipment, 1180, 180), true, `${mode}: inclusive back face hits`);
+  assert.equal(contact(target, equipment, 1180.001, 180), false, `${mode}: behind back face cannot hit`);
+  assert.equal(contact(target, equipment, 640, 180, { depthForward: 2 }), true, `${mode}: depth+ reaches future -Z`);
+  assert.equal(contact(target, equipment, 1181, 180, { depthForward: 2 }), false, `${mode}: depth+ cannot extend past +Z`);
+  assert.equal(contact(target, equipment, 640, 180, { depthBackward: 2 }), false, `${mode}: depth- cannot extend future -Z`);
+  assert.equal(contact(target, equipment, 1360, 180, { depthBackward: 2 }), true, `${mode}: depth- extends past +Z`);
+  assert.equal(contact(target, equipment, 1360.001, 180, { depthBackward: 2 }), false, `${mode}: beyond extended back face misses`);
+  const distant = pose("left_wrist", mode.toLowerCase(), { x: mode === "Flow" ? 1.8 : 1.9, y: 1, z: 0 });
+  assert.equal(contact(target, distant, 1000, 180), false, `${mode}: default XY target outside`);
+  assert.equal(contact(target, distant, 1000, 180, { scale: 2 }), true, `${mode}: scale expands XY contact`);
+}
+assert.equal(beatInsideColliderDepth(1000, 640, 180, 2, 1), true, "negative Z is future and forward depth extends it");
+assert.equal(colliderBackFaceTimestampMs(1000, 180, 2), 1360, "back face uses only the backward multiplier");
 
 const implementation = await readFile(new URL("../src/equipment-pose-collision.js", import.meta.url), "utf8");
 assert.doesNotMatch(implementation, /\.glb|\.gltf|mesh|modelBounds/iu, "collision math is GLB/model independent");

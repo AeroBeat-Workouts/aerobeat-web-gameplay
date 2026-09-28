@@ -17,7 +17,7 @@ import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometr
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
-import { equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -1201,7 +1201,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       // The contract-resolved transformed 3D capsule is the sole Flow hit volume.
       // Projection into judge XY naturally preserves local-axis roll and shortens
       // under out-of-plane tilt; no renderer/GLB bounds or fixed fallback apply.
-      if (!resolvedSaberCapsuleContactsFlowTarget(event, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(eventSettings.timingWindowMs))) continue;
+      if (!resolvedSaberCapsuleContactsFlowTarget(event, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(eventSettings.timingWindowMs), colliderVolumeSettings(eventSettings))) continue;
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
       candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
@@ -1244,17 +1244,20 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return Object.freeze(kept);
   }
 
+  /** @param {DataRecord} settings */
+  function colliderVolumeSettings(settings) { return { scale: Number(settings.colliderScale), depthForward: Number(settings.colliderDepthForward), depthBackward: Number(settings.colliderDepthBackward) }; }
+
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
   function evaluateColliderBombs(left, right, priorLeft, priorRight, evaluateLeft, evaluateRight) {
     for (const bomb of events.filter((event) => productionEventEligible(event) && event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
-      const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = Number(bomb.centerTimestampMs) + windowMs;
+      const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs * Number(settings.colliderDepthForward); const end = colliderBackFaceTimestampMs(Number(bomb.centerTimestampMs), windowMs, Number(settings.colliderDepthBackward));
       let tracker = bombStates.get(eventId) ?? { leftCoverage: Object.freeze([]), rightCoverage: Object.freeze([]), contactTimelinePositionMs: null, consequenceApplied: false };
       const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
       if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
       if (rightContinuous && priorRight && right) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
       // Bombs use the same exact resolved capsule as notes; either role owns contact.
-      const leftContact = !evaluateLeft || left === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs) ? left.songTimeMs : null;
-      const rightContact = !evaluateRight || right === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs) ? right.songTimeMs : null;
+      const leftContact = !evaluateLeft || left === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs, colliderVolumeSettings(settings)) ? left.songTimeMs : null;
+      const rightContact = !evaluateRight || right === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs, colliderVolumeSettings(settings)) ? right.songTimeMs : null;
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };
@@ -1269,12 +1272,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!variant || variant.rulesetId !== FLOW_COLLIDER_RULESET) return;
     for (const event of events) {
       if (!productionEventEligible(event)) continue;
-      const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const late = Number(event.centerTimestampMs) + Number(settings.timingWindowMs);
+      const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), Number(settings.colliderDepthBackward));
       if (event.type === "note" && !judgedIds.has(eventId) && timelinePositionMs > late) recordJudgementAt(event, "miss", colliderMissDiagnostics(event), null, false, null);
       else if ((event.type === "arc" || event.type === "burst") && !judgedIds.has(eventId) && timelinePositionMs >= Number(event.centerTimestampMs)) recordJudgement(event, "ignored", Object.freeze([]), null, false);
       else if (event.type === "bomb" && timelinePositionMs > late && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === eventId)) {
         const tracker = bombStates.get(eventId) ?? { leftCoverage: [], rightCoverage: [], contactTimelinePositionMs: null, consequenceApplied: false };
-        const result = coversInterval(tracker.leftCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs), late) && coversInterval(tracker.rightCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs), late) ? "avoided" : "unevaluated_tracking";
+        const result = coversInterval(tracker.leftCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs) * Number(settings.colliderDepthForward), late) && coversInterval(tracker.rightCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs) * Number(settings.colliderDepthForward), late) ? "avoided" : "unevaluated_tracking";
         hazardOutcomes.push(Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "bomb", result, committedTimelinePositionMs: timelinePositionMs, consequenceApplied: false })); hazardOutcomesDirty = true;
         bombStates.delete(eventId);
       }
@@ -1366,7 +1369,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
         // The exact contract-resolved 3D glove OBB is projected to its XY convex
         // hull and SAT-tested against the target; no enclosing AABB fallback.
-        if (!resolvedGloveObbContactsBoxingTarget(target, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(boxingColliderSettings.timingWindowMs))) continue;
+        if (!resolvedGloveObbContactsBoxingTarget(target, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(boxingColliderSettings.timingWindowMs), colliderVolumeSettings(boxingColliderSettings))) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
         candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
       } else if (action === "guard" || action === "crossed_guard") {
@@ -1377,8 +1380,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(rightCell, reach) });
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
         // Guard poses use each role's exact resolved glove hull.
-        const leftContact = left !== null && !seedLeftOnly && resolvedGloveObbContactsBoxingTarget(leftTarget, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs);
-        const rightContact = right !== null && !seedRightOnly && resolvedGloveObbContactsBoxingTarget(rightTarget, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs);
+        const leftContact = left !== null && !seedLeftOnly && resolvedGloveObbContactsBoxingTarget(leftTarget, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs, colliderVolumeSettings(boxingColliderSettings));
+        const rightContact = right !== null && !seedRightOnly && resolvedGloveObbContactsBoxingTarget(rightTarget, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs, colliderVolumeSettings(boxingColliderSettings));
         if (!leftContact || !rightContact) continue;
         guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(left?.songTimeMs ?? 0, right?.songTimeMs ?? 0), leftContact: true, rightContact: true });
       }
@@ -1437,7 +1440,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (judgedIds.has(eventId)) continue;
       const settings = boxingColliderSettingsForEvent(event);
       const action = expectedAction(event);
-      const late = Number(event.centerTimestampMs) + Number(settings.timingWindowMs);
+      const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), Number(settings.colliderDepthBackward));
       if ((action === "guard" || action === "crossed_guard") && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
         if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);

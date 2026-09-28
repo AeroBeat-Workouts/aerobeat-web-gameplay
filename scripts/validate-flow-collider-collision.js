@@ -307,7 +307,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 
 // Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
 {
-  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300}});
+  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},colliderDepthForward:{minimum:.25,maximum:4},colliderDepthBackward:{minimum:.25,maximum:4}});
   assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
   assert.throws(()=>createFlowColliderSettings({...publicDefaultFlowColliderSettings,extra:true}),/every exact field/u);const accessor={...publicDefaultFlowColliderSettings};Object.defineProperty(accessor,"colliderRadius",{enumerable:true,get(){throw new Error("must not execute");}});assert.throws(()=>createFlowColliderSettings(accessor),/accessors/u);
 }
@@ -317,6 +317,25 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const c=createAeroGameplaySessionCoordinator({sessionId:"bounds"});for(const bad of [settings({colliderRadius:-.001}),settings({colliderRadius:.501}),settings({directionToleranceDegrees:91}),settings({timingWindowMs:49}),settings({timingWindowMs:301}),{...settings(),extra:true}])assert.throws(()=>c.configureContent(config([],bad)),/(?:Flow Collider|unknown or symbolic fields)/u);
   assert.doesNotThrow(() => c.configureContent({ ...config([]), selectedVariant: { ...variant(), ranked: true } }), "the sole Flow ruleset is now the ranked authored variant and no longer requires unranked local-only truth");
   const grid=createAeroGameplaySessionCoordinator({sessionId:"grid"});const gridEvent={...beat("grid-note",1000,"note",{hand:"left",placement:5}),variantId:"grid",chartId:"chart-grid"};grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[gridEvent]});assert.equal(grid.getSnapshot().session.rulesetId,"flow_colliders_v1");assert.doesNotThrow(()=>grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[],flowColliderSettings:settings()}),"Flow Collider settings now bind the sole ranked Flow ruleset, not a retired non-collider variant");
+}
+
+// A note stays pending on the back face, then misses strictly after crossing it.
+// Forward and backward controls are independent, including the F4 held-frame path.
+{
+  const event = beat("depth-note",1000,"note",{hand:"left",placement:5});
+  for (const [depth,hitAt,missAt] of [[1,1180,1180.001],[2,1360,1360.001]]) {
+    const c=ready([event],settings({colliderDepthBackward:depth}));
+    send(c,hitAt,hitAt,[3,1],[3,1],[3,2]);
+    assert.equal(c.getJudgements().length,0,"off-target note remains pending through back face");
+    send(c,missAt,missAt,[3,1],[3,1],[3,2]);
+    assert.deepEqual(c.getJudgements().map(j=>j.result),["miss"],"miss commits only behind +Z back face");
+  }
+  const forward=ready([event],settings({colliderDepthForward:2}));
+  send(forward,640,640,[1,1],[3,1],[3,2]);
+  assert.deepEqual(forward.getJudgements().map(j=>j.result),["hit"],"forward extension admits future -Z beat");
+  const late=ready([event],settings({colliderDepthBackward:2}));
+  send(late,1360,1360,[1,1],[3,1],[3,2]);
+  assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"],"backward extension admits past +Z beat");
 }
 
 // Public collider state exposes only opaque tuning identity and semantic hazard data, never physical evidence/history.
