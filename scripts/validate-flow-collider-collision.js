@@ -330,6 +330,11 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
     send(c,missAt,missAt,[3,1],[3,1],[3,2]);
     assert.deepEqual(c.getJudgements().map(j=>j.result),["miss"],"miss commits only behind +Z back face");
   }
+  const custom=ready([event],settings({timingWindowMs:250,colliderDepthBackward:2}));
+  send(custom,1500,1500,[3,1],[3,1],[3,2]);
+  assert.equal(custom.getJudgements().length,0,"custom 250ms window × depth-2 keeps note pending at +500ms");
+  send(custom,1500.001,1500.001,[3,1],[3,1],[3,2]);
+  assert.deepEqual(custom.getJudgements().map(j=>j.result),["miss"],"custom window misses past +500ms");
   const forward=ready([event],settings({colliderDepthForward:2}));
   send(forward,640,640,[1,1],[3,1],[3,2]);
   assert.deepEqual(forward.getJudgements().map(j=>j.result),["hit"],"forward extension admits future -Z beat");

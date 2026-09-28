@@ -75,6 +75,15 @@ assert.equal(colliderDefaultDepthWu, 1.08, "shared contracts default face is 180
 const sharedBounds = resolveColliderBounds({ mode: "flow", center: { x: 1, y: 1, z: 0 }, halfWidth: .5, halfHeight: .5, settings: { colliderVisible: false, colliderScale: 2, colliderDepthForward: 2, colliderDepthBackward: 1 }, timingWindowMs: 180, speedWuPerMs: .006 });
 assert.deepEqual(sharedBounds, { minX: 0, maxX: 2, minY: 0, maxY: 2, minZ: -2.16, maxZ: 1.08 }, "gameplay and renderer resolve one contracted volume");
 assert.equal(isPointInsideColliderBounds({ x: 1, y: 1, z: -2.16 }, sharedBounds), true, "contracted front face inclusive");
+for (const [mode, contact, target] of [["flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent], ["boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]]) {
+  const equipment = pose("left_wrist", mode, { x: 1, y: 1, z: 0 });
+  const widthMs = 250;
+  const customized = { depthForward: 2, depthBackward: 1 };
+  assert.equal(contact(target, equipment, 500, widthMs, customized), true, `${mode}: custom window × depth+ front face`);
+  assert.equal(contact(target, equipment, 499.999, widthMs, customized), false, `${mode}: custom front face outside`);
+  assert.equal(contact(target, equipment, 1250, widthMs, customized), true, `${mode}: custom backward face remains at +250ms`);
+  assert.equal(contact(target, equipment, 1250.001, widthMs, customized), false, `${mode}: custom back face outside`);
+}
 
 const implementation = await readFile(new URL("../src/equipment-pose-collision.js", import.meta.url), "utf8");
 assert.doesNotMatch(implementation, /\.glb|\.gltf|mesh|modelBounds/iu, "collision math is GLB/model independent");

@@ -70,6 +70,11 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const late = ready([event], settings({ colliderDepthBackward: 2 }));
   send(late, 1360, [1, 1], [3, 1], [3, 2]);
   assert.deepEqual(late.getJudgements().map(j => j.result), ["hit"], "backward +Z face admits late punch");
+  const custom = ready([event], settings({ timingWindowMs: 250, colliderDepthBackward: 2 }));
+  send(custom, 1500, [3, 1], [3, 1], [3, 2]);
+  assert.equal(custom.getJudgements().length, 0, "custom window keeps punch pending at +500ms");
+  send(custom, 1500.001, [3, 1], [3, 1], [3, 2]);
+  assert.deepEqual(custom.getJudgements().map(j => j.result), ["miss"], "custom window misses strictly beyond +500ms");
   for (const [depth, boundary] of [[1, 1180], [2, 1360]]) {
     const missed = ready([event], settings({ colliderDepthBackward: depth }));
     send(missed, boundary, [3, 1], [3, 1], [3, 2]);
