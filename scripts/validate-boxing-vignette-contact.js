@@ -69,7 +69,7 @@ function input(measured, latest) {
   return { sourceIdentity: "camera-a", calibration: { calibrationId: "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: false, freshCalibrationRequired: false }, countdownFrozen: false, latestEvidence: latest, straightQualifications: [] };
 }
 
-const clock = (ms, playing) => ({ contextTimeSeconds: ms / 1000, positionSeconds: ms / 1000, playing });
+const clock = (ms, playing, durationMs = 0) => ({ contextTimeSeconds: ms / 1000, positionSeconds: ms / 1000, ...(durationMs > 0 ? { durationSeconds: durationMs / 1000 } : {}), playing });
 
 function ready(events, id = "b12") {
   const c = createAeroGameplaySessionCoordinator({ sessionId: `${id}-${Math.random().toString(36).slice(2)}`, countdownStepMs: 1 });
@@ -347,13 +347,18 @@ function send(c, songMs, sx, sy, frameId) {
   ], "lf7-completion");
   let completedAt = null;
   let stateAtW2Miss = null;
-  for (let t = 950; t <= 2900; t += 100) {
-    send(c, t, 2.5, 1.5, `lf7b-${t}`);
+  for (let t = 950; t <= 2950; t += 100) {
+    // B1.2: completion is now driven by the track end (clock.ended), not the
+    // last resolved event. Run past the track end (2900ms) with playing=false so
+    // clock.ended fires; every event is resolved well before that.
+    const isTrackEnd = t >= 2900;
+    const sample = evidence(`lf7b-${t}`, t, 2.5, 1.5);
+    c.advance({ timestampMs: t, clock: clock(t, !isTrackEnd, 2900), input: input(t, sample), equipmentPoses: equipmentPosesForEvidence(sample) });
     if (t === 2250) stateAtW2Miss = c.getSnapshot().session.state;
     if (completedAt === null && c.getSnapshot().session.state === "completed") completedAt = t;
   }
   assert.equal(stateAtW2Miss, "playing", "no early completion while W2's outcome and N2 are still pending (pre-fix: completed here)");
-  assert.equal(completedAt, 2350, `true completion: every event resolved before the terminal state (completed at ${completedAt})`);
+  assert.equal(completedAt, 2950, `B1.2 completion at track end: every event resolved before the terminal state (completed at ${completedAt})`);
   assert.deepEqual(
     c.getJudgements().map((j) => [j.eventId, j.result]),
     [["lf7-w1", "miss"], ["lf7-n1", "hit"], ["lf7-w2", "miss"], ["lf7-n2", "hit"]],

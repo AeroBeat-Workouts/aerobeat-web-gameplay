@@ -371,7 +371,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (enteredAsCountdown && state === "countdown") advanceCountdown(clock);
     if (enteredState === "playing" && state === "playing") {
       if (!clock.playing) {
-        if (sessionPurpose === "visual_test" && clock.ended) {
+        // B1.2: complete when the TRACK ends (clock.ended) for every purpose,
+        // not only visual_test. A `play` session previously fell to
+        // paused_manual at track end; the song should finish at its true end.
+        if (clock.ended) {
           timelinePositionMs = clock.positionMs;
           state = "completed";
           pauseReason = null;
@@ -429,7 +432,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
           for (const eventId of visualTestExcludedEventIds) completedEventIds.add(eventId);
           for (const outcome of obstacleOutcomes) completedEventIds.add(String(outcome.eventId));
           for (const outcome of hazardOutcomes) if (outcome.kind === "bomb") completedEventIds.add(String(outcome.eventId));
-          if (events.length > 0 && completedEventIds.size + suppressedObstacleCount() >= events.length) {
+          if (events.length > 0 && completedEventIds.size + suppressedObstacleCount() >= events.length && clock.ended) {
             state = "completed";
             pauseReason = null;
             deactivateVisualTestInteraction();
