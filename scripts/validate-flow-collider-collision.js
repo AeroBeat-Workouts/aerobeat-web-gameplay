@@ -242,6 +242,17 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
     send(run,1050,1050,[1,1],[3,2],[3,2]);
     assert.equal(run.getHazardOutcomes().length,scale===0?0:1,"zero disables even centered wrist contact");
   }
+  const independent=ready([beat("independent-volume",1000,"bomb",{placement:5})],settings({colliderRadius:.5,colliderScale:4,colliderDepthForward:4,colliderDepthBackward:4}));
+  send(independent,640,640,[1,1],[3,2],[3,2]);
+  assert.equal(independent.getHazardOutcomes().length,0,"equipment forward depth cannot contact an early bomb");
+  send(independent,1000,1000,[1,.3],[3,2],[3,2]);
+  assert.equal(independent.getHazardOutcomes().length,0,"equipment radius/scale cannot enlarge the bomb wrist sphere");
+  send(independent,1180,1180,[1,.3],[3,2],[3,2]);
+  send(independent,1181,1181,[1,.3],[3,2],[3,2]);
+  assert.equal(independent.getHazardOutcomes()[0].result,"unevaluated_tracking","equipment backward depth cannot delay bomb finalization");
+  const depthOnly=ready([beat("depth-only",1000,"bomb",{placement:5})],settings({colliderDepthBackward:4}));
+  send(depthOnly,1181,1181,[1,1],[3,2],[3,2]);
+  assert.equal(depthOnly.getHazardOutcomes()[0].result,"unevaluated_tracking","equipment backward depth cannot allow late wrist contact");
   const base=flowColliderSettingsIdentity(settings());
   assert.notEqual(flowColliderSettingsIdentity(settings({wristBombColliderScale:0})),base);
   assert.notEqual(flowColliderSettingsIdentity(settings({wristBombColliderScale:2})),base);

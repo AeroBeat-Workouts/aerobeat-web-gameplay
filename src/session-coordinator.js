@@ -1324,7 +1324,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
   function evaluateColliderBombs(left, right, priorLeft, priorRight, evaluateLeft, evaluateRight) {
     for (const bomb of events.filter((event) => productionEventEligible(event) && event.type === "bomb" && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === event.eventId))) {
-      const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs * Number(settings.colliderDepthForward); const end = colliderBackFaceTimestampMs(Number(bomb.centerTimestampMs), windowMs, Number(settings.colliderDepthBackward));
+      const eventId = String(bomb.eventId); const settings = flowColliderSettingsForEvent(bomb); const windowMs = Number(settings.timingWindowMs); const start = Number(bomb.centerTimestampMs) - windowMs; const end = colliderBackFaceTimestampMs(Number(bomb.centerTimestampMs), windowMs);
       let tracker = bombStates.get(eventId) ?? { leftCoverage: Object.freeze([]), rightCoverage: Object.freeze([]), contactTimelinePositionMs: null, consequenceApplied: false };
       const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
       if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
@@ -1347,12 +1347,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!variant || variant.rulesetId !== FLOW_COLLIDER_RULESET) return;
     for (const event of events) {
       if (!productionEventEligible(event)) continue;
-      const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), Number(settings.colliderDepthBackward));
+      const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), event.type === "bomb" ? 1 : Number(settings.colliderDepthBackward));
       if (event.type === "note" && !judgedIds.has(eventId) && timelinePositionMs > late) recordJudgementAt(event, "miss", colliderMissDiagnostics(event), null, false, null);
       else if ((event.type === "arc" || event.type === "burst") && !judgedIds.has(eventId) && timelinePositionMs >= Number(event.centerTimestampMs)) recordJudgement(event, "ignored", Object.freeze([]), null, false);
       else if (event.type === "bomb" && timelinePositionMs > late && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === eventId)) {
         const tracker = bombStates.get(eventId) ?? { leftCoverage: [], rightCoverage: [], contactTimelinePositionMs: null, consequenceApplied: false };
-        const result = coversInterval(tracker.leftCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs) * Number(settings.colliderDepthForward), late) && coversInterval(tracker.rightCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs) * Number(settings.colliderDepthForward), late) ? "avoided" : "unevaluated_tracking";
+        const result = coversInterval(tracker.leftCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs), late) && coversInterval(tracker.rightCoverage, Number(event.centerTimestampMs) - Number(settings.timingWindowMs), late) ? "avoided" : "unevaluated_tracking";
         hazardOutcomes.push(Object.freeze({ schema: "aerobeat/flow_hazard_outcome", version: 1, eventId, rulesetId: FLOW_COLLIDER_RULESET, kind: "bomb", result, committedTimelinePositionMs: timelinePositionMs, consequenceApplied: false })); hazardOutcomesDirty = true;
         bombStates.delete(eventId);
       }

@@ -10,6 +10,7 @@ import { gloveGeometry, saberGeometry } from "@aerobeat/web-contracts/equipment-
 
 export const maximumColliderSampleFreshnessMs = 150;
 export const maximumColliderSampleGapMs = 150;
+const WRIST_BOMB_RADIUS_WU = 0.12;
 export const flowColliderSettingsBounds = Object.freeze({
   colliderRadius: Object.freeze({ minimum: 0, maximum: 0.5 }),
   directionToleranceDegrees: Object.freeze({ minimum: 0, maximum: 90 }),
@@ -153,6 +154,8 @@ export function flowNoteCellBox(event) {
  * A bomb tests only a measured wrist-centered sphere, never a saber capsule,
  * glove, nose, or another body landmark. The target is its canonical 1x1
  * placement box; sphere/box contact is inclusive at the closest point.
+ * The fixed 0.12 WU radius matches the renderer's 0.24 WU diameter at scale
+ * one; neither equipment orientation/scale nor target equipment depth applies.
  * @param {DataRecord} event
  * @param {ColliderSample} wrist
  * @param {DataRecord} settings
@@ -161,12 +164,12 @@ export function wristBombSphereContactsFlowTarget(event, wrist, settings) {
   const scale = Number(settings.wristBombColliderScale ?? 1);
   if (scale === 0) return false;
   const timingWindowMs = Number(settings.timingWindowMs);
-  if (wrist.songTimeMs < Number(event.centerTimestampMs) - timingWindowMs * Number(settings.colliderDepthForward) || wrist.songTimeMs > Number(event.centerTimestampMs) + timingWindowMs * Number(settings.colliderDepthBackward)) return false;
+  if (wrist.songTimeMs < Number(event.centerTimestampMs) - timingWindowMs || wrist.songTimeMs > Number(event.centerTimestampMs) + timingWindowMs) return false;
   const cell = flowNoteCellBox(event);
-  const half = 0.5 * Number(settings.colliderScale);
+  const half = 0.5;
   const dx = Math.max(Math.abs(wrist.sx - cell.centerX) - half, 0);
   const dy = Math.max(Math.abs(wrist.sy - cell.centerY) - half, 0);
-  const radius = Number(settings.colliderRadius) * scale;
+  const radius = WRIST_BOMB_RADIUS_WU * scale;
   return dx * dx + dy * dy <= radius * radius + Number.EPSILON;
 }
 
