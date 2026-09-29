@@ -73,6 +73,7 @@ const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "crossed_g
  * @property {DataRecord} [scoringSettings]
  * @property {DataRecord} [flowColliderSettings]
  * @property {DataRecord} [boxingColliderSettings]
+ * @property {boolean} [obstaclesEnabled]
  * @property {readonly DataRecord[]} [shadowVariants]
  */
 
@@ -173,6 +174,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let pendingHazardBreak = false;
   let pendingBombContacts = 0;
   let pendingObstacleContacts = 0;
+  let obstaclesEnabled = true;
   let visualTestInteraction = /** @type {VisualTestInteraction | null} */ (null);
   let lastVisualTestInteractionEpoch = /** @type {number | null} */ (null);
   const visualTestExcludedEventIds = new Set();
@@ -221,6 +223,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextScoringSettings = source.scoringSettings === undefined ? defaultScoringSettings() : normalizeScoringSettings(source.scoringSettings);
     const nextFlowColliderSettings = normalizeFlowColliderSettings(source.flowColliderSettings, nextVariant);
     const nextBoxingColliderSettings = normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
+    if (source.obstaclesEnabled !== undefined && typeof source.obstaclesEnabled !== "boolean") throw gameplayError("content_configuration_invalid", "Obstacles enabled must be boolean");
+    const nextObstaclesEnabled = source.obstaclesEnabled !== false;
     const nextShadowVariants = source.shadowVariants === undefined ? Object.freeze([]) : normalizeShadowVariants(source.shadowVariants);
     const nextContentGeneration = contentGeneration + 1;
     const nextEventTruth = bindEventTruth(nextEvents, nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings);
@@ -233,6 +237,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
     boxingColliderSettings = nextBoxingColliderSettings;
+    obstaclesEnabled = nextObstaclesEnabled;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
     sessionPurpose = nextPurpose;
@@ -434,6 +439,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
           const completedEventIds = new Set(judgedIds);
           for (const eventId of visualTestExcludedEventIds) completedEventIds.add(eventId);
           for (const outcome of obstacleOutcomes) completedEventIds.add(String(outcome.eventId));
+           if (!obstaclesEnabled) for (const event of events) if (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") completedEventIds.add(String(event.eventId));
           for (const outcome of hazardOutcomes) if (outcome.kind === "bomb") completedEventIds.add(String(outcome.eventId));
           if (events.length > 0 && completedEventIds.size + suppressedObstacleCount() >= events.length && clock.ended) {
             state = "completed";
@@ -556,6 +562,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (nextVariant.rulesetId === FLOW_COLLIDER_RULESET && flowColliderSettingsIdentity(nextFlowColliderSettings) !== flowColliderSettingsIdentity(flowColliderSettings)) throw gameplayError("flow_collider_settings_locked", "Flow Collider settings are locked for the complete run");
     const nextBoxingColliderSettings = source.boxingColliderSettings === undefined && nextVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
     if (nextVariant.rulesetId === BOXING_COLLIDER_RULESET && boxingColliderSettingsIdentity(nextBoxingColliderSettings) !== boxingColliderSettingsIdentity(boxingColliderSettings)) throw gameplayError("boxing_collider_settings_locked", "Boxing Collider reach and guard settings are locked for the complete run");
+    if (source.obstaclesEnabled !== undefined && typeof source.obstaclesEnabled !== "boolean") throw gameplayError("content_configuration_invalid", "Obstacles enabled must be boolean");
+    const nextObstaclesEnabled = source.obstaclesEnabled === undefined ? obstaclesEnabled : source.obstaclesEnabled;
     const nextShadowVariants = source.shadowVariants === undefined ? shadowVariants : normalizeShadowVariants(source.shadowVariants);
     const preserve = new Map(events.filter((event) => shouldPreserveEvent(event)).map((event) => [String(event.eventId), event]));
     const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
@@ -587,6 +595,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
     boxingColliderSettings = nextBoxingColliderSettings;
+    obstaclesEnabled = nextObstaclesEnabled;
     shadowVariants = nextShadowVariants;
     generation += 1;
     publish(null);
@@ -945,10 +954,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     countdownReason = null;
   }
 
-  function suppressedObstacleCount() { return variant?.mode === "flow" && (variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) ? events.filter((event) => event.type === "obstacle").length : 0; }
+  function suppressedObstacleCount() { return variant?.mode === "flow" && (!obstaclesEnabled || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) ? events.filter((event) => event.type === "obstacle").length : 0; }
 
   function evaluateFlowObstacles() {
-    if (!variant || variant.mode !== "flow" || !productionJudgementEnabled() || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) return;
+    if (!variant || variant.mode !== "flow" || !obstaclesEnabled || !productionJudgementEnabled() || variant.modifierIds.includes("no_obstacles") || variant.modifierIds.includes("obstacle_visual_only")) return;
     // kpxg (0.0.61): flow walls finalize into `hazardOutcomes` (kind "wall"),
     // never `obstacleOutcomes`, so the `obstacleOutcomes` scan alone let every
     // expired wall re-finalize every tick. Exclude finalized wall ids via the
@@ -1055,7 +1064,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * still close out on every no-sample early-return path.
    */
   function evaluateBoxingObstacles() {
-    if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || !productionJudgementEnabled()) return;
+    if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || !obstaclesEnabled || !productionJudgementEnabled()) return;
     const obstacles = events.filter((event) => productionEventEligible(event) && (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
@@ -1436,6 +1445,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const event of events) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId))) continue;
       const action = expectedAction(event);
+      if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
       if (PUNCH_ACTIONS.includes(action)) {
         const hand = action.endsWith("_right") ? "right" : "left";
         const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
@@ -1515,6 +1525,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (judgedIds.has(eventId)) continue;
       const settings = boxingColliderSettingsForEvent(event);
       const action = expectedAction(event);
+      if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
       const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), Number(settings.colliderDepthBackward));
       if ((action === "guard" || action === "crossed_guard") && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
@@ -1529,6 +1540,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const event of events) {
       const eventId = String(event.eventId);
       if (!productionEventEligible(event) || judgedIds.has(eventId)) continue;
+      if (!obstaclesEnabled && (event.type === "obstacle" || event.type === "squat" || event.type === "weave_left" || event.type === "weave_right")) continue;
       const center = Number(event.centerTimestampMs);
       const eventVariant = variantForEvent(event);
       if (eventVariant.mode === "flow" && event.type !== "note") {
