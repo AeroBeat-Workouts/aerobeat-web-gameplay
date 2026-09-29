@@ -15,7 +15,7 @@ import {
 } from "@aerobeat/web-contracts";
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
-import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample } from "./flow-collider-collision.js";
+import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
 import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
 import {
@@ -1329,9 +1329,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const leftContinuous = evaluateLeft && left !== null && isContinuousColliderSegment(priorLeft, left); const rightContinuous = evaluateRight && right !== null && isContinuousColliderSegment(priorRight, right);
       if (leftContinuous && priorLeft && left) { const coverageStart = Math.max(start, priorLeft.songTimeMs); const coverageEnd = Math.min(end, left.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, leftCoverage: addInterval(tracker.leftCoverage, coverageStart, coverageEnd) }; }
       if (rightContinuous && priorRight && right) { const coverageStart = Math.max(start, priorRight.songTimeMs); const coverageEnd = Math.min(end, right.songTimeMs); if (coverageStart <= coverageEnd) tracker = { ...tracker, rightCoverage: addInterval(tracker.rightCoverage, coverageStart, coverageEnd) }; }
-      // Bombs use the same exact resolved capsule as notes; either role owns contact.
-      const leftContact = !evaluateLeft || left === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs, colliderVolumeSettings(settings)) ? left.songTimeMs : null;
-      const rightContact = !evaluateRight || right === null ? null : resolvedSaberCapsuleContactsFlowTarget(bomb, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs, colliderVolumeSettings(settings)) ? right.songTimeMs : null;
+      // Bombs belong only to the two measured wrist spheres; equipment poses
+      // remain the independent note authority and never extend bomb reach.
+      const leftContact = !evaluateLeft || left === null ? null : wristBombSphereContactsFlowTarget(bomb, left, settings) ? left.songTimeMs : null;
+      const rightContact = !evaluateRight || right === null ? null : wristBombSphereContactsFlowTarget(bomb, right, settings) ? right.songTimeMs : null;
       const contact = [leftContact, rightContact].filter((value) => value !== null).sort((a, b) => Number(a) - Number(b))[0];
       if (contact !== undefined && tracker.contactTimelinePositionMs === null) {
         tracker = { ...tracker, contactTimelinePositionMs: Number(contact), consequenceApplied: true };

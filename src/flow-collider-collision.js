@@ -15,6 +15,7 @@ export const flowColliderSettingsBounds = Object.freeze({
   directionToleranceDegrees: Object.freeze({ minimum: 0, maximum: 90 }),
   timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 }),
   colliderScale: Object.freeze({ minimum: 0.25, maximum: 4 }),
+  wristBombColliderScale: Object.freeze({ minimum: 0, maximum: 2 }),
   colliderDepthForward: Object.freeze({ minimum: 1, maximum: 4 }),
   colliderDepthBackward: Object.freeze({ minimum: 1, maximum: 4 })
 });
@@ -34,7 +35,8 @@ export const defaultFlowColliderSettings = Object.freeze({
 
 const LEGACY_SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs"]);
 const PRE_VISIBILITY_SETTING_KEYS = Object.freeze([...LEGACY_SETTING_KEYS, "colliderScale", "colliderDepthForward", "colliderDepthBackward"]);
-const SETTING_KEYS = Object.freeze([...PRE_VISIBILITY_SETTING_KEYS, "colliderVisible"]);
+const VISIBLE_SETTING_KEYS = Object.freeze([...PRE_VISIBILITY_SETTING_KEYS, "colliderVisible"]);
+const SETTING_KEYS = Object.freeze([...VISIBLE_SETTING_KEYS, "wristBombColliderScale"]);
 
 /**
  * Construct one exact immutable settings record. Omission selects defaults; supplied
@@ -44,7 +46,7 @@ const SETTING_KEYS = Object.freeze([...PRE_VISIBILITY_SETTING_KEYS, "colliderVis
 export function createFlowColliderSettings(value = defaultFlowColliderSettings) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new TypeError("Flow Collider settings must be a plain record");
   const keys = Reflect.ownKeys(value);
-  const exactKeys = keys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : keys.length === PRE_VISIBILITY_SETTING_KEYS.length ? PRE_VISIBILITY_SETTING_KEYS : SETTING_KEYS;
+  const exactKeys = keys.includes("wristBombColliderScale") ? SETTING_KEYS : keys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : keys.length === PRE_VISIBILITY_SETTING_KEYS.length ? PRE_VISIBILITY_SETTING_KEYS : VISIBLE_SETTING_KEYS;
   if (keys.length !== exactKeys.length || keys.some((key) => typeof key !== "string" || !exactKeys.includes(key))) throw new TypeError("Flow Collider settings require every exact field and no extras");
   /** @type {Record<string, unknown>} */ const record = {};
   for (const key of exactKeys) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Flow Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
@@ -55,16 +57,18 @@ export function createFlowColliderSettings(value = defaultFlowColliderSettings) 
   if (record.colliderVisible !== undefined && typeof record.colliderVisible !== "boolean") throw new TypeError("Flow Collider visibility must be boolean");
   const colliderVisible = record.colliderVisible ?? false;
   const colliderScale = boundedSetting(record.colliderScale ?? 1, flowColliderSettingsBounds.colliderScale, "collider scale");
+  const wristBombColliderScale = boundedSetting(record.wristBombColliderScale ?? 1, flowColliderSettingsBounds.wristBombColliderScale, "wrist bomb collider scale");
   const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, flowColliderSettingsBounds.colliderDepthForward, "forward depth");
   const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, flowColliderSettingsBounds.colliderDepthBackward, "backward depth");
-  return Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward });
+  const normalized = Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }) });
+  return normalized;
 }
 
 /** @param {unknown} value @param {Readonly<{minimum:number,maximum:number}>} bounds @param {string} label */
 function boundedSetting(value, bounds, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < bounds.minimum || value > bounds.maximum) throw new RangeError(`Flow Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
 
 /** @param {unknown} settings */
-export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; return `sha256:${new Sha256().update(JSON.stringify((legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS).map((key) => exact[key]))).digestHex()}`; }
+export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; const keys = legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS; return `sha256:${new Sha256().update(JSON.stringify((Number(exact.wristBombColliderScale ?? 1) === 1 ? keys : [...keys, "wristBombColliderScale"]).map((key) => exact[key]))).digestHex()}`; }
 
 /**
  * Minimum judge-space displacement over the smoothing window before the
@@ -143,6 +147,27 @@ export function targetCenterForPlacement(placement) {
 export function flowNoteCellBox(event) {
   const center = targetCenterForPlacement(Number(event.placement));
   return Object.freeze({ centerX: center.x, centerY: center.y, halfX: 0.5, halfY: 0.5 });
+}
+
+/**
+ * A bomb tests only a measured wrist-centered sphere, never a saber capsule,
+ * glove, nose, or another body landmark. The target is its canonical 1x1
+ * placement box; sphere/box contact is inclusive at the closest point.
+ * @param {DataRecord} event
+ * @param {ColliderSample} wrist
+ * @param {DataRecord} settings
+ */
+export function wristBombSphereContactsFlowTarget(event, wrist, settings) {
+  const scale = Number(settings.wristBombColliderScale ?? 1);
+  if (scale === 0) return false;
+  const timingWindowMs = Number(settings.timingWindowMs);
+  if (wrist.songTimeMs < Number(event.centerTimestampMs) - timingWindowMs * Number(settings.colliderDepthForward) || wrist.songTimeMs > Number(event.centerTimestampMs) + timingWindowMs * Number(settings.colliderDepthBackward)) return false;
+  const cell = flowNoteCellBox(event);
+  const half = 0.5 * Number(settings.colliderScale);
+  const dx = Math.max(Math.abs(wrist.sx - cell.centerX) - half, 0);
+  const dy = Math.max(Math.abs(wrist.sy - cell.centerY) - half, 0);
+  const radius = Number(settings.colliderRadius) * scale;
+  return dx * dx + dy * dy <= radius * radius + Number.EPSILON;
 }
 
 /**

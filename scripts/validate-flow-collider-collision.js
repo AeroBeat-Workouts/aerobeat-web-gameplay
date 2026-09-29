@@ -226,6 +226,29 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const wrong=ready([beat("owned",1000,"note",{hand:"left",placement:5})]);send(wrong,1000,1000,[-.5,1],[1,1],[3,2]);send(wrong,1181,1181,[-.5,1],[1,1],[3,2]);assert.equal(wrong.getJudgements()[0].result,"miss");
 }
 
+// The equipment capsule may score a note but cannot detonate a bomb when its
+// wrist sphere is outside. Either measured wrist can contact independently.
+{
+  const events=[beat("equipment-note",1000,"note",{hand:"left",placement:5}),beat("wrist-bomb",1000,"bomb",{placement:5})];
+  const equipmentOnly=ready(events);send(equipmentOnly,1000,1000,[1,.35],[3,2],[3,2]);
+  assert.deepEqual(equipmentOnly.getJudgements().map(j=>j.result),["hit"],"the resolved saber reaches the note");
+  assert.equal(equipmentOnly.getHazardOutcomes().length,0,"equipment overlap alone cannot touch the bomb");
+  send(equipmentOnly,1050,1050,[1,1],[3,2],[3,2]);
+  assert.deepEqual(equipmentOnly.getHazardOutcomes().map(o=>o.result),["contact"],"wrist sphere contacts the bomb");
+  for(const scale of [0,1,2]){
+    const run=ready([beat(`scaled-${scale}`,1000,"bomb",{placement:5})],settings({wristBombColliderScale:scale}));
+    send(run,1000,1000,[1,1.7],[3,2],[3,2]);
+    assert.equal(run.getHazardOutcomes().length,scale===2?1:0,`scale ${scale} controls wrist sphere reach`);
+    send(run,1050,1050,[1,1],[3,2],[3,2]);
+    assert.equal(run.getHazardOutcomes().length,scale===0?0:1,"zero disables even centered wrist contact");
+  }
+  const base=flowColliderSettingsIdentity(settings());
+  assert.notEqual(flowColliderSettingsIdentity(settings({wristBombColliderScale:0})),base);
+  assert.notEqual(flowColliderSettingsIdentity(settings({wristBombColliderScale:2})),base);
+  assert.throws(()=>createFlowColliderSettings(settings({wristBombColliderScale:-.001})),/wrist bomb collider scale/u);
+  assert.throws(()=>createFlowColliderSettings(settings({wristBombColliderScale:2.001})),/wrist bomb collider scale/u);
+}
+
 // Simultaneous note plus overlapping nose-owned walls scores first and applies one deduplicated hazard break; wrists never own walls.
 {
   const c=ready([beat("wall-note",1000,"note",{hand:"left",placement:5}),wall("wall-a"),wall("wall-b")]);send(c,900,900,[-.5,1],[3,1],[0,1]);send(c,1000,1000,[1,1],[3,1],[2,1]);assert.equal(c.getScorePartitions()[0].hits,1);assert.equal(c.getScorePartitions()[0].combo,0);assert.equal(c.getScorePartitions()[0].obstacleContacts,1);send(c,1100,1100,[1,1],[3,1],[2,1]);assert.deepEqual(c.getHazardOutcomes().filter(o=>o.kind==="wall").map(o=>[o.eventId,o.result,o.consequenceApplied]),[["wall-a","contact",true],["wall-b","contact",false]]);
@@ -307,7 +330,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 
 // Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
 {
-  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},colliderDepthForward:{minimum:1,maximum:4},colliderDepthBackward:{minimum:1,maximum:4}});
+  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},wristBombColliderScale:{minimum:0,maximum:2},colliderDepthForward:{minimum:1,maximum:4},colliderDepthBackward:{minimum:1,maximum:4}});
   assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(publicDefaultFlowColliderSettings.colliderVisible,false);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
   assert.equal(createFlowColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field volume accepted");
   assert.throws(()=>createFlowColliderSettings(settings({colliderVisible:null})),/visibility/u);
