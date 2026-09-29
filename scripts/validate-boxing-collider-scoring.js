@@ -102,6 +102,15 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.notEqual(boxingColliderSettingsIdentity(settings({ guardCountMode: "gesture" })), boxingColliderSettingsIdentity(settings()));
   assert.notEqual(boxingColliderSettingsIdentity(settings({ colliderRadius: 0.2 })), boxingColliderSettingsIdentity(settings()));
   assert.match(boxingColliderSettingsIdentity(settings()), /^sha256:[a-f0-9]{64}$/u);
+  for (const scale of [0, 1, 2]) {
+    const supplied = settings({ wristBombColliderScale: scale });
+    assert.equal(createBoxingColliderSettings(supplied).wristBombColliderScale, scale, `shared wrist bomb scale ${scale} accepted`);
+    assert.doesNotThrow(() => ready([], supplied), "assembly-provided Boxing settings configure the coordinator");
+    assert.equal(boxingColliderSettingsIdentity(supplied) === boxingColliderSettingsIdentity(settings()), scale === 1, "scale 1 keeps prior identity; changes remain distinguishable");
+  }
+  assert.equal(createBoxingColliderSettings().wristBombColliderScale ?? 1, 1, "omitted wrist bomb scale defaults to one");
+  assert.throws(() => createBoxingColliderSettings(settings({ wristBombColliderScale: -.001 })), /wrist bomb collider scale/u);
+  assert.throws(() => createBoxingColliderSettings(settings({ wristBombColliderScale: 2.001 })), /wrist bomb collider scale/u);
   assert.throws(() => createBoxingColliderSettings(settings({ topRowReachWU: 1.5 })), /reach\/guard-mode fields are invalid/u);
   assert.throws(() => createBoxingColliderSettings({ ...settings(), extra: 1 }), /every exact field/u);
   assert.throws(() => createBoxingColliderSettings(settings({ guardCountMode: "nose" })), /invalid/u);
