@@ -12,7 +12,8 @@
     "fixtures/task11-prototype-replay-v1.json"
   ],
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./equipment-pose-collision.js": "./src/equipment-pose-collision.js"
   },
   "scripts": {
     "check": "npm run check:jsdoc && npm run check:imports && npm run check:components && npm run check:console",

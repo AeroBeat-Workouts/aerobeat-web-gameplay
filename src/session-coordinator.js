@@ -17,7 +17,7 @@ import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometr
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
-import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, magneticSaberOrientation, normalizeMagneticAttractionSettings, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -101,6 +101,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let scoringSettings = /** @type {DataRecord} */ (defaultScoringSettings());
   let flowColliderSettings = /** @type {DataRecord} */ (defaultFlowColliderSettings);
   let boxingColliderSettings = /** @type {DataRecord} */ (defaultBoxingColliderSettings);
+  let magneticAttraction = /** @type {Readonly<{range:number,minStrength:number,maxStrength:number,backFaceBias:number}> | null} */ (null);
   let events = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   let contentGeneration = 0;
   let eventTruth = new WeakMap();
@@ -223,6 +224,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextScoringSettings = source.scoringSettings === undefined ? defaultScoringSettings() : normalizeScoringSettings(source.scoringSettings);
     const nextFlowColliderSettings = normalizeFlowColliderSettings(source.flowColliderSettings, nextVariant);
     const nextBoxingColliderSettings = normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
+    const nextMagneticAttraction = normalizeMagneticAttractionSettings(source.magneticAttraction);
     if (source.obstaclesEnabled !== undefined && typeof source.obstaclesEnabled !== "boolean") throw gameplayError("content_configuration_invalid", "Obstacles enabled must be boolean");
     const nextObstaclesEnabled = source.obstaclesEnabled !== false;
     const nextShadowVariants = source.shadowVariants === undefined ? Object.freeze([]) : normalizeShadowVariants(source.shadowVariants);
@@ -237,6 +239,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
     boxingColliderSettings = nextBoxingColliderSettings;
+    magneticAttraction = nextMagneticAttraction;
     obstaclesEnabled = nextObstaclesEnabled;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
@@ -595,6 +598,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
     boxingColliderSettings = nextBoxingColliderSettings;
+    magneticAttraction = normalizeMagneticAttractionSettings(source.magneticAttraction);
     obstaclesEnabled = nextObstaclesEnabled;
     shadowVariants = nextShadowVariants;
     generation += 1;
@@ -788,6 +792,36 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const pose = frameEquipmentPoses.get(role);
     if (!pose) throw gameplayError("equipment_poses_invalid", "Collider equipment pose is unavailable");
     return pose;
+  }
+
+  /**
+   * The AUTHORITATIVE flow saber pose for collision: the tracked pose with the
+   * magnetic rotational assist applied (rotation only — the anchor/position is
+   * never translated, so the measured-wrist anchor invariant still holds). The
+   * renderer draws this exact orientation, so what-you-see is what-hits.
+   * @param {"left_wrist" | "right_wrist"} role
+   * @returns {AeroResolvedEquipmentPose}
+   */
+  function magneticAssistedPoseForRole(role) {
+    const pose = equipmentPoseForRole(role);
+    if (pose.mode !== "flow" || magneticAttraction === null) return pose;
+    const nowMs = timelinePositionMs;
+    const hand = role === "left_wrist" ? "left" : "right";
+    /** @type {ReadonlyArray<Readonly<{hand:"left"|"right",direction:string,x:number,y:number,z:number,id:string,judgement?:string}>>} */ const targets = [];
+    for (const event of events) {
+      if (event.type !== "note" || event.hand !== hand) continue;
+      const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
+      if (direction === undefined) continue;
+      const placement = Number(event.placement);
+      if (!Number.isInteger(placement) || placement < 0 || placement > 11) continue;
+      const center = { x: placement % 4, y: 2 - Math.floor(placement / 4) };
+      const beatCenterMs = Number(event.centerTimestampMs);
+      const judgement = judgedIds.has(String(event.eventId)) ? "hit" : undefined;
+      targets.push(Object.freeze({ hand, direction, x: center.x, y: center.y, z: (nowMs - beatCenterMs) * 0.006, id: String(event.eventId), judgement }));
+    }
+    const assistedOrientation = magneticSaberOrientation(pose, nowMs, targets, magneticAttraction);
+    if (assistedOrientation === pose.orientation) return pose;
+    return Object.freeze({ ...pose, orientation: assistedOrientation });
   }
 
   /** @param {unknown} value @returns {DataRecord} */
@@ -1284,7 +1318,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       // The contract-resolved transformed 3D capsule is the sole Flow hit volume.
       // Projection into judge XY naturally preserves local-axis roll and shortens
       // under out-of-plane tilt; no renderer/GLB bounds or fixed fallback apply.
-      if (!resolvedSaberCapsuleContactsFlowTarget(event, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(eventSettings.timingWindowMs), colliderVolumeSettings(eventSettings))) continue;
+      if (!resolvedSaberCapsuleContactsFlowTarget(event, magneticAssistedPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(eventSettings.timingWindowMs), colliderVolumeSettings(eventSettings))) continue;
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
       candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
