@@ -38,12 +38,15 @@ function flowPose(anchor, orientation = equipmentEulerDegreesToQuaternion({ x: 0
 /** The Flow note at placement 6 (judge center x=2, y=1); the capsule is tested against its 1x1 cell box. */
 const flowEvent = Object.freeze({ centerTimestampMs: 1000, placement: 6, hand: "left", direction: "up" });
 
-// The tracked wrist sits just below the note's cell box with the saber pointing
-// LEFT (−X, a 180° world-Z roll). The wrist is placed so that an UN-ASSISTED
-// left-pointing blade MISSES the note (the capsule extends left, away from the
-// note), but the magnetic pull toward an "up" beat rotates the blade to point
-// up — and that assisted blade HITS the note directly above the wrist.
-const wristAnchor = { x: 2.0, y: 0.7 };
+// The tracked wrist sits BELOW the note's cell box with the saber pointing
+// LEFT (−X, a 180° world-Z roll). The note cell is a 1×1 box centered at (2, 1),
+// spanning y ∈ [0.5, 1.5]. The wrist must CLEAR that box: at y = 0.7 the wrist
+// anchor itself sits INSIDE the box and the un-assisted capsule already contacts
+// it, leaving no MISS→HIT flip to demonstrate. At y = 0.2 the un-assisted
+// left-pointing capsule tops out at y = 0.38 (0.2 + radius 0.18), clear of the
+// box, so it MISSES — while the magnetic pull toward the same-hand "up" beat
+// rotates the blade upward into the cell and HITS.
+const wristAnchor = { x: 2.0, y: 0.2 };
 const leftPointingOrientation = equipmentEulerDegreesToQuaternion({ x: 0, y: 0, z: 180 });
 const rawPose = flowPose(wristAnchor, leftPointingOrientation);
 
