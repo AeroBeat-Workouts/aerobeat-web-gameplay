@@ -824,6 +824,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return Object.freeze({ ...pose, orientation: assistedOrientation });
   }
 
+  /**
+   * The assisted orientation the collision path actually used, or null.
+   * Never throws: a snapshot can be taken before any pose has been observed,
+   * and `equipmentPoseForRole` deliberately throws in that case.
+   */
+  function exposedAssistedOrientation(role) {
+    if (!frameEquipmentPoses.has(role)) return null;
+    return magneticAssistedPoseForRole(role).orientation;
+  }
+
   /** @param {unknown} value @returns {DataRecord} */
   function normalizeInputSnapshot(value) {
     const input = requireRecord(value, "input_snapshot_invalid");
@@ -1719,6 +1729,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       // 0.0.61 (chgy): per-wrist PRE-push wrist-history for saber orientation.
       // Retained at the top level for authored-direction diagnostics only.
       saberWristHistory: Object.freeze({ left_wrist: exposedLeftWristHistory, right_wrist: exposedRightWristHistory }),
+      // 0.0.85: the AUTHORITATIVE assisted saber orientation — byte-identical to
+      // what the collision path above evaluated. The renderer draws this instead
+      // of re-deriving the blend, so what-you-see is what-hits. Null when no
+      // tracked pose exists for that role.
+      assistedSaberOrientations: Object.freeze({
+        left_wrist: exposedAssistedOrientation("left_wrist"),
+        right_wrist: exposedAssistedOrientation("right_wrist")
+      }),
       scorePartitions: Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))), error
     });
   }
