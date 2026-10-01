@@ -248,7 +248,19 @@ export function magneticSaberOrientation(pose, nowMs, targets, settings) {
   const heading = magneticDirectionHeadingRad[strongest.target.direction];
   // World-Z adjustment preserves the wrist's own XYZ tilt rather than flattening it.
   const currentHeading = Math.atan2(axisY, axisX);
+  // 0.0.86 (Derrick): an ARROWED beat is hittable anywhere inside a cone whose
+  // axis is the authored direction, not only when the blade points exactly at the
+  // beat. A plain slerp toward the heading rotates just `weight` of the way, so at
+  // low/mid strength the blade can still sit OUTSIDE that cone: it looks assisted
+  // and changes nothing for gameplay. Compute the weight at which the blade first
+  // enters the cone and never use less than that, so the assist always actually
+  // arcs into the hit zone; proximity still decides whether it goes further and
+  // fully aligns. Plain beats (no authored direction) keep aiming at the centre.
+  const coneLimitRad = (settings.coneToleranceDegrees ?? 45) * Math.PI / 180;
+  const needed = Math.abs(heading - currentHeading);
+  const coneEntryWeight = needed <= coneLimitRad ? 1 : Math.min(1, coneLimitRad / needed);
+  const effectiveWeight = Math.min(1, Math.max(strongest.weight, coneEntryWeight));
   const correction = equipmentEulerDegreesToQuaternion({ x: 0, y: 0, z: (heading - currentHeading) * 180 / Math.PI });
   const goal = multiplyEquipmentQuaternions(correction, pose.orientation);
-  return slerpEquipmentQuaternionShortest(pose.orientation, goal, strongest.weight);
+  return slerpEquipmentQuaternionShortest(pose.orientation, goal, effectiveWeight);
 }
