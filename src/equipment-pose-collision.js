@@ -214,7 +214,7 @@ export function normalizeMagneticAttractionSettings(value) {
  *
  * @param {import("@aerobeat/web-contracts/equipment-pose-contracts").AeroResolvedEquipmentPose} pose
  * @param {number} nowMs Current song time in ms.
- * @param {readonly Readonly<{hand:"left"|"right",direction:string,x:number,y:number,z:number,id:string}>} targets
+ * @param {ReadonlyArray<Readonly<{hand:"left"|"right",direction:string,x:number,y:number,z:number,id:string,judgement?:string}>>} targets
  *   Same-space directional targets: each entry carries a hand, an authored
  *   direction name, its world X/Y (judge space) and Z (approach depth), and a
  *   stable id. Entries already resolved (hit/miss) must be pre-filtered out.
@@ -256,7 +256,7 @@ export function magneticSaberOrientation(pose, nowMs, targets, settings) {
   // enters the cone and never use less than that, so the assist always actually
   // arcs into the hit zone; proximity still decides whether it goes further and
   // fully aligns. Directionless beats have no authored heading and are not steered.
-  const coneLimitRad = (settings.coneToleranceDegrees ?? 45) * Math.PI / 180;
+  const coneLimitRad = 45 * Math.PI / 180;
   // atan2 wraps at ±π; always steer across the shorter arc at that seam.
   const headingDelta = Math.atan2(Math.sin(heading - currentHeading), Math.cos(heading - currentHeading));
   const needed = Math.abs(headingDelta);

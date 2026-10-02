@@ -108,9 +108,11 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
   const anchor = evidence.anchors.find((entry) => entry && typeof entry === "object" && /** @type {DataRecord} */ (entry).anchor === anchorName);
   if (!anchor || typeof anchor !== "object") return null;
   const point = /** @type {DataRecord} */ (anchor);
-  const finitePosition = typeof point.x === "number" && typeof point.y === "number" && Number.isFinite(point.x) && Number.isFinite(point.y);
-  const gridBoundedPosition = anchorName !== "nose" || finitePosition && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
-  if (point.valid !== true || typeof point.confidence !== "number" || point.confidence < 0.5 || !finitePosition || !gridBoundedPosition || point.calibrationId !== evidence.calibrationId || point.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
+  const x = point.x;
+  const y = point.y;
+  const finitePosition = typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y);
+  const gridBoundedPosition = anchorName !== "nose" || finitePosition && typeof x === "number" && typeof y === "number" && x >= 0 && x <= 1 && y >= 0 && y <= 1;
+  if (point.valid !== true || typeof point.confidence !== "number" || point.confidence < 0.5 || !finitePosition || !gridBoundedPosition || typeof x !== "number" || typeof y !== "number" || point.calibrationId !== evidence.calibrationId || point.measurementTimestampMs !== evidence.measurementTimestampMs) return null;
   const ageMs = frameTimestampMs - evidence.measurementTimestampMs;
   if (!Number.isFinite(ageMs) || ageMs < 0) return null;
   // Frozen frames hold the last measured position, so the held timestamp
@@ -118,7 +120,7 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
   // check and score the held pose at the current song position.
   if (!isFrozen && ageMs >= maximumColliderSampleFreshnessMs) return null;
   const effectiveAgeMs = isFrozen ? 0 : ageMs;
-  return Object.freeze({ songTimeMs: timelinePositionMs - effectiveAgeMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * point.x - 0.5, sy: 2.5 - 3 * point.y });
+  return Object.freeze({ songTimeMs: timelinePositionMs - effectiveAgeMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * x - 0.5, sy: 2.5 - 3 * y });
 }
 
 /**
