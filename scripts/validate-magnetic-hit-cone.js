@@ -4,7 +4,7 @@
 //
 // An ARROWED beat is hittable anywhere within a cone whose axis is the authored
 // direction (see authoredDirectionCone in flow-collider-collision.js); a plain
-// beat has no direction and keeps aiming at the note centre. A plain slerp
+// beat has no authored heading and does not receive magnetic steering. A plain slerp
 // toward the heading rotates only `weight` of the way, so at low/mid strength
 // (a far beat) the blade can still land OUTSIDE the cone. That looked assisted
 // and changed nothing for gameplay.
@@ -12,8 +12,8 @@
 // This asserts the observable property: with assist on, the residual angle to
 // the authored heading is inside the cone half-angle; with assist off it is not.
 import assert from "node:assert/strict";
-import { magneticSaberOrientation, normalizeMagneticAttractionSettings } from "../src/equipment-pose-collision.js";
-import { authoredDirectionCone } from "../src/flow-collider-collision.js";
+import { magneticSaberOrientation, normalizeMagneticAttractionSettings, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
+import { authoredDirectionCone, matchesAuthoredDirection } from "../src/flow-collider-collision.js";
 import { equipmentEulerDegreesToQuaternion } from "@aerobeat/web-contracts";
 
 const CONE_DEGREES = 45;
@@ -66,4 +66,33 @@ assert.deepEqual(magneticSaberOrientation(wide, 0, farTarget, off), wide.orienta
 const plainTarget = Object.freeze([{ id: "plain", hand: "left", x: 0, y: 1.8, z: 0 }]);
 assert.deepEqual(magneticSaberOrientation(wide, 0, plainTarget, on), wide.orientation, "directionless beats do not attract");
 
-console.log("Magnetic assist arcs into the authored hit cone (in-cone when aided, outside when not, range 0 a no-op).");
+// Normal Game Setup strength/range, 0.8 WU from the note: an opposite-facing
+// saber previously rotated only 86.4°, stopping 93.6° from the up cone axis.
+const defaults = normalizeMagneticAttractionSettings({ range: 1, minStrength: 0.2, maxStrength: 0.8, backFaceBias: 0.5 });
+const note = Object.freeze({ placement: 6, centerTimestampMs: 1000, hand: "left", direction: "up" });
+const atNote = Object.freeze({ ...pose(-90), anchor: Object.freeze({ x: 2, y: 0.2, z: 0 }) });
+const target = Object.freeze([{ id: "opposite", hand: "left", direction: "up", x: 2, y: 1, z: 0 }]);
+const corrected = magneticSaberOrientation(atNote, 1000, target, defaults);
+assert.ok(errorTo(corrected) <= CONE_DEGREES + 1e-10,
+  `default weak assist must enter the opposite-facing cone (residual ${errorTo(corrected)}°)`);
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(note, atNote, 1000, 180), false, "raw opposite-facing capsule misses");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(note, { ...atNote, orientation: corrected }, 1000, 180), true,
+  "the same assisted orientation published for rendering must contact the note");
+const prior = { songTimeMs: 900, measurementTimestampMs: 900, sourceFrameId: "a", sourceIdentity: "camera", calibrationId: "cal", sx: 2, sy: 0.1 };
+const invalidMotion = { ...prior, songTimeMs: 1000, measurementTimestampMs: 1000, sourceFrameId: "b", sy: 0 };
+assert.equal(matchesAuthoredDirection("up", prior, invalidMotion, CONE_DEGREES), false,
+  "capsule contact cannot grant a hit when measured wrist motion is opposite the arrow");
+
+// Crossing the ±180° seam must take the shortest path rather than an almost
+// complete revolution; the geometric cone is identical on either side.
+for (const start of [-179, 179]) {
+  const seamPose = Object.freeze({ ...atNote, orientation: equipmentEulerDegreesToQuaternion({ x: 0, y: 0, z: start }) });
+  const leftTarget = Object.freeze([{ ...target[0], direction: "left" }]);
+  const seamOrientation = magneticSaberOrientation(seamPose, 1000, leftTarget, defaults);
+  const seamDelta = Math.abs((((headingDegrees(seamOrientation) - start) % 360) + 540) % 360 - 180);
+  assert.ok(seamDelta < 1, `seam start ${start}° must take the 1° short arc (${seamDelta}°)`);
+  assert.ok(Math.abs((((headingDegrees(seamOrientation) - 180) % 360) + 540) % 360 - 180) < 1,
+    `seam start ${start}° must remain near the left-facing cone axis`);
+}
+
+console.log("Magnetic assist enters the authored hit cone at weak/opposite headings; collision and measured-motion gate agree.");

@@ -255,12 +255,14 @@ export function magneticSaberOrientation(pose, nowMs, targets, settings) {
   // and changes nothing for gameplay. Compute the weight at which the blade first
   // enters the cone and never use less than that, so the assist always actually
   // arcs into the hit zone; proximity still decides whether it goes further and
-  // fully aligns. Plain beats (no authored direction) keep aiming at the centre.
+  // fully aligns. Directionless beats have no authored heading and are not steered.
   const coneLimitRad = (settings.coneToleranceDegrees ?? 45) * Math.PI / 180;
-  const needed = Math.abs(heading - currentHeading);
-  const coneEntryWeight = needed <= coneLimitRad ? 1 : Math.min(1, coneLimitRad / needed);
+  // atan2 wraps at ±π; always steer across the shorter arc at that seam.
+  const headingDelta = Math.atan2(Math.sin(heading - currentHeading), Math.cos(heading - currentHeading));
+  const needed = Math.abs(headingDelta);
+  const coneEntryWeight = needed <= coneLimitRad ? 0 : Math.max(0, 1 - coneLimitRad / needed);
   const effectiveWeight = Math.min(1, Math.max(strongest.weight, coneEntryWeight));
-  const correction = equipmentEulerDegreesToQuaternion({ x: 0, y: 0, z: (heading - currentHeading) * 180 / Math.PI });
+  const correction = equipmentEulerDegreesToQuaternion({ x: 0, y: 0, z: headingDelta * 180 / Math.PI });
   const goal = multiplyEquipmentQuaternions(correction, pose.orientation);
   return slerpEquipmentQuaternionShortest(pose.orientation, goal, effectiveWeight);
 }
