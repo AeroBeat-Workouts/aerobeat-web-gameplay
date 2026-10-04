@@ -513,4 +513,28 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.deepEqual(pos,[...pos].sort((a,b)=>a-b),"full hazardOutcomes array stays sorted by committed position after skipped sorts");
 }
 
+// Fix 4: the flow WALL outcome must carry `firstContactTimelinePositionMs` =
+// the FIRST tick the nose was inside the obstacle, NOT the removal tick. The
+// downstream projector fires the hurt vignette from this field; stamping the
+// removal tick replayed the effect after a clean exit. Here the nose sweeps
+// outside->inside between 900 and 950 (the analytic crossing is ~933ms), leaves
+// by 1050, and the wall finalizes at its interval end 1100 — so first-contact
+// must read ~933ms, not the 1100 removal tick. This mirrors the boxing outcome
+// shape, which already carried the field.
+{
+  const c=ready([wall("fix4-wall",900,1100)]);
+  send(c,900,900,[-.4,1],[3.4,1],[2.5,1]); // nose outside the wall column (sx=2.5, outside [0.5,1.5])
+  send(c,950,950,[-.4,1],[3.4,1],[1,1]); // nose ENTERS the wall column (sx=1.0) -> first contact
+  assert.equal(c.getSnapshot().hazardContact.active,true,"nose inside the wall activates hazardContact");
+  send(c,1050,1050,[-.4,1],[3.4,1],[2.5,1]); // nose LEAVES the wall before the interval end
+  assert.equal(c.getSnapshot().hazardContact.active,false,"nose leaving the wall releases hazardContact");
+  send(c,1100,1100,[-.4,1],[3.4,1],[2.5,1]); // removal tick: wall finalizes
+  const wallOutcome=c.getHazardOutcomes().find((outcome)=>outcome.kind==="wall");
+  assert.equal(wallOutcome?.result,"contact","wall contact settles as contact");
+  assert.equal(typeof wallOutcome?.firstContactTimelinePositionMs,"number","flow wall outcome carries firstContactTimelinePositionMs");
+  assert.equal(wallOutcome?.committedTimelinePositionMs,1100,"committed stays the removal/finalization tick");
+  assert.equal(wallOutcome?.firstContactTimelinePositionMs,933.3333333333334,"firstContact is the FIRST contact tick (swept 900->950 crossing), not the removal tick");
+  assert.notEqual(wallOutcome?.firstContactTimelinePositionMs,wallOutcome?.committedTimelinePositionMs,"first-contact precedes the removal tick (the hurt effect must not replay at removal)");
+}
+
 console.log("Flow Colliders swept, directional, hazard, privacy, and lifecycle validation passed.");
