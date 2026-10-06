@@ -574,7 +574,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (source.obstaclesEnabled !== undefined && typeof source.obstaclesEnabled !== "boolean") throw gameplayError("content_configuration_invalid", "Obstacles enabled must be boolean");
     const nextObstaclesEnabled = source.obstaclesEnabled === undefined ? obstaclesEnabled : source.obstaclesEnabled;
     const nextShadowVariants = source.shadowVariants === undefined ? shadowVariants : normalizeShadowVariants(source.shadowVariants);
-    const preserve = new Map(events.filter((event) => shouldPreserveEvent(event)).map((event) => [String(event.eventId), event]));
+    // When the mode changes (flow ↔ boxing), the old-mode events are structurally
+    // incompatible with the new mode's evaluation path. Do not preserve them;
+    // re-resolve the full beat content for the new mode. Same-mode variant swaps
+    // (difficulty/modifier changes) still preserve past/judged/active events.
+    const modeChanged = variant !== null && variant.mode !== nextVariant.mode;
+    const preserve = new Map(events.filter((event) => shouldPreserveEvent(event) && (!modeChanged || event.variantId === nextVariant.variantId)).map((event) => [String(event.eventId), event]));
     const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
     const merged = [...preserve.values()];
     const acceptedNextEvents = [];
