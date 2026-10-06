@@ -168,6 +168,14 @@ function readyPlaying(coordinator, events, selected = variant()) {
   // and the flow-miss timing-only miss resolves to the "almost" quarter tier
   // (no wrong_cell on the swept late-window miss), so the combo is NOT broken.
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo, score: entry.score })), [{ ranked: false, localOnly: true, hits: 4, misses: 0, combo: 4, maxCombo: 4, score: 750 }]);
+  // 0.0.96: the resolved tier is carried on the judgement record so the
+  // renderer's target.tier can pick the correct feedback label.
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.tier]), [
+    ["flow-left-a", "great"],
+    ["flow-left-b", "great"],
+    ["flow-miss", "almost"],
+    ["flow-after-miss", "great"]
+  ], "judgement records carry the resolved 4-tier scoring tier");
 }
 
 // Direction enforcement and exact activation exclusion use the unchanged Flow evaluator.

@@ -1667,7 +1667,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const match = matchEvent(event, shadow, latestEvidence, lastInput);
         if (match.hit) {
           shadowConsumed.add(key);
-          shadowJudgements.push(makeJudgement(event, shadow, "hit", match.diagnostics, latestEvidence, latestEvidenceTimelineMs, timelinePositionMs, true, sessionPurpose));
+          shadowJudgements.push(makeJudgement(event, shadow, "hit", match.diagnostics, latestEvidence, latestEvidenceTimelineMs, timelinePositionMs, true, sessionPurpose, "good"));
         }
       }
     }
@@ -1740,13 +1740,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function recordJudgementAt(event, result, diagnostics, evidence, shadow, evidenceTimelineMs, hitDepthHalf = null) {
     const eventVariant = variantForEvent(event);
     const eventProfile = profileForEvent(event);
-    const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidenceTimelineMs, timelinePositionMs, shadow, sessionPurpose);
+    // 0.0.96: resolve the scoring tier BEFORE the judgement record is built so
+    // the record carries it. The tier is presentation truth the renderer reads
+    // from `target.tier` to choose the Great/Good/Almost/Miss feedback label;
+    // without it the renderer defaulted every hit to "great" and every miss to
+    // "miss", hiding the Good and Almost tiers from the 0.0.94 scoring system.
+    const tier = resolveScoringTier(result, diagnostics, hitDepthHalf);
+    const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidenceTimelineMs, timelinePositionMs, shadow, sessionPurpose, tier);
     if (shadow) shadowJudgements.push(judgement);
     else {
       judgements.push(judgement);
       judgedIds.add(String(event.eventId));
       if (hitDepthHalf !== null) hitDepthHalfByEventId.set(String(event.eventId), hitDepthHalf);
-      const tier = resolveScoringTier(result, diagnostics, hitDepthHalf);
       if (eventVariant.rulesetId === BOXING_COLLIDER_RULESET) updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event));
       else updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
     }
@@ -2257,12 +2262,12 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
   }
 }
 
-/** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @param {AeroGameplaySessionPurpose} sessionPurpose @returns {AeroGameplayJudgement} */
-function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow, sessionPurpose) {
+/** @param {DataRecord} event @param {DataRecord | null} selectedVariant @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {number | null} evidenceTimelineMs @param {number} committedTimelinePositionMs @param {boolean} shadow @param {AeroGameplaySessionPurpose} sessionPurpose @param {"great" | "good" | "almost" | "miss" | "ignored"} tier @returns {AeroGameplayJudgement} */
+function makeJudgement(event, selectedVariant, result, diagnostics, evidence, evidenceTimelineMs, committedTimelinePositionMs, shadow, sessionPurpose, tier) {
   const rulesetId = /** @type {import("@aerobeat/web-contracts").AeroRulesetId} */ (selectedVariant?.rulesetId ?? FLOW_COLLIDER_RULESET);
   const recipeId = /** @type {import("@aerobeat/web-contracts").AeroConversionRecipeId | null} */ (selectedVariant?.recipeId ?? null);
   const center = Number(event.centerTimestampMs);
-  return /** @type {AeroGameplayJudgement} */ (Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow }));
+  return /** @type {AeroGameplayJudgement} */ (Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow, tier }));
 }
 
 /** @param {DataRecord} event */
