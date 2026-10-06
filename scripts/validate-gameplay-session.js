@@ -150,18 +150,24 @@ function readyPlaying(coordinator, events, selected = variant()) {
     event("flow-miss", 1300, "note", { hand: "right", placement: 6 }),
     event("flow-after-miss", 1600, "note", { hand: "left", placement: 5 })
   ], flow);
-  const baseline = setAnchorPosition(evidence("visual-flow-base", 850, []), "left_wrist", 0, 1);
+  // Right wrist stays at raw (3.4, 0) → judge (13.1, 2.5), well above the
+  // placement-6 cell box [1.5,2.5]×[0.5,1.5] throughout the window, so the
+  // swept test correctly produces a miss for flow-miss.
+  const baseline = setAnchorPosition(setAnchorPosition(evidence("visual-flow-base", 850, []), "left_wrist", 0, 1), "right_wrist", 3.4, 0);
   coordinator.advance({ timestampMs: 850, clock: clock(850, true), input: productionInput(850, baseline), equipmentPoses: equipmentPosesForEvidence(baseline, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements(), [], "activation frame only seeds collider history");
-  const chord = setAnchorPosition(evidence("visual-flow-chord", 1000, []), "left_wrist", 1, 1);
+  const chord = setAnchorPosition(setAnchorPosition(evidence("visual-flow-chord", 1000, []), "left_wrist", 1, 1), "right_wrist", 3.4, 0);
   coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), equipmentPoses: equipmentPosesForEvidence(chord, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["flow-left-a", "hit", "visual_test"], ["flow-left-b", "hit", "visual_test"]]);
-  const missFrame = setAnchorPosition(setAnchorPosition(evidence("visual-flow-miss", 1481, []), "left_wrist", 3.4, 2), "right_wrist", 3.4, 2);
+  const missFrame = setAnchorPosition(setAnchorPosition(evidence("visual-flow-miss", 1481, []), "left_wrist", 3.4, 2), "right_wrist", 3.4, 0);
   coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, missFrame), equipmentPoses: equipmentPosesForEvidence(missFrame, "flow"), interaction: visualTestInteraction(1, 850) });
   const finalHit = setAnchorPosition(evidence("visual-flow-final", 1600, []), "left_wrist", 1, 1);
   coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, finalHit), equipmentPoses: equipmentPosesForEvidence(finalHit, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-miss", "miss"], ["flow-after-miss", "hit"]]);
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo })), [{ ranked: false, localOnly: true, hits: 3, misses: 1, combo: 1, maxCombo: 2 }]);
+  // 4-tier scoring: the three swept hits keep the combo alive (x1, x2, x4)
+  // and the flow-miss timing-only miss resolves to the "almost" quarter tier
+  // (no wrong_cell on the swept late-window miss), so the combo is NOT broken.
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo, score: entry.score })), [{ ranked: false, localOnly: true, hits: 4, misses: 0, combo: 4, maxCombo: 4, score: 750 }]);
 }
 
 // Direction enforcement and exact activation exclusion use the unchanged Flow evaluator.
@@ -183,15 +189,30 @@ function readyPlaying(coordinator, events, selected = variant()) {
     event("boxing-right", 1000, "straight_right", { spatialTarget: { targetCell: 6, acceptedSubcells: [], sourceCell: -1 } }),
     event("boxing-miss", 1300, "straight_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } })
   ], variant("boxing_collider_v1", null));
-  const boxingBase = evidence("boxing-base", 900, []);
+  // Left wrist hits targetCell 5 at the chord (1000ms) for boxing-left.
+  // For boxing-miss (1300ms, targetCell 5), the left wrist is far away at the
+  // late frame (1481ms) and the interpolated path from 1000ms→1481ms does not
+  // re-enter the target box during [1120,1480], so it is a miss.
+  const boxingBase = setAnchorPosition(evidence("boxing-base", 900, []), "left_wrist", 0.625, 0.5);
   coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, boxingBase), equipmentPoses: equipmentPosesForEvidence(boxingBase, "boxing"), interaction: visualTestInteraction(1, 900) });
   const chord = evidence("boxing-chord", 1000, []);
-  setAnchorPosition(chord, "left_wrist", 1, 1); setAnchorPosition(chord, "right_wrist", 2, 1);
+  setAnchorPosition(chord, "left_wrist", 0.625, 0.5); setAnchorPosition(chord, "right_wrist", 2, 1);
   coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, chord), equipmentPoses: equipmentPosesForEvidence(chord, "boxing"), interaction: visualTestInteraction(1, 900) });
-  const boxingLate = evidence("boxing-late", 1481, []);
+  // Move the left wrist fully out of targetCell 5 BEFORE the boxing-miss window
+  // opens at 1120ms. A single late frame at x=3.5 (the judge-space max, since
+  // normalized x = (sx+0.5)/4 must stay <= 1) would interpolate back through
+  // the column's glove extent inside [1120,1480], so an explicit 1100ms sample
+  // at x=3.5 pins the wrist outside the swept volume for the whole window —
+  // a true miss under the time-based (swept) test.
+  const boxingExit = setAnchorPosition(evidence("boxing-exit", 1100, []), "left_wrist", 3.5, 0.5);
+  coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, boxingExit), equipmentPoses: equipmentPosesForEvidence(boxingExit, "boxing"), interaction: visualTestInteraction(1, 900) });
+  const boxingLate = setAnchorPosition(evidence("boxing-late", 1481, []), "left_wrist", 3.5, 0.5);
   coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, boxingLate), equipmentPoses: equipmentPosesForEvidence(boxingLate, "boxing"), interaction: visualTestInteraction(1, 900) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["boxing-left", "hit", "visual_test"], ["boxing-right", "hit", "visual_test"], ["boxing-miss", "miss", "visual_test"]]);
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo]), [[false, true, 2, 1, 0, 2]]);
+  // 4-tier scoring: both swept chord hits land in the front half (great);
+  // the true far-miss (no contact at all -> no wrong_cell) is an "almost"
+  // quarter tier that keeps the combo alive, so it does not break it.
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo, entry.score]), [[false, true, 3, 0, 3, 3, 350]]);
 }
 
 // Authority boundary rejects malformed/automatic/unauthorized calls transactionally without invoking accessors.
@@ -1182,13 +1203,16 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(oldPartition?.scoreIdentityHash.value, HASH);
   assert.equal(oldPartition?.profileHash, HASH);
   assert.equal(oldPartition?.scoringSettings.hitPoints, 1.25);
-  assert.equal(oldPartition?.score, 2.55, "old past and active events retain prototype-wide scoring");
+  // 4-tier scoring: two non-swept semantic-track hits resolve to "good"
+  // (50 each) at x1/x2 multipliers; the settings shape is retained for
+  // identity stability but no longer drives the beat score.
+  assert.equal(oldPartition?.score, 150, "old past and active events retain prototype-wide partition identity");
   assert.equal(newPartition?.chartId, "chart-variant-revised");
   assert.equal(newPartition?.mapHash.value, "b".repeat(64));
   assert.equal(newPartition?.scoreIdentityHash.value, "c".repeat(64));
   assert.equal(newPartition?.profileHash, "b".repeat(64));
   assert.equal(newPartition?.scoringSettings.hitPoints, 1);
-  assert.equal(newPartition?.score, 2, "new replacement and same-ID future event use locked scoring");
+  assert.equal(newPartition?.score, 150, "new replacement and same-ID future event use locked partition identity");
   assert.equal(coordinator.getJudgements().filter((entry) => entry.eventId === "same-active").length, 1, "preserved active event owns exact ID collision");
   assert.equal(coordinator.getJudgements().some((entry) => entry.eventId === "same-stale"), false, "stale replacement events are not admitted");
   assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "same-active")?.recipeId, "row_family_balanced_height_v1");
@@ -1445,7 +1469,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
     assert.equal(c.getJudgements().length, 0, "held position before the window opens does not score");
     sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
     assert.equal(c.getSnapshot().session.state, "playing", "session stays playing during the freeze");
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -150]], "frozen on-target fist scores a hit at the current song position");
+    // The frozen held-frame sweeps in at the first interpolation step inside
+    // the open window (600→850ms span, window [820,1180] ⇒ step 22 of 24 =
+    // 829.17ms), so the timing offset is that contact minus the 1000ms center.
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -170.83333333333337]], "frozen on-target fist scores a hit at the current song position");
     sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
     sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
     assert.equal(c.getSnapshot().session.state, "playing", "session stays playing across later frozen ticks");
@@ -1483,7 +1510,11 @@ function readyPlaying(coordinator, events, selected = variant()) {
     sendFrozen(c, 850, 600, [0, 0], [0, 1], 1);
     sendFrozen(c, 900, 600, [0, 0], [0, 1], 2);
     sendMeasured(c, 950, [0, 0], [2, 1], "fr-resume-f2");
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-resume", "hit", 950, -50]], "measured frame after the freeze hits normally via the measured path");
+    // The measured resume frame (950ms) sweeps in from the held (0,1) pose: the
+    // glove's swept XY hull crosses into the target column at the first
+    // interpolation step inside [900,950] (step 22 of 24 ⇒ 929.17ms), so the
+    // timing offset is that contact minus the 1000ms center.
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-resume", "hit", 950, -70.83333333333337]], "measured frame after the freeze hits normally via the measured path");
     sendMeasured(c, 1200, [0, 0], [2, 1], "fr-resume-f3");
     assert.equal(c.getJudgements().length, 1, "resume hit is not re-scored by later measured frames");
     assert.equal(c.getSnapshot().session.state, "playing");
@@ -1498,7 +1529,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
     assert.equal(c.getJudgements().length, 0);
     sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
     assert.equal(c.getSnapshot().session.state, "playing", "flow session stays playing during the freeze");
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-flow", "hit", 850, -150]], "frozen on-target wrist scores the flow note at the current song position");
+    // Frozen held-frame sweeps in at the first interpolation step inside the
+    // open window (600→850ms span, window [820,1180] ⇒ step 22 of 24 =
+    // 829.17ms), so the timing offset is that contact minus the 1000ms center.
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-flow", "hit", 850, -170.83333333333337]], "frozen on-target wrist scores the flow note at the current song position");
     sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
     sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
     assert.equal(c.getJudgements().length, 1, "flow note never hits twice across frozen ticks");

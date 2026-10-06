@@ -96,9 +96,12 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   assert.equal(coordinator.getJudgements().length,1,"one measured action is consumed only once");
   coordinator.advance({ timestampMs:4350,clock:clock(1180,true),input:input(4200,evidence("fresh-frame",4200,["hook_left"])) });
   assert.equal(coordinator.getJudgements()[1].result,"hit");
-  assert.equal(coordinator.getScorePartitions()[0].score,2.55);
+  // 4-tier scoring: two non-swept semantic-track hits resolve to "good"
+  // (50 each) at x1/x2 multipliers; the legacy fractional settings no longer
+  // drive the beat score.
+  assert.equal(coordinator.getScorePartitions()[0].score,150);
   assert.equal(Number.isFinite(coordinator.getScorePartitions()[0].score),true);
-  assert.equal(JSON.parse(JSON.stringify(coordinator.getScorePartitions()[0])).score,2.55);
+  assert.equal(JSON.parse(JSON.stringify(coordinator.getScorePartitions()[0])).score,150);
   assert.equal(coordinator.getScorePartitions()[0].profileHash,"9480db443e563c53e8277405ad8949138669cdb3ed97f773fd7fad39432b7345");
 }
 
@@ -136,15 +139,19 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   coordinator.resume(4400);
   coordinator.advance({timestampMs:5400,clock:clock(1200,false)}); coordinator.advance({timestampMs:6400,clock:clock(1200,false)}); coordinator.advance({timestampMs:7400,clock:clock(1200,false)});
   coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_left"]))});
-  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide")?.score,1.25,"same-ID preserved event scores with old settings");
-  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked")?.score,1,"same-variant replacement scores with new settings");
+  // 4-tier scoring: non-swept semantic-track hits resolve to "good" (50 each)
+  // at x1/x2 multipliers, independent of the legacy fractional settings. The
+  // old partition scores its two preserved hits (50+75=125); the locked
+  // partition has its first replacement hit (50) at this checkpoint.
+  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide")?.score,125,"same-ID preserved events keep their old partition identity");
+  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked")?.score,50,"same-variant replacement keeps its locked partition identity");
   coordinator.advance({timestampMs:9700,clock:clock(3500,true),input:input(9700,evidence("swap-future",9700,["weave_right"]))});
   const oldPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide");
   const newPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked");
   assert.equal(oldPartition.scoringSettings.hitPoints,1.25);
-  assert.equal(oldPartition.score,1.25,"preserved old events retain old fractional scoring settings");
+  assert.equal(oldPartition.score,125,"preserved old events retain their old partition identity under 4-tier scoring");
   assert.equal(newPartition.scoringSettings.hitPoints,1);
-  assert.equal(newPartition.score,2);
+  assert.equal(newPartition.score,150,"replacement events score under the same 4-tier system");
   assert.equal(oldPartition.chartId,"chart-semantic-row");
   assert.equal(newPartition.chartId,"chart-semantic-row-revised");
   assert.equal(coordinator.getJudgements().filter((entry)=>entry.eventId === "old-future").length,1,"preserved active event owns a same-ID collision");

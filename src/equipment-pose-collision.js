@@ -1,10 +1,12 @@
 // @ts-check
 
-import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveObb, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest } from "@aerobeat/web-contracts";
+import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveObb, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
 import { flowNoteCellBox } from "./flow-collider-collision.js";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
 /** @typedef {Readonly<{x:number,y:number}>} Point2 */
+/** @typedef {import("@aerobeat/web-contracts").AeroResolvedEquipmentPose} ResolvedPose */
+/** @typedef {"front" | "back"} HitDepthHalf */
 
 /** Settled contracts revision whose resolved-pose semantics this judge consumes. */
 export const equipmentPoseContractsCommit = "51c2b42805f5aa008386dc8bc779cfad8542af34";
@@ -155,4 +157,231 @@ function convexPolygonsContact(left, right) {
     if (a.max < b.min || b.max < a.min) return false;
   }
   return true;
+}
+
+/* ------------------------------------------------------------------------
+ * Swept (time-based) hit test
+ *
+ * A hit is no longer a single snapshot in time: the equipment is swept
+ * through every song-time inside the beat's timing window
+ * `[center - window*depthForward, center + window*depthBackward]` and the
+ * beat's XY cell box is tested at each sampled and interpolated pose. The
+ * depth condition is automatic — a beat's Z is `(t - center) * 0.006`, which
+ * lies inside the collider Z-range exactly when t lies inside that window.
+ * Because the test integrates over the whole window, a late hit that the
+ * old single-snapshot test tunnels through (sparse low-FPS samples that jump
+ * from before the window to after it) is caught by the interpolation across
+ * the gap. Results are deterministic in the pose history alone: identical
+ * histories produce identical hits at any camera update rate.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Frame-rate-independent margin kept beyond the deepest possible window
+ * (300 ms max window × 4 max depth factor) so a bounded pose history always
+ * covers the swept range of any legal beat.
+ */
+export const sweptPoseHistoryMarginMs = 200;
+
+/**
+ * Retain a bounded, ascending per-role resolved-pose history.
+ *
+ * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
+ * @param {ResolvedPose | null} pose
+ * @param {number} timestampMs The measurement timestamp for this entry.
+ * @param {number} trimMs Total trim window (deepest legal window + margin).
+ * @returns {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>}
+ */
+export function pushPoseHistory(history, pose, timestampMs, trimMs) {
+  if (pose === null) return Object.freeze([]);
+  const entry = Object.freeze({ t: timestampMs, pose });
+  const cutoff = timestampMs - trimMs;
+  // Copy into a fresh mutable array so the push never mutates a previous
+  // frozen history (which would throw).
+  const kept = [];
+  for (const candidate of history) if (candidate.t > cutoff) kept.push(candidate);
+  kept.push(entry);
+  return Object.freeze(kept);
+}
+
+/** @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */
+function circleContactsRectangle(center, rectangle, radius) {
+  const nearestX = Math.max(rectangle.minX, Math.min(center.x, rectangle.maxX));
+  const nearestY = Math.max(rectangle.minY, Math.min(center.y, rectangle.maxY));
+  return Math.hypot(center.x - nearestX, center.y - nearestY) <= radius + Number.EPSILON;
+}
+
+/**
+ * Interpolate two resolved poses at a normalized progress in [0, 1].
+ * Anchors interpolate linearly, orientation via shortest-path slerp, scale
+ * linearly; identity fields carry from the start pose.
+ *
+ * @param {ResolvedPose} start
+ * @param {ResolvedPose} target
+ * @param {number} progress
+ * @returns {ResolvedPose}
+ */
+export function lerpResolvedEquipmentPose(start, target, progress) {
+  const p = Math.max(0, Math.min(1, progress));
+  return createResolvedEquipmentPose({
+    role: start.role,
+    mode: start.mode,
+    anchor: {
+      x: start.anchor.x + (target.anchor.x - start.anchor.x) * p,
+      y: start.anchor.y + (target.anchor.y - start.anchor.y) * p,
+      z: start.anchor.z + (target.anchor.z - start.anchor.z) * p
+    },
+    scale: start.scale + (target.scale - start.scale) * p,
+    orientation: slerpEquipmentQuaternionShortest(start.orientation, target.orientation, p),
+    geometryIdentity: start.geometryIdentity,
+    configIdentity: start.configIdentity
+  });
+}
+
+/** @param {DataRecord} event @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume @param {number} timingWindowMs */
+function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
+  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
+  const capsule = resolveSaberCapsule(pose);
+  return segmentContactsRectangle(
+    Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
+    Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
+    bounds,
+    capsule.radius
+  );
+}
+
+/** @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target @param {ResolvedPose} pose @param {number} timingWindowMs @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume */
+function boxingSweptContactAtPose(target, pose, timingWindowMs, volume) {
+  const bounds = resolveTargetColliderBounds("boxing", target, { x: 0.5, y: 0.5 }, timingWindowMs, volume);
+  const obb = resolveGloveObb(pose);
+  const corners = [];
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+    corners.push(Object.freeze({
+      x: obb.center.x + sx * obb.axes.x.x * obb.halfExtents.x + sy * obb.axes.y.x * obb.halfExtents.y + sz * obb.axes.z.x * obb.halfExtents.z,
+      y: obb.center.y + sx * obb.axes.x.y * obb.halfExtents.x + sy * obb.axes.y.y * obb.halfExtents.y + sz * obb.axes.z.y * obb.halfExtents.z
+    }));
+  }
+  const hull = convexHull(corners);
+  const rectangle = Object.freeze([
+    Object.freeze({ x: bounds.minX, y: bounds.minY }),
+    Object.freeze({ x: bounds.maxX, y: bounds.minY }),
+    Object.freeze({ x: bounds.maxX, y: bounds.maxY }),
+    Object.freeze({ x: bounds.minX, y: bounds.maxY })
+  ]);
+  return convexPolygonsContact(hull, rectangle);
+}
+
+/**
+ * Swept hit test for one beat against a bounded ascending resolved-pose
+ * history (`{t, pose}` entries, measurement timestamps in ms).
+ *
+ * Samples the equipment at every stored pose inside the beat's timing
+ * window AND linearly interpolates between consecutive stored poses (anchor
+ * + extents via the resolved volume), so sparse low-FPS histories catch a
+ * crossing that the old single-snapshot test tunnels through. Returns the
+ * EARLIEST contact time and which half of the window it falls in —
+ * `front` for `t < center` (early/Great), `back` for `t >= center` (late/Good) —
+ * or `null` when the beat is never contacted.
+ *
+ * @param {DataRecord} event
+ * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
+ * @param {number} timingWindowMs
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ */
+export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}) {
+  if (history.length === 0) return null;
+  const box = flowNoteCellBox(event);
+  const center = Number(event.centerTimestampMs);
+  const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
+  const windowEnd = center + timingWindowMs * (volume.depthBackward ?? 1);
+  const contacts = [];
+  /** @type {number[]} */ const sampleTimes = [];
+  for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
+  const probe = (t) => {
+    if (t < windowStart || t > windowEnd) return;
+    const pose = resolvePoseAt(history, t);
+    if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) contacts.push(t);
+  };
+  for (const t of sampleTimes) probe(t);
+  // Interpolate across every stored-pose gap that overlaps the window.
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const from = history[index]; const to = history[index + 1];
+    const spanStart = Math.max(windowStart, from.t);
+    const spanEnd = Math.min(windowEnd, to.t);
+    if (spanStart > spanEnd || to.t <= from.t) continue;
+    const steps = 24;
+    for (let step = 1; step < steps; step += 1) {
+      const t = from.t + (to.t - from.t) * (step / steps);
+      if (t < windowStart || t > windowEnd) continue;
+      const pose = resolvePoseAt(history, t);
+      if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) { contacts.push(t); break; }
+    }
+  }
+  if (contacts.length === 0) return null;
+  contacts.sort((a, b) => a - b);
+  const first = contacts[0];
+  return Object.freeze({ firstContactMs: first, hitDepthHalf: /** @type {HitDepthHalf} */ (first < center ? "front" : "back") });
+}
+
+/**
+ * Swept hit test for one boxing target against a bounded ascending
+ * resolved-pose history. Same semantics as
+ * {@link sweptSaberContactsFlowTarget}; the glove OBB XY convex hull is
+ * tested at each sampled and interpolated pose.
+ *
+ * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
+ * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
+ * @param {number} timingWindowMs
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ */
+export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}) {
+  if (history.length === 0) return null;
+  const center = Number(target.centerTimestampMs);
+  const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
+  const windowEnd = center + timingWindowMs * (volume.depthBackward ?? 1);
+  const contacts = [];
+  /** @type {number[]} */ const sampleTimes = [];
+  for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
+  const probe = (t) => {
+    if (t < windowStart || t > windowEnd) return;
+    const pose = resolvePoseAt(history, t);
+    if (boxingSweptContactAtPose(target, pose, timingWindowMs, volume)) contacts.push(t);
+  };
+  for (const t of sampleTimes) probe(t);
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const from = history[index]; const to = history[index + 1];
+    const spanStart = Math.max(windowStart, from.t);
+    const spanEnd = Math.min(windowEnd, to.t);
+    if (spanStart > spanEnd || to.t <= from.t) continue;
+    const steps = 24;
+    for (let step = 1; step < steps; step += 1) {
+      const t = from.t + (to.t - from.t) * (step / steps);
+      if (t < windowStart || t > windowEnd) continue;
+      const pose = resolvePoseAt(history, t);
+      if (boxingSweptContactAtPose(target, pose, timingWindowMs, volume)) { contacts.push(t); break; }
+    }
+  }
+  if (contacts.length === 0) return null;
+  contacts.sort((a, b) => a - b);
+  const first = contacts[0];
+  return Object.freeze({ firstContactMs: first, hitDepthHalf: /** @type {HitDepthHalf} */ (first < center ? "front" : "back") });
+}
+
+/**
+ * Resolve the interpolated pose at song time t for an ascending pose history.
+ * t outside the history range clamps to the nearest stored pose.
+ *
+ * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
+ * @param {number} t
+ * @returns {ResolvedPose}
+ */
+function resolvePoseAt(history, t) {
+  if (t <= history[0].t) return history[0].pose;
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const from = history[index]; const to = history[index + 1];
+    if (t <= to.t) {
+      if (to.t <= from.t) return to.pose;
+      return lerpResolvedEquipmentPose(from.pose, to.pose, (t - from.t) / (to.t - from.t));
+    }
+  }
+  return history[history.length - 1].pose;
 }

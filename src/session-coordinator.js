@@ -17,7 +17,7 @@ import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometr
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
-import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -162,6 +162,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * measurement timestamps) retained for authored cut-direction continuity. */
   let leftWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
   let rightWristHistory = /** @type {ReadonlyArray<Readonly<{t:number,x:number,y:number}>>} */ (Object.freeze([]));
+  /** Bounded per-role FULL resolved-pose history (`{t, pose}`) feeding the
+   * time-based (swept) collider hit test. Trimmed to cover the deepest legal
+   * timing window plus margin; see sweptPoseHistoryMarginMs. */
+  let leftPoseHistory = /** @type {ReadonlyArray<Readonly<{t:number, pose: AeroResolvedEquipmentPose}>>} */ (Object.freeze([]));
+  let rightPoseHistory = /** @type {ReadonlyArray<Readonly<{t:number, pose: AeroResolvedEquipmentPose}>>} */ (Object.freeze([]));
+  /** Internal hit-depth-half tracking (front = early, back = late) for
+   * collider hits. Not part of the public AeroGameplayJudgementV2 contract;
+   * read by later Great/Good scoring. Keyed by eventId. */
+  const hitDepthHalfByEventId = /** @type {Map<string, "front" | "back">} */ (new Map());
   /** Pre-push per-wrist histories retained as immutable diagnostics for
    * authored direction decisions. Resolved equipment poses, not these arrays,
    * are the sole collision-volume authority. */
@@ -1036,7 +1045,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         } else if (occupiedObstacleIds.has(eventId)) boundaries.push({ timelineMs: prior.songTimeMs, kind: "exit", eventId });
       } else if (pointContactsObstacle(obstacle, sample)) {
         tracker = { ...tracker, contact: addInterval(tracker.contact, sample.songTimeMs, sample.songTimeMs), firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs ?? sample.songTimeMs, evidenceFrameId: tracker.evidenceFrameId ?? sample.sourceFrameId, calibrationId: tracker.calibrationId ?? sample.calibrationId };
-        boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId }, { timelineMs: sample.songTimeMs, kind: "exit", eventId });
+        // B12-squat (0.0.87) flow mirror: a first-ever discrete sample
+        // (prior === null) SUSTAINS the contact (enter only) so the
+        // during-collision state vignette pulses on that frame; a severed
+        // discrete sample (prior !== null && !continuous) keeps the
+        // enter+exit flash so the tracking stall ends the episode (the
+        // pre-loop severing already cleared occupied + released, so the flash
+        // nets to {active:false} exactly as before).
+        if (prior === null) boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId });
+        else boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId }, { timelineMs: sample.songTimeMs, kind: "exit", eventId });
       }
       obstacleStates.set(eventId, tracker);
     }
@@ -1129,7 +1146,31 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         } else if (occupiedObstacleIds.has(eventId)) boundaries.push({ timelineMs: prior.songTimeMs, kind: "exit", eventId });
       } else if (pointContactsObstacle(obstacle, sample)) {
         tracker = { ...tracker, contact: addInterval(tracker.contact, sample.songTimeMs, sample.songTimeMs), firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs ?? sample.songTimeMs, evidenceFrameId: tracker.evidenceFrameId ?? sample.sourceFrameId, calibrationId: tracker.calibrationId ?? sample.calibrationId };
-        boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId }, { timelineMs: sample.songTimeMs, kind: "exit", eventId });
+        // B12-squat (0.0.87): the discrete path (no continuous prior) used to
+        // push an enter AND an exit at the same sample.songTimeMs. When both
+        // land in one processObstacleBoundaries time-group, the enter sets
+        // hazardContactSinceMs + occupies, then the exit immediately
+        // de-occupies + releases — so the snapshot reads {active:false,
+        // sinceMs, releasedAtMs} and the during-collision state vignette
+        // (frame.hazardContactActive) never pulses. That is the playtest
+        // symptom: the nose "went into the squat" but the red-edge vignette
+        // did not fire. The contact OUTCOME is still recorded (tracker.contact
+        // is independent of the boundaries), so the assembly's outcome-based
+        // derivation fires — but the state-driven vignette does not.
+        //
+        // Fix: a first-ever discrete sample (prior === null, tracking is
+        // normal) SUSTAINS the contact — push the enter only, and let the exit
+        // be driven by the next sample that observes the nose outside (the
+        // continuous path's !endedInside) or by finalizeBoxingObstacles when
+        // the interval ends. This mirrors the continuous path's sustained
+        // semantics (an inside sample does not push an exit). A severed
+        // discrete sample (prior !== null && !continuous) keeps the
+        // enter+exit flash: the tracking stall ends the episode, and the
+        // pre-loop severing already cleared occupied + released, so the flash
+        // nets to {active:false} exactly as before (no behavior change for the
+        // stall case).
+        if (prior === null) boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId });
+        else boundaries.push({ timelineMs: sample.songTimeMs, kind: "enter", eventId }, { timelineMs: sample.songTimeMs, kind: "exit", eventId });
       }
       obstacleStates.set(eventId, tracker);
     }
@@ -1274,20 +1315,36 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // The resolved pose array is the sole collision-volume authority.
     exposedLeftWristHistory = leftWristHistory;
     exposedRightWristHistory = rightWristHistory;
-    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
+    // Append the CURRENT frame's full resolved poses to the swept history
+    // BEFORE the candidate loop so the pose the test just measures is itself
+    // a sample inside the window it sweeps (a pose is the authority for the
+    // song-time at which its frame was measured). The bounded trim keeps the
+    // history covering the deepest legal window plus margin.
+    pushPoseHistoryForRole("left_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
+    pushPoseHistoryForRole("right_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
+    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
     for (const event of events) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
       const eventSettings = flowColliderSettingsForEvent(event);
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
       if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
-      // The contract-resolved transformed 3D capsule is the sole Flow hit volume.
-      // Projection into judge XY naturally preserves local-axis roll and shortens
-      // under out-of-plane tilt; no renderer/GLB bounds or fixed fallback apply.
-      if (!resolvedSaberCapsuleContactsFlowTarget(event, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(eventSettings.timingWindowMs), colliderVolumeSettings(eventSettings))) continue;
+      // Time-based (swept) hit test: the contract-resolved transformed 3D
+      // capsule is the sole Flow hit volume, swept across the beat's full
+      // timing window using the bounded per-role pose history. Depth is
+      // automatic for any t inside the window; the earliest XY crossing
+      // registers the hit and carries which half of the window it fell in
+      // (front = early, back = late). Projection into judge XY naturally
+      // preserves local-axis roll and shortens under out-of-plane tilt; no
+      // renderer/GLB bounds or fixed fallback apply.
+      const volume = colliderVolumeSettings(eventSettings);
+      const windowMs = Number(eventSettings.timingWindowMs);
+      const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
+      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume);
+      if (swept === null) continue;
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
-      candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
+      candidates.push({ event, evidence: current, contactMs: swept.firstContactMs, hand, hitDepthHalf: swept.hitDepthHalf });
     }
     /** @type {typeof candidates} */ const accepted = [];
     for (const hand of /** @type {const} */ (["left", "right"])) {
@@ -1297,7 +1354,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       accepted.push(...ordered.filter((candidate) => Number(candidate.event.centerTimestampMs) === chordCenter));
     }
     accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
-    for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
+    for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs, candidate.hitDepthHalf);
     evaluateColliderBombs(left, right, priorLeft, priorRight, !seedLeftOnly, !seedRightOnly);
     previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
     leftWristHistory = pushJudgeHistory(leftWristHistory, left); rightWristHistory = pushJudgeHistory(rightWristHistory, right);
@@ -1329,6 +1386,23 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   /** @param {DataRecord} settings */
   function colliderVolumeSettings(settings) { return { scale: Number(settings.colliderScale), depthForward: Number(settings.colliderDepthForward), depthBackward: Number(settings.colliderDepthBackward) }; }
+
+  /**
+   * Push the current frame's full resolved pose into the bounded per-role
+   * swept hit-test history. The trim covers the deepest legal timing window
+   * (windowMs × depthBackward) plus margin so every window start is inside
+   * the history. Null (no valid pose this tick) clears the history so a
+   * stale streak cannot produce a fake crossing.
+   *
+   * @param {"left_wrist" | "right_wrist"} role
+   * @param {number} measurementTimestampMs
+   * @param {number} trimMs
+   */
+  function pushPoseHistoryForRole(role, measurementTimestampMs, trimMs) {
+    const pose = frameEquipmentPoses.get(role) ?? null;
+    if (role === "left_wrist") leftPoseHistory = pushPoseHistory(leftPoseHistory, pose === null ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), measurementTimestampMs, trimMs);
+    else rightPoseHistory = pushPoseHistory(rightPoseHistory, pose === null ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), measurementTimestampMs, trimMs);
+  }
 
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
   function evaluateColliderBombs(left, right, priorLeft, priorRight, evaluateLeft, evaluateRight) {
@@ -1383,7 +1457,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
   }
 
-  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
+  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
@@ -1440,8 +1514,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
     const priorLeft = left === null || seedLeftOnly ? null : previousLeftWristSample; const priorRight = right === null || seedRightOnly ? null : previousRightWristSample;
     const reach = Object.freeze({ topRowReachWU: Number(boxingColliderSettings.topRowReachWU), bottomRowReachWU: Number(boxingColliderSettings.bottomRowReachWU) });
-    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right"}[]} */ const candidates = [];
-    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean}[]} */ const guardCandidates = [];
+    // Append the CURRENT frame's full resolved poses to the swept history
+    // BEFORE the candidate loop (same ordering invariant as the Flow
+    // collider: the pose the test measures is itself a sample inside the
+    // window it sweeps).
+    pushPoseHistoryForRole("left_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
+    pushPoseHistoryForRole("right_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
+    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
+    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean,hitDepthHalf:"front"|"back"}[]} */ const guardCandidates = [];
     for (const event of events) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId))) continue;
       const action = expectedAction(event);
@@ -1452,11 +1532,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
         const placement = Number(event.spatialTarget.targetCell);
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
-        // The exact contract-resolved 3D glove OBB is projected to its XY convex
-        // hull and SAT-tested against the target; no enclosing AABB fallback.
-        if (!resolvedGloveObbContactsBoxingTarget(target, equipmentPoseForRole(hand === "right" ? "right_wrist" : "left_wrist"), current.songTimeMs, Number(boxingColliderSettings.timingWindowMs), colliderVolumeSettings(boxingColliderSettings))) continue;
+        // Time-based (swept) hit test: the exact contract-resolved 3D glove
+        // OBB is projected to its XY convex hull and SAT-tested against the
+        // target at every pose sampled and interpolated inside the beat's
+        // timing window; no enclosing AABB fallback.
+        const windowMs = Number(boxingColliderSettings.timingWindowMs);
+        const volume = colliderVolumeSettings(boxingColliderSettings);
+        const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
+        const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume);
+
+        if (swept === null) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
-        candidates.push({ event, evidence: current, contactMs: current.songTimeMs, hand });
+        candidates.push({ event, evidence: current, contactMs: swept.firstContactMs, hand, hitDepthHalf: swept.hitDepthHalf });
       } else if (action === "guard" || action === "crossed_guard") {
         const target = /** @type {DataRecord | undefined} */ (event.guardTarget);
         if (!target) continue;
@@ -1464,11 +1551,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const leftTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(leftCell, reach) });
         const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(rightCell, reach) });
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
-        // Guard poses use each role's exact resolved glove hull.
-        const leftContact = left !== null && !seedLeftOnly && resolvedGloveObbContactsBoxingTarget(leftTarget, equipmentPoseForRole("left_wrist"), left.songTimeMs, windowMs, colliderVolumeSettings(boxingColliderSettings));
-        const rightContact = right !== null && !seedRightOnly && resolvedGloveObbContactsBoxingTarget(rightTarget, equipmentPoseForRole("right_wrist"), right.songTimeMs, windowMs, colliderVolumeSettings(boxingColliderSettings));
-        if (!leftContact || !rightContact) continue;
-        guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(left?.songTimeMs ?? 0, right?.songTimeMs ?? 0), leftContact: true, rightContact: true });
+        const volume = colliderVolumeSettings(boxingColliderSettings);
+        // Guard poses use each role's exact resolved glove hull, swept across
+        // the window (time-based, same semantics as the punch branch).
+        const leftSwept = left !== null && !seedLeftOnly ? sweptGloveObbContactsBoxingTarget(leftTarget, leftPoseHistory, windowMs, volume) : null;
+        const rightSwept = right !== null && !seedRightOnly ? sweptGloveObbContactsBoxingTarget(rightTarget, rightPoseHistory, windowMs, volume) : null;
+        if (leftSwept === null || rightSwept === null) continue;
+        guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(leftSwept.firstContactMs, rightSwept.firstContactMs), leftContact: true, rightContact: true, hitDepthHalf: leftSwept.hitDepthHalf === "front" && rightSwept.hitDepthHalf === "front" ? "front" : "back" });
       }
     }
     /** @type {typeof candidates} */ const accepted = [];
@@ -1479,8 +1568,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       accepted.push(...ordered.filter((candidate) => Number(candidate.event.centerTimestampMs) === chordCenter));
     }
     accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
-    for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
-    for (const candidate of guardCandidates) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs);
+    for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs, candidate.hitDepthHalf);
+    for (const candidate of guardCandidates) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs, candidate.hitDepthHalf);
     previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
     finalizeBoxingColliderEvents();
   }
@@ -1613,8 +1702,37 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {DataRecord} event @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {boolean} shadow */
   function recordJudgement(event, result, diagnostics, evidence, shadow) { recordJudgementAt(event, result, diagnostics, evidence, shadow, evidence ? latestEvidenceTimelineMs : null); }
 
-  /** @param {DataRecord} event @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {boolean} shadow @param {number | null} evidenceTimelineMs */
-  function recordJudgementAt(event, result, diagnostics, evidence, shadow, evidenceTimelineMs) {
+  /**
+   * Resolve the committed 4-tier scoring result from the incoming judgement
+   * result. A positive hit (legacy "hit" or an already-resolved "great" /
+   * "good") maps through the swept collider depth half: "front" (early contact)
+   * is "great", "back" (late contact) is "good", and an absent depth half
+   * (non-swept hit paths such as the legacy live/judge grid evaluators and
+   * gesture-mode guards) conservatively defaults to "good". A miss without a
+   * spatial "wrong_cell" diagnostic — the hand was in the correct/nearby cell,
+   * so this is a timing-only miss — resolves to the "almost" quarter tier and
+   * keeps the combo alive; a miss WITH "wrong_cell" (or with no spatial
+   * diagnostic because there was no contact at all) is a full "miss" that
+   * breaks the combo. "ignored" is unchanged.
+   * @param {"hit" | "miss" | "ignored"} result
+   * @param {readonly string[]} diagnostics
+   * @param {"front" | "back" | null} depthHalf
+   * @returns {"great" | "good" | "almost" | "miss" | "ignored"}
+   */
+  function resolveScoringTier(result, diagnostics, depthHalf) {
+    if (result === "hit" || result === "great" || result === "good") {
+      if (depthHalf === "front") return "great";
+      if (depthHalf === "back") return "good";
+      return "good";
+    }
+    if (result === "miss") {
+      return diagnostics.some((code) => code === "wrong_cell") ? "miss" : "almost";
+    }
+    return "ignored";
+  }
+
+  /** @param {DataRecord} event @param {"hit" | "miss" | "ignored"} result @param {readonly string[]} diagnostics @param {AeroGameplayEvidenceSnapshot | null} evidence @param {boolean} shadow @param {number | null} evidenceTimelineMs @param {"front" | "back" | null} [hitDepthHalf] */
+  function recordJudgementAt(event, result, diagnostics, evidence, shadow, evidenceTimelineMs, hitDepthHalf = null) {
     const eventVariant = variantForEvent(event);
     const eventProfile = profileForEvent(event);
     const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidenceTimelineMs, timelinePositionMs, shadow, sessionPurpose);
@@ -1622,19 +1740,48 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     else {
       judgements.push(judgement);
       judgedIds.add(String(event.eventId));
-      if (eventVariant.rulesetId === BOXING_COLLIDER_RULESET) updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event));
-      else updateScore(result, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
+      if (hitDepthHalf !== null) hitDepthHalfByEventId.set(String(event.eventId), hitDepthHalf);
+      const tier = resolveScoringTier(result, diagnostics, hitDepthHalf);
+      if (eventVariant.rulesetId === BOXING_COLLIDER_RULESET) updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event));
+      else updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
     }
   }
 
-  /** @param {"hit" | "miss" | "ignored"} result @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
-  function updateScore(result, scoreVariant, scoreProfile, settings, colliderSettings) {
+  /**
+   * Combo multiplier for the current combo count: x1 at combo 0-1 (first hit),
+   * x2 at 2-3, x4 at 4-7, x8 at 8+.
+   * @param {number} combo
+   * @returns {1 | 2 | 4 | 8}
+   */
+  function comboMultiplier(combo) {
+    if (combo >= 8) return 8;
+    if (combo >= 4) return 4;
+    if (combo >= 2) return 2;
+    return 1;
+  }
+
+  /**
+   * 4-tier scoring: score for a beat is the tier base points times the combo
+   * multiplier. great / good / almost all increment the combo (they keep the
+   * multiplier climbing); only "miss" resets the combo to 0. "ignored" is
+   * non-scoring and leaves the partition untouched. The legacy scoring settings
+   * (hitPoints / comboBonusPerHit / missPenalty) are retained on the partition
+   * for identity stability but are no longer read for beat scoring.
+   * @param {"great" | "good" | "almost" | "miss" | "ignored"} tier
+   * @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings]
+   */
+  function updateScore(tier, scoreVariant, scoreProfile, settings, colliderSettings) {
     const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
     const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue);
     const current = scorePartition(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
     const next = { ...current };
-    if (result === "hit") { next.hits += 1; next.combo += 1; next.score = finiteScore(next.score + Number(settings.hitPoints) + Math.max(0, next.combo - 1) * Number(settings.comboBonusPerHit)); next.maxCombo = Math.max(next.maxCombo, next.combo); }
-    else if (result === "miss") { next.misses += 1; next.score = finiteScore(Math.max(0, next.score - Number(settings.missPenalty))); next.combo = 0; }
+    if (tier === "miss") { next.misses += 1; next.combo = 0; }
+    else if (tier === "great" || tier === "good" || tier === "almost") {
+      next.hits += 1;
+      next.combo += 1;
+      next.score = finiteScore(next.score + TIER_BASE_POINTS[tier] * comboMultiplier(next.combo));
+      next.maxCombo = Math.max(next.maxCombo, next.combo);
+    }
     else next.ignored += 1;
     partitions.set(key, Object.freeze(next));
   }
@@ -1690,7 +1837,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
@@ -2155,4 +2302,11 @@ function cardinalDirectionName(value) {
 }
 /** @param {unknown} value @param {string} code */
 function requireGridCell(value, code) { if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 11) throw gameplayError(code, "Expected a 4x3 grid cell"); return Number(value); }
+/**
+ * Tier base points for the 4-tier scoring system: great = 100 (full hit,
+ * front-half contact), good = 50 (half hit, back-half contact), almost = 25
+ * (quarter, timing-only miss in the correct cell), miss = 0 (full miss).
+ * @type {Readonly<Record<"great" | "good" | "almost" | "miss" | "ignored", number>>}
+ */
+const TIER_BASE_POINTS = Object.freeze({ great: 100, good: 50, almost: 25, miss: 0, ignored: 0 });
 function randomToken() { const bytes = new Uint32Array(2); if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes); else { bytes[0] = Math.floor(Math.random() * 0xffffffff); bytes[1] = Math.floor(Math.random() * 0xffffffff); } return `${bytes[0].toString(16)}${bytes[1].toString(16)}`; }
