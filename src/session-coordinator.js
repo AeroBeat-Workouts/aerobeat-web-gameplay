@@ -1731,7 +1731,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       return "good";
     }
     if (result === "miss") {
-      return diagnostics.some((code) => code === "wrong_cell") ? "miss" : "almost";
+      return "miss";
     }
     return "ignored";
   }
