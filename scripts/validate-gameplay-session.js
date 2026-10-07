@@ -1598,4 +1598,47 @@ function readyPlaying(coordinator, events, selected = variant()) {
 assert.equal(aeroGameplaySessionCapabilities.visualTestSession, true);
 assert.equal(aeroGameplaySessionCapabilities.commitmentTimedJudgements, true);
 assert.equal(aeroGameplaySessionCapabilities.publicLeaderboards, false);
+
+// --- Pause/resume must preserve score, combo, and multiplier ------------------
+// Regression for Derrick's report: pausing the game and resuming should NOT
+// reset the score, multiplier, or combo. The coordinator's synchronizePausedClock
+// previously delegated to seekTo, which called clearRunTruth and wiped the
+// score partitions on every pause. Now it aligns the timeline position without
+// discarding the accumulated run truth.
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "pause-resume-score", countdownStepMs: 1 });
+  const selected = variant("flow_colliders_v1", null);
+  const events = [event("pause-hit-1", 1000, "note", { hand: "left", placement: 5 }), event("pause-hit-2", 1600, "note", { hand: "left", placement: 5 })];
+  readyVisualTest(coordinator, events, selected);
+  // Score two hits to build up score/combo.
+  const baseline = setAnchorPosition(evidence("pause-base", 850, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 850, clock: clock(850, true), input: productionInput(850, baseline), equipmentPoses: equipmentPosesForEvidence(baseline, "flow"), interaction: visualTestInteraction(1, 850) });
+  const hit1 = setAnchorPosition(evidence("pause-hit-pose-1", 1000, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, hit1), equipmentPoses: equipmentPosesForEvidence(hit1, "flow"), interaction: visualTestInteraction(1, 850) });
+  const hit2 = setAnchorPosition(evidence("pause-hit-pose-2", 1600, []), "left_wrist", 1, 1);
+  coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, hit2), equipmentPoses: equipmentPosesForEvidence(hit2, "flow"), interaction: visualTestInteraction(1, 850) });
+  const beforePause = coordinator.getScorePartitions();
+  assert.ok(beforePause.length > 0, "score partitions exist after scoring hits");
+  const scoreBefore = beforePause[0].score;
+  const comboBefore = beforePause[0].combo;
+  assert.ok(scoreBefore > 0, "score is non-zero before pause");
+  // Pause the game.
+  coordinator.pause(2000, "menu");
+  assert.equal(coordinator.getSnapshot().session.state, "paused_manual");
+  // Synchronize the paused clock (this is what the assembly does on pause).
+  coordinator.synchronizePausedClock({ timestampMs: 2001, clock: clock(1600, false) });
+  // The score must be PRESERVED after the pause.
+  const afterPause = coordinator.getScorePartitions();
+  assert.ok(afterPause.length > 0, "score partitions survive the pause");
+  assert.equal(afterPause[0].score, scoreBefore, "score is preserved after pause");
+  assert.equal(afterPause[0].combo, comboBefore, "combo is preserved after pause");
+  // Resume the game.
+  coordinator.resume(2002);
+  const afterResume = coordinator.getScorePartitions();
+  assert.ok(afterResume.length > 0, "score partitions survive the resume");
+  assert.equal(afterResume[0].score, scoreBefore, "score is preserved after resume");
+  assert.equal(afterResume[0].combo, comboBefore, "combo is preserved after resume");
+  coordinator.destroy();
+}
+
 console.log("Gameplay session deterministic validation passed.");

@@ -479,7 +479,22 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const clock = normalizeClock(safeFrame.clock);
     if (clock.playing) throw gameplayError("paused_clock_not_frozen", "Paused clock synchronization requires a stopped audio clock");
     timestampMs = nextTimestampMs;
-    return seekTo(clock.positionMs);
+    // A paused clock synchronization aligns the timeline to the held audio clock
+    // WITHOUT discarding the accumulated run truth (score, combo, multiplier,
+    // judgements). Delegating to seekTo would call clearRunTruth and reset the
+    // score on every pause — the bug Derrick reported. Only the timeline
+    // position and the seek-exclusion boundary are updated; the run state is
+    // preserved so a resume continues from the same score.
+    const positionMs = requireNonNegativeNumber(clock.positionMs, "seek_position_invalid");
+    const wasCompleted = state === "completed";
+    timelinePositionMs = positionMs;
+    countdownTimelinePositionMs = positionMs;
+    seekExcludedThroughMs = Math.max(seekExcludedThroughMs, positionMs);
+    // A completed run becomes a manually paused seek (the transport can rewind
+    // and restart). An already-paused run stays paused.
+    if (wasCompleted) { state = "paused_manual"; pauseReason = "explicit_seek"; }
+    publish(null);
+    return snapshot;
   }
 
   /**
