@@ -164,16 +164,17 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const finalHit = setAnchorPosition(evidence("visual-flow-final", 1600, []), "left_wrist", 1, 1);
   coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, finalHit), equipmentPoses: equipmentPosesForEvidence(finalHit, "flow"), interaction: visualTestInteraction(1, 850) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-miss", "miss"], ["flow-after-miss", "hit"]]);
-  // 4-tier scoring: the three swept hits keep the combo alive (x1, x2, x4)
-  // and the flow-miss timing-only miss resolves to the "almost" quarter tier
-  // (no wrong_cell on the swept late-window miss), so the combo is NOT broken.
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo, score: entry.score })), [{ ranked: false, localOnly: true, hits: 4, misses: 0, combo: 4, maxCombo: 4, score: 750 }]);
+  // 4-tier scoring: the three swept hits keep the combo alive (x1, x2).
+  // The flow-miss (right wrist at 3.4,0 — far from placement-6 cell [1.5,2.5]x[0.5,1.5])
+  // is a full "miss" (no near-miss: hand was not close to the cell), so the
+  // combo breaks. flow-after-miss restarts the combo at x1.
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo, score: entry.score })), [{ ranked: false, localOnly: true, hits: 3, misses: 1, combo: 1, maxCombo: 2, score: 400 }]);
   // 0.0.96: the resolved tier is carried on the judgement record so the
   // renderer's target.tier can pick the correct feedback label.
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.tier]), [
     ["flow-left-a", "great"],
     ["flow-left-b", "great"],
-    ["flow-miss", "almost"],
+    ["flow-miss", "miss"],
     ["flow-after-miss", "great"]
   ], "judgement records carry the resolved 4-tier scoring tier");
 }
@@ -218,9 +219,37 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, boxingLate), equipmentPoses: equipmentPosesForEvidence(boxingLate, "boxing"), interaction: visualTestInteraction(1, 900) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["boxing-left", "hit", "visual_test"], ["boxing-right", "hit", "visual_test"], ["boxing-miss", "miss", "visual_test"]]);
   // 4-tier scoring: both swept chord hits land in the front half (great);
-  // the true far-miss (no contact at all -> no wrong_cell) is an "almost"
-  // quarter tier that keeps the combo alive, so it does not break it.
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo, entry.score]), [[false, true, 3, 0, 3, 3, 350]]);
+  // the true far-miss (left wrist at 3.5, targetCell 5 — far from the target)
+  // is a full "miss" tier that breaks the combo.
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo, entry.score]), [[false, true, 2, 1, 0, 2, 300]]);
+}
+
+// Near-miss "Almost" tier: hand close to the correct cell within 1/4 beat of
+// center, but the swept collider never registered a contact.
+// Placement 5 cell box: center (1.0, 1.0), half 0.5 -> [0.5,1.5]x[0.5,1.5].
+// Saber: length 0.75, radius 0.18. Wrist at judge (1.7, 1.0) -> capsule start
+// (1.7,1) is 0.2 from the cell edge (x=1.5). 0.2 > 0.18 (no contact) and
+// 0.2 <= 0.25 (near-miss margin) -> near-miss fires.
+{
+  const flow = variant("flow_colliders_v1", null);
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-near-miss" });
+  readyVisualTest(coordinator, [event("near-miss-beat", 1000, "note", { hand: "left", placement: 5 })], flow);
+  // Wrist at judge (1.7, 1.0): 0.2 WU from cell edge, outside the 0.18 contact
+  // radius but within the 0.25 near-miss margin.
+  const base = setAnchorPosition(evidence("near-miss-base", 900, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, base), equipmentPoses: equipmentPosesForEvidence(base, "flow"), interaction: visualTestInteraction(1, 900) });
+  // At 1000ms (beat center), wrist still at (1.7, 1) — no contact, but near.
+  const atCenter = setAnchorPosition(evidence("near-miss-center", 1000, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, atCenter), equipmentPoses: equipmentPosesForEvidence(atCenter, "flow"), interaction: visualTestInteraction(1, 900) });
+  // After the window closes, the beat resolves as a near-miss miss.
+  const after = setAnchorPosition(evidence("near-miss-after", 1300, []), "left_wrist", 0, 1);
+  coordinator.advance({ timestampMs: 1300, clock: clock(1300, true), input: productionInput(1300, after), equipmentPoses: equipmentPosesForEvidence(after, "flow"), interaction: visualTestInteraction(1, 900) });
+  const judgements = coordinator.getJudgements();
+  assert.equal(judgements.length, 1, "one judgement for the near-miss beat");
+  assert.equal(judgements[0].eventId, "near-miss-beat");
+  assert.equal(judgements[0].result, "miss", "near-miss resolves as a miss result");
+  assert.deepEqual(judgements[0].diagnostics, ["near_timing"], "near-miss carries the near_timing diagnostic");
+  assert.equal(judgements[0].tier, "almost", "near-miss resolves to the almost tier");
 }
 
 // Authority boundary rejects malformed/automatic/unauthorized calls transactionally without invoking accessors.

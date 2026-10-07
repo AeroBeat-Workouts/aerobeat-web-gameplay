@@ -316,10 +316,76 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
       if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) { contacts.push(t); break; }
     }
   }
-  if (contacts.length === 0) return null;
-  contacts.sort((a, b) => a - b);
-  const first = contacts[0];
-  return Object.freeze({ firstContactMs: first, hitDepthHalf: /** @type {HitDepthHalf} */ (first < center ? "front" : "back") });
+  if (contacts.length > 0) {
+    contacts.sort((a, b) => a - b);
+    const first = contacts[0];
+    return Object.freeze({ firstContactMs: first, hitDepthHalf: /** @type {HitDepthHalf} */ (first < center ? "front" : "back") });
+  }
+  // No contact: check for a near-miss. The saber must have been within a
+  // tight margin of the cell box at some time inside the 1/4-beat sub-window
+  // around the beat center. This captures "close but not quite" — the hand
+  // was in the correct cell area with good timing but the capsule didn't
+  // touch. The margin (0.25 WU) is slightly larger than the saber radius
+  // (0.18) so there is a valid near-miss band: no contact (> 0.18) but near
+  // (<= 0.25). Passing through the cell's general area during a sweep does
+  // not qualify — only being close to the cell edge at the right time does.
+  const quarterWindow = timingWindowMs * 0.25;
+  const nearStart = center - quarterWindow;
+  const nearEnd = center + quarterWindow;
+  const nearMargin = 0.25;
+  let firstNearMs = null;
+  const nearProbe = (t) => {
+    if (t < nearStart || t > nearEnd) return;
+    const pose = resolvePoseAt(history, t);
+    const capsule = resolveSaberCapsule(pose);
+    if (saberNearCell(capsule, box, nearMargin)) {
+      if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
+    }
+  };
+  for (const t of sampleTimes) nearProbe(t);
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const from = history[index]; const to = history[index + 1];
+    const spanStart = Math.max(nearStart, from.t);
+    const spanEnd = Math.min(nearEnd, to.t);
+    if (spanStart > spanEnd || to.t <= from.t) continue;
+    const steps = 24;
+    for (let step = 1; step < steps; step += 1) {
+      const t = from.t + (to.t - from.t) * (step / steps);
+      if (t < nearStart || t > nearEnd) continue;
+      const pose = resolvePoseAt(history, t);
+      const capsule = resolveSaberCapsule(pose);
+      if (saberNearCell(capsule, box, nearMargin)) {
+        if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
+        break;
+      }
+    }
+  }
+  if (firstNearMs !== null) return Object.freeze({ nearMiss: true, firstNearMs });
+  return null;
+}
+
+/**
+ * Check whether the saber is near the cell box in XY: the distance from
+ * either capsule endpoint to the cell rectangle is within the given margin.
+ * This is the spatial near-miss test — the hand was close to the correct
+ * cell but the capsule never fully contacted it.
+ *
+ * @param {Readonly<{start:{x:number,y:number},end:{x:number,y:number},radius:number}>} capsule
+ * @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box
+ * @param {number} margin
+ * @returns {boolean}
+ */
+function saberNearCell(capsule, box, margin) {
+  const minX = box.centerX - box.halfX;
+  const maxX = box.centerX + box.halfX;
+  const minY = box.centerY - box.halfY;
+  const maxY = box.centerY + box.halfY;
+  const rectDist = (px, py) => {
+    const dx = Math.max(minX - px, 0, px - maxX);
+    const dy = Math.max(minY - py, 0, py - maxY);
+    return Math.hypot(dx, dy);
+  };
+  return rectDist(capsule.start.x, capsule.start.y) <= margin || rectDist(capsule.end.x, capsule.end.y) <= margin;
 }
 
 /**

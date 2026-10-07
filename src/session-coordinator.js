@@ -1328,6 +1328,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     pushPoseHistoryForRole("left_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
     pushPoseHistoryForRole("right_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
+    /** @type {{event:DataRecord,evidence:ColliderSample,nearMs:number,hand:"left"|"right"}[]} */ const nearMisses = [];
     for (const event of events) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
       const eventSettings = flowColliderSettingsForEvent(event);
@@ -1347,6 +1348,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
       const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume);
       if (swept === null) continue;
+      // Near-miss: the hand was near the correct cell within 1/4 beat of the
+      // center but the capsule never registered a contact. Record a miss
+      // with "near_timing" diagnostic so resolveScoringTier maps it to
+      // the "almost" tier.
+      if ("nearMiss" in swept) {
+        const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
+        if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
+        nearMisses.push({ event, evidence: current, nearMs: swept.firstNearMs, hand });
+        continue;
+      }
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
       candidates.push({ event, evidence: current, contactMs: swept.firstContactMs, hand, hitDepthHalf: swept.hitDepthHalf });
@@ -1360,6 +1371,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
     for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs, candidate.hitDepthHalf);
+    // Near-miss judgements: result "miss" with "near_timing" diagnostic.
+    // resolveScoringTier maps these to the "almost" tier (25 pts, combo alive).
+    for (const near of nearMisses) recordJudgementAt(near.event, "miss", Object.freeze(["near_timing"]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, near.nearMs, null);
     evaluateColliderBombs(left, right, priorLeft, priorRight, !seedLeftOnly, !seedRightOnly);
     previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
     leftWristHistory = pushJudgeHistory(leftWristHistory, left); rightWristHistory = pushJudgeHistory(rightWristHistory, right);
@@ -1731,6 +1745,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       return "good";
     }
     if (result === "miss") {
+      if (diagnostics.includes("near_timing")) return "almost";
       return "miss";
     }
     return "ignored";
