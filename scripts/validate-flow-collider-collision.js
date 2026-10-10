@@ -173,7 +173,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 {
   const enforced=ready([beat("stationary-enforced",1000,"note",{hand:"left",placement:5,direction:"down"})]);
   send(enforced,1000,1000,[1,1],[3,1],[3,2]);
-  send(enforced,1181,1181,[1,1],[3,1],[3,2]);
+  send(enforced,2001,2001,[1,1],[3,1],[3,2]);
   assert.deepEqual(enforced.getJudgements().map(j=>[j.eventId,j.result,j.diagnostics]),[["stationary-enforced","miss",["wrong_direction"]]],"default enforces the authored direction");
   const c=ready([beat("stationary",1000,"note",{hand:"left",placement:5,direction:"down"})],settings({enforceAuthoredDirection:false}));
   send(c,1000,1000,[1,1],[3,1],[3,2]);
@@ -195,8 +195,8 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const directional=settings({enforceAuthoredDirection:true,directionToleranceDegrees:20});
   const c=ready([beat("directed",1000,"note",{hand:"left",placement:5,direction:"right"})],directional);
   send(c,900,900,[.3,1],[3,1],[3,2]);send(c,1000,1000,[.3,1],[3,1],[3,2]);
-  assert.equal(c.getJudgements().length,0);send(c,1180,1180,[.3,1],[3,1],[3,2]);assert.equal(c.getJudgements().length,0,"inclusive late bound remains pending");send(c,1181,1181,[.3,1],[3,1],[3,2]);assert.deepEqual([c.getJudgements()[0].result,c.getJudgements()[0].diagnostics],["miss",["wrong_direction"]]);
-  c.pause(1182);assert.throws(()=>c.applyFutureContent(config([],settings({enforceAuthoredDirection:false}))),/locked/u);
+  assert.equal(c.getJudgements().length,0);send(c,1180,1180,[.3,1],[3,1],[3,2]);assert.equal(c.getJudgements().length,0,"inclusive late bound remains pending");send(c,2001,2001,[.3,1],[3,1],[3,2]);assert.deepEqual([c.getJudgements()[0].result,c.getJudgements()[0].diagnostics],["miss",["wrong_direction"]]);
+  c.pause(2002);assert.throws(()=>c.applyFutureContent(config([],settings({enforceAuthoredDirection:false}))),/locked/u);
   const other=ready([beat("identity",1000,"note",{hand:"left",placement:5})],settings({colliderRadius:.2}));send(other,1000,1000,[1,1],[3,1],[3,2]);assert.notEqual(other.getScorePartitions()[0].flowColliderSettingsIdentity,c.getScorePartitions()[0].flowColliderSettingsIdentity);
 }
 
@@ -356,28 +356,25 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const grid=createAeroGameplaySessionCoordinator({sessionId:"grid"});const gridEvent={...beat("grid-note",1000,"note",{hand:"left",placement:5}),variantId:"grid",chartId:"chart-grid"};grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[gridEvent]});assert.equal(grid.getSnapshot().session.rulesetId,"flow_colliders_v1");assert.doesNotThrow(()=>grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[],flowColliderSettings:settings()}),"Flow Collider settings now bind the sole ranked Flow ruleset, not a retired non-collider variant");
 }
 
-// A note stays pending on the back face, then misses strictly after crossing it.
-// Forward and backward controls are independent, including the F4 held-frame path.
+// Scored Play notes stay eligible until the full note is beyond the camera.
+// The forward face and the configured later deadline remain unchanged.
 {
   const event = beat("depth-note",1000,"note",{hand:"left",placement:5});
-  for (const [depth,hitAt,missAt] of [[1,1180,1180.001],[2,1360,1360.001]]) {
-    const c=ready([event],settings({colliderDepthBackward:depth}));
-    send(c,hitAt,hitAt,[3,1],[3,1],[3,2]);
-    assert.equal(c.getJudgements().length,0,"off-target note remains pending through back face");
-    send(c,missAt,missAt,[3,1],[3,1],[3,2]);
-    assert.deepEqual(c.getJudgements().map(j=>j.result),["miss"],"miss commits only behind +Z back face");
+  for (const depth of [1,2,3]) {
+    const pending=ready([event],settings({colliderDepthBackward:depth}));
+    for(const at of [1540,1999,2000]) {send(pending,at,at,[3,1],[3,1],[3,2]);assert.equal(pending.getJudgements().length,0,`Play note remains pending at ${at}`);}
+    send(pending,2000.001,2000.001,[3,1],[3,1],[3,2]);
+    assert.deepEqual(pending.getJudgements().map(j=>j.result),["miss"],"full Miss commits strictly after +1000ms");
+    const late=ready([event],settings({colliderDepthBackward:depth}));
+    send(late,1999,1999,[1,1],[3,1],[3,2]);
+    assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"],"late Play contact remains hittable");
   }
-  const custom=ready([event],settings({timingWindowMs:250,colliderDepthBackward:2}));
-  send(custom,1500,1500,[3,1],[3,1],[3,2]);
-  assert.equal(custom.getJudgements().length,0,"custom 250ms window × depth-2 keeps note pending at +500ms");
-  send(custom,1500.001,1500.001,[3,1],[3,1],[3,2]);
-  assert.deepEqual(custom.getJudgements().map(j=>j.result),["miss"],"custom window misses past +500ms");
+  const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:4}));
+  send(larger,2000.001,2000.001,[3,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0,"configured +1200ms remains later than floor");
+  send(larger,2200,2200,[1,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["hit"]);
   const forward=ready([event],settings({colliderDepthForward:2}));
   send(forward,640,640,[1,1],[3,1],[3,2]);
   assert.deepEqual(forward.getJudgements().map(j=>j.result),["hit"],"forward extension admits future -Z beat");
-  const late=ready([event],settings({colliderDepthBackward:2}));
-  send(late,1360,1360,[1,1],[3,1],[3,2]);
-  assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"],"backward extension admits past +Z beat");
 }
 
 // Public collider state exposes only opaque tuning identity and semantic hazard data, never physical evidence/history.

@@ -35,6 +35,21 @@ export function colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, d
 }
 
 /**
+ * Play-only note deadline: the complete pinned note must pass the
+ * canonical athlete camera (Z=5, pitched down 5 degrees) before a full miss.
+ * At 0.006 WU/ms, +1000ms places its center at Z=6, conservatively past
+ * the pinned shape's -0.15 Z extent at maximum 2x scale. Larger configured
+ * backward depths remain authoritative. This is not a public collider bound;
+ * bombs, guards, and checkpoints retain their original windows.
+ * @param {number} centerTimestampMs
+ * @param {number} timingWindowMs
+ * @param {number} depthBackward
+ */
+export function effectivePlayNoteAfterWindowMs(centerTimestampMs, timingWindowMs, depthBackward) {
+  return Math.max(colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, depthBackward), centerTimestampMs + 1000);
+}
+
+/**
  * Test a contract-resolved 3D saber capsule after exact projection into judge XY.
  * Local-axis roll leaves the projection unchanged; out-of-plane tilt shortens it.
  * @param {DataRecord} event
@@ -164,7 +179,7 @@ function convexPolygonsContact(left, right) {
  *
  * A hit is no longer a single snapshot in time: the equipment is swept
  * through every song-time inside the beat's timing window
- * `[center - window*depthForward, center + window*depthBackward]` and the
+ * `[center - window*depthForward, afterWindowMs ?? center + window*depthBackward]` and the
  * beat's XY cell box is tested at each sampled and interpolated pose. The
  * depth condition is automatic — a beat's Z is `(t - center) * 0.006`, which
  * lies inside the collider Z-range exactly when t lies inside that window.
@@ -286,13 +301,14 @@ function boxingSweptContactAtPose(target, pose, timingWindowMs, volume) {
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ * @param {number | null} [afterWindowMs] Play note deadline; null retains the original volume.
  */
-export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}) {
+export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null) {
   if (history.length === 0) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
   const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
-  const windowEnd = center + timingWindowMs * (volume.depthBackward ?? 1);
+  const windowEnd = afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1);
   const contacts = [];
   /** @type {number[]} */ const sampleTimes = [];
   for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
@@ -398,12 +414,13 @@ function saberNearCell(capsule, box, margin) {
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ * @param {number | null} [afterWindowMs] Play note deadline; null retains the original volume.
  */
-export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}) {
+export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}, afterWindowMs = null) {
   if (history.length === 0) return null;
   const center = Number(target.centerTimestampMs);
   const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
-  const windowEnd = center + timingWindowMs * (volume.depthBackward ?? 1);
+  const windowEnd = afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1);
   const contacts = [];
   /** @type {number[]} */ const sampleTimes = [];
   for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);

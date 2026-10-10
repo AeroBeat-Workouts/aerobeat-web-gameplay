@@ -17,7 +17,7 @@ import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometr
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
-import { colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -1361,7 +1361,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const volume = colliderVolumeSettings(eventSettings);
       const windowMs = Number(eventSettings.timingWindowMs);
       const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
-      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume);
+      const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs, volume.depthBackward) : null;
+      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs);
       if (swept === null) continue;
       // Near-miss: the hand was near the correct cell within 1/4 beat of the
       // center but the capsule never registered a contact. Record a miss
@@ -1464,7 +1465,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!variant || variant.rulesetId !== FLOW_COLLIDER_RULESET) return;
     for (const event of events) {
       if (!productionEventEligible(event)) continue;
-      const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), event.type === "bomb" ? 1 : Number(settings.colliderDepthBackward));
+      const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
+      const late = event.type === "note" && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs, Number(settings.colliderDepthBackward)) : colliderBackFaceTimestampMs(center, windowMs, event.type === "bomb" ? 1 : Number(settings.colliderDepthBackward));
       if (event.type === "note" && !judgedIds.has(eventId) && timelinePositionMs > late) recordJudgementAt(event, "miss", colliderMissDiagnostics(event), null, false, null);
       else if ((event.type === "arc" || event.type === "burst") && !judgedIds.has(eventId) && timelinePositionMs >= Number(event.centerTimestampMs)) recordJudgement(event, "ignored", Object.freeze([]), null, false);
       else if (event.type === "bomb" && timelinePositionMs > late && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === eventId)) {
@@ -1573,7 +1575,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
         const volume = colliderVolumeSettings(boxingColliderSettings);
         const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
-        const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume);
+        const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs, volume.depthBackward) : null;
+        const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs);
 
         if (swept === null) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
@@ -1649,7 +1652,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const settings = boxingColliderSettingsForEvent(event);
       const action = expectedAction(event);
       if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
-      const late = colliderBackFaceTimestampMs(Number(event.centerTimestampMs), Number(settings.timingWindowMs), Number(settings.colliderDepthBackward));
+      const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
+      const late = PUNCH_ACTIONS.includes(action) && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs, Number(settings.colliderDepthBackward)) : colliderBackFaceTimestampMs(center, windowMs, Number(settings.colliderDepthBackward));
       if ((action === "guard" || action === "crossed_guard") && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
         if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);

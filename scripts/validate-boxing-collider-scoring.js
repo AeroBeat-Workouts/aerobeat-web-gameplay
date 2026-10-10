@@ -60,28 +60,22 @@ function send(c, songMs, left, right, nose, frameId, options = {}) {
 }
 const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]);
 
-// Punches may hit through either depth face; an off-target punch misses only
-// after the +Z back face, and the two multipliers remain independent.
+// Scored Play punches share the fully-out-of-view +1000ms note deadline;
+// forward timing and deeper configured after-windows retain their authority.
 {
   const event = beat("depth-punch", 1000, "straight_left", { placement: 5 });
   const early = ready([event], settings({ colliderDepthForward: 2 }));
   send(early, 640, [1, 1], [3, 1], [3, 2]);
   assert.deepEqual(early.getJudgements().map(j => j.result), ["hit"], "forward -Z face admits early punch");
-  const late = ready([event], settings({ colliderDepthBackward: 2 }));
-  send(late, 1360, [1, 1], [3, 1], [3, 2]);
-  assert.deepEqual(late.getJudgements().map(j => j.result), ["hit"], "backward +Z face admits late punch");
-  const custom = ready([event], settings({ timingWindowMs: 250, colliderDepthBackward: 2 }));
-  send(custom, 1500, [3, 1], [3, 1], [3, 2]);
-  assert.equal(custom.getJudgements().length, 0, "custom window keeps punch pending at +500ms");
-  send(custom, 1500.001, [3, 1], [3, 1], [3, 2]);
-  assert.deepEqual(custom.getJudgements().map(j => j.result), ["miss"], "custom window misses strictly beyond +500ms");
-  for (const [depth, boundary] of [[1, 1180], [2, 1360]]) {
+  for (const depth of [1, 2, 3]) {
     const missed = ready([event], settings({ colliderDepthBackward: depth }));
-    send(missed, boundary, [3, 1], [3, 1], [3, 2]);
-    assert.equal(missed.getJudgements().length, 0, "inclusive back face remains pending");
-    send(missed, boundary + .001, [3, 1], [3, 1], [3, 2]);
-    assert.deepEqual(missed.getJudgements().map(j => j.result), ["miss"], "past back face commits miss");
+    for(const at of [1540,1999,2000]) {send(missed,at,[3,1],[3,1],[3,2]);assert.equal(missed.getJudgements().length,0,`Play punch pending at ${at}`);}
+    send(missed,2000.001,[3,1],[3,1],[3,2]);assert.deepEqual(missed.getJudgements().map(j=>j.result),["miss"]);
+    const late=ready([event],settings({colliderDepthBackward:depth}));send(late,1999,[1,1],[3,1],[3,2]);assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"]);
   }
+  const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:4}));
+  send(larger,2000.001,[3,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0);
+  send(larger,2200,[1,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["hit"]);
 }
 
 // --- Settings contract -------------------------------------------------------
@@ -244,7 +238,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.equal(upperMiss.getJudgements().length, 0, "wrong-direction uppercut stays pending");
   send(upperMiss, 1180, [1, 1.25], [3, 1.25], [3, 2]);
   assert.equal(upperMiss.getJudgements().length, 0, "inclusive late bound keeps wrong direction pending");
-  send(upperMiss, 1181, [1, 1.25], [3, 1.25], [3, 2]);
+  send(upperMiss, 2001, [1, 1.25], [3, 1.25], [3, 2]);
   assert.deepEqual(judgementsAt(upperMiss), [["up-miss", "miss", ["wrong_direction"]]]);
 
   const hookHit = ready([beat("hook-hit", 1000, "hook_left", { placement: 6 })], directional);
@@ -255,7 +249,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const hookMiss = ready([beat("hook-miss", 1000, "hook_left", { placement: 6 })], directional);
   send(hookMiss, 900, [2.2, 1], [3, 1], [3, 2]);
   send(hookMiss, 1000, [0.5, 1], [3, 1], [3, 2]);
-  send(hookMiss, 1181, [0.5, 1], [3, 1], [3, 2]);
+  send(hookMiss, 2001, [0.5, 1], [3, 1], [3, 2]);
   assert.deepEqual(judgementsAt(hookMiss), [["hook-miss", "miss", ["wrong_direction"]]]);
 
   // Straight is ALWAYS overlap-only: identical overlap geometry hits with the toggle both ways.
@@ -477,7 +471,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const rbBottomLow = ready([beat("rb3", 1000, "hook_right", { placement: 9 })]);
   send(rbBottomLow, 900, [3, 0.2], [1, 0.2], [3, 2]);
   send(rbBottomLow, 1000, [3, 0.2], [1, 0.2], [3, 2]);
-  send(rbBottomLow, 1181, [3, 0.2], [1, 0.2], [3, 2]);
+  send(rbBottomLow, 2001, [3, 0.2], [1, 0.2], [3, 2]);
   // hook_right is direction-enforced by default (0.0.53), so the stationary
   // off-plane miss reports wrong_direction rather than wrong_collider.
   assert.deepEqual(judgementsAt(rbBottomLow).filter(([id]) => id === "rb3"), [["rb3", "miss", ["wrong_direction"]]], "the default bottom row (0.25, Y 0.75) rejects a very-low frame");
@@ -562,24 +556,24 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const noInput = ready([beat("diag-none", 1000, "straight_left", { placement: 5 })]);
   assert.throws(() => noInput.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, null), equipmentPoses: [] }), /exactly one left and one right wrist pose|current measured evidence/u);
   assert.equal(noInput.getJudgements().length, 0);
-  send(noInput, 1181, [-0.4, 1], [3, 1], [3, 2], "diag-none-current");
+  send(noInput, 2001, [-0.4, 1], [3, 1], [3, 2], "diag-none-current");
   assert.deepEqual(judgementsAt(noInput), [["diag-none", "miss", ["wrong_collider"]]]);
   const stale = ready([beat("diag-stale", 1000, "straight_left", { placement: 5 })]);
   const staleSample = evidence("stale-frame", 1000, [1, 1], [3, 1], [3, 2]);
   assert.throws(() => stale.advance({ timestampMs: 1150, clock: clock(1150, true), input: input(1150, staleSample), equipmentPoses: equipmentPosesForEvidence(staleSample) }), /current valid measured wrist/u);
   assert.equal(stale.getJudgements().length, 0);
-  send(stale, 1181, [-0.4, 1], [3, 1], [3, 2], "diag-stale-current");
+  send(stale, 2001, [-0.4, 1], [3, 1], [3, 2], "diag-stale-current");
   assert.deepEqual(judgementsAt(stale), [["diag-stale", "miss", ["wrong_collider"]]], "rejected stale evidence cannot mutate judgement truth");
   const mismatch = ready([beat("diag-cal", 1000, "straight_left", { placement: 5 })]);
   const mismatchSample = evidence("cal-frame", 1000, [1, 1], [3, 1], [3, 2]);
   mismatchSample.calibrationId = "cal-2"; for (const entry of mismatchSample.anchors) entry.calibrationId = "cal-2";
   assert.throws(() => mismatch.advance({ timestampMs: 1000, clock: clock(1000, true), input: input(1000, mismatchSample), equipmentPoses: equipmentPosesForEvidence(mismatchSample) }), /snapshot calibration/u);
   assert.equal(mismatch.getJudgements().length, 0);
-  send(mismatch, 1181, [-0.4, 1], [3, 1], [3, 2], "diag-cal-current");
+  send(mismatch, 2001, [-0.4, 1], [3, 1], [3, 2], "diag-cal-current");
   assert.deepEqual(judgementsAt(mismatch), [["diag-cal", "miss", ["wrong_collider"]]], "rejected calibration mismatch cannot mutate judgement truth");
   const wrongC = ready([beat("diag-wrong", 1000, "straight_left", { placement: 5 })]);
   send(wrongC, 1000, [-0.4, 1], [3, 1], [3, 2]);
-  send(wrongC, 1181, [-0.4, 1], [3, 1], [3, 2]);
+  send(wrongC, 2001, [-0.4, 1], [3, 1], [3, 2]);
   assert.deepEqual(judgementsAt(wrongC), [["diag-wrong", "miss", ["wrong_collider"]]], "owned hand present but off-target reports wrong_collider");
 }
 
@@ -651,7 +645,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const crossingR = ready([beat("crossing-right", 1000, "straight_right", { placement: 6 })]);
   send(crossingR, 900, [0.9, 1], [0.2, 0.3], [3, 2]);   // left in its own lane, right far away
   send(crossingR, 1000, [1.9, 1], [0.2, 0.3], [3, 2]);  // left crosses into the right-lane box
-  send(crossingR, 1181, [1.9, 1], [0.2, 0.3], [3, 2]);  // finalize past the late bound
+  send(crossingR, 2001, [1.9, 1], [0.2, 0.3], [3, 2]);  // finalize past the Play note deadline
   assert.deepEqual(judgementsAt(crossingR), [["crossing-right", "miss", ["wrong_collider"]]],
     "opposite (left) hand inside the right-lane box never credits straight_right");
 
@@ -660,7 +654,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const crossingL = ready([beat("crossing-left", 1000, "straight_left", { placement: 5 })]);
   send(crossingL, 900, [3.0, 0.3], [2.1, 1], [3, 2]);   // right in its own lane, left far away
   send(crossingL, 1000, [3.0, 0.3], [1.0, 1], [3, 2]);  // right crosses into the left-lane box
-  send(crossingL, 1181, [3.0, 0.3], [1.0, 1], [3, 2]);  // finalize past the late bound
+  send(crossingL, 2001, [3.0, 0.3], [1.0, 1], [3, 2]);  // finalize past the Play note deadline
   assert.deepEqual(judgementsAt(crossingL), [["crossing-left", "miss", ["wrong_collider"]]],
     "opposite (right) hand inside the left-lane box never credits straight_left");
 
@@ -674,7 +668,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   const simCross = ready([beat("sim-cross-l", 1000, "straight_left", { placement: 5 }), beat("sim-cross-r", 1000, "straight_right", { placement: 6 })]);
   send(simCross, 900, [1.9, 2.5], [1.0, 2.5], [3, 2]);  // above the opposite boxes, outside every box
   send(simCross, 1000, [1.9, 1], [1.0, 1], [3, 2]);     // left dropped into right box, right into left
-  send(simCross, 1181, [1.9, 1], [1.0, 1], [3, 2]);     // finalize
+  send(simCross, 2001, [1.9, 1], [1.0, 1], [3, 2]);     // finalize
   assert.deepEqual(
     judgementsAt(simCross).sort((a, b) => a[0].localeCompare(b[0])),
     [["sim-cross-l", "miss", ["wrong_collider"]], ["sim-cross-r", "miss", ["wrong_collider"]]],

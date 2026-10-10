@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
-import { beatInsideColliderDepth, colliderBackFaceTimestampMs, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
+import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
 const HASH = "c".repeat(64);
 const identity = { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: HASH };
@@ -71,6 +71,8 @@ for (const [mode, contact, target] of [
 }
 assert.equal(beatInsideColliderDepth(1000, 640, 180, 2, 1), true, "negative Z is future and forward depth extends it");
 assert.equal(colliderBackFaceTimestampMs(1000, 180, 2), 1360, "back face uses only the backward multiplier");
+assert.equal(effectivePlayNoteAfterWindowMs(1000,180,3),2000,"Play note floor exceeds default +540ms");
+assert.equal(effectivePlayNoteAfterWindowMs(1000,300,4),2200,"deeper configured deadline is retained");
 assert.equal(colliderDefaultDepthWu, 1.08, "shared contracts default face is 180ms × .006 WU/ms");
 const sharedBounds = resolveColliderBounds({ mode: "flow", center: { x: 1, y: 1, z: 0 }, halfWidth: .5, halfHeight: .5, settings: { ...colliderSettingsDefaults.flow, colliderScale: 2, colliderDepthForward: 2, colliderDepthBackward: 1 }, timingWindowMs: 180, speedWuPerMs: .006 });
 assert.deepEqual(sharedBounds, { minX: 0, maxX: 2, minY: 0, maxY: 2, minZ: -2.16, maxZ: 1.08 }, "gameplay and renderer resolve one contracted volume");

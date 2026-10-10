@@ -574,7 +574,10 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 3500, clock: clock(681, true), input: productionInput(3500, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow") });
   const settle = setAnchorPosition(setAnchorPosition(evidence("frame-flow-settle", 3700, []), "left_wrist", -0.5, 2), "right_wrist", -0.5, 2);
   coordinator.advance({ timestampMs: 3700, clock: clock(900, true), input: productionInput(3700, settle), equipmentPoses: equipmentPosesForEvidence(settle, "flow") });
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["wrong-flow", "miss"]], "unscored expired note commits; the bomb settles separately as a flow hazard outcome");
+  assert.equal(coordinator.getJudgements().length, 0, "still-visible Play note cannot score a full Miss");
+  const cleared = setAnchorPosition(setAnchorPosition(evidence("frame-flow-cleared", 4401, []), "left_wrist", -0.5, 2), "right_wrist", -0.5, 2);
+  coordinator.advance({ timestampMs: 4401, clock: clock(1501, true), input: productionInput(4401, cleared), equipmentPoses: equipmentPosesForEvidence(cleared, "flow") });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["wrong-flow", "miss"]], "unscored note commits after full clearance; the bomb settles separately as a flow hazard outcome");
 }
 // Bombs and walls settle exclusively through flow hazard outcomes under the swept colliders ruleset.
 {
@@ -1534,7 +1537,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
     assert.equal(c.getJudgements().length, 0, "resume measured frame is evaluated normally (monotonic gate passes)");
     assert.equal(c.getSnapshot().session.state, "playing");
     sendMeasured(c, 1181, [0, 0], [0, 1], "fr-miss-f3");
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]), [["fr-miss", "miss", ["wrong_collider"]]], "off-target note finalizes as a miss once the window closes");
+    assert.equal(c.getJudgements().length, 0, "off-target Play note stays pending until fully clear");
+    sendMeasured(c, 2001, [0, 0], [0, 1], "fr-miss-f4");
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]), [["fr-miss", "miss", ["wrong_collider"]]], "off-target note finalizes after view clearance");
     assert.equal(c.getSnapshot().session.state, "playing");
   }
 
