@@ -2292,7 +2292,12 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
     if (target?.crossed === true && !evidence.activeBoxingActions.includes("crossed_guard")) diagnostics.push("no_input");
   } else if (CHECKPOINT_ACTIONS.includes(action) && isPlainRecord(event.checkpoint) && Array.isArray(event.checkpoint.noseSafeCells)) {
     const nose = evidence.anchors.find((entry) => entry.anchor === "nose");
-    if (!nose || !event.checkpoint.noseSafeCells.includes(nose.cell)) diagnostics.push("wrong_cell");
+    // Only the squat's fractional lower row can be both mask-safe and inside
+    // the wall. Use the same inclusive nose/geometry point test as the red edge,
+    // while retaining the authored safe-cell gate and weave semantics.
+    const squatContacts = action === "squat" && nose && nose.valid === true && isPlainRecord(event.gameplayGeometry) &&
+      pointContactsObstacle(event, Object.freeze({ songTimeMs: Number(event.intervalStartTimestampMs), sx: 4 * nose.x - 0.5, sy: 2.5 - 3 * nose.y }));
+    if (!nose || !event.checkpoint.noseSafeCells.includes(nose.cell) || squatContacts) diagnostics.push("wrong_cell");
   }
 }
 
