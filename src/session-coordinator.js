@@ -17,7 +17,7 @@ import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometr
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
-import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -171,6 +171,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * collider hits. Not part of the public AeroGameplayJudgementV2 contract;
    * read by later Great/Good scoring. Keyed by eventId. */
   const hitDepthHalfByEventId = /** @type {Map<string, "front" | "back">} */ (new Map());
+  /** Frozen, private presentation hints for accepted Flow note hits only. */
+  const flowSliceByEventId = /** @type {Map<string, number>} */ (new Map());
   /** Pre-push per-wrist histories retained as immutable diagnostics for
    * authored direction decisions. Resolved equipment poses, not these arrays,
    * are the sole collision-volume authority. */
@@ -211,6 +213,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     getObstacleOutcomes: () => Object.freeze([...obstacleOutcomes]),
     getHazardOutcomes: () => Object.freeze([...hazardOutcomes]),
     getScorePartitions: () => Object.freeze([...partitions.values()].map((entry) => Object.freeze({ ...entry }))),
+    [Symbol.for("aerobeat.web-gameplay.internal-flow-slice")]: (eventId) => typeof eventId === "string" ? flowSliceByEventId.get(eventId) ?? null : null,
     subscribe,
     destroy
   });
@@ -617,6 +620,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings));
     events = Object.freeze(merged);
+    const retainedJudgedIds = new Set(merged.filter((event) => judgedIds.has(String(event.eventId))).map((event) => String(event.eventId)));
+    for (const eventId of flowSliceByEventId.keys()) if (!retainedJudgedIds.has(eventId)) flowSliceByEventId.delete(eventId);
     variant = nextVariant;
     contentGeneration = nextContentGeneration;
     eventTruth = nextEventTruth;
@@ -702,6 +707,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
     visualTestInteraction = null;
     frameEquipmentPoses = new Map();
+    flowSliceByEventId.clear();
     pauseReason = null;
     publish(null);
     listeners.clear();
@@ -1342,7 +1348,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // history covering the deepest legal window plus margin.
     pushPoseHistoryForRole("left_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
     pushPoseHistoryForRole("right_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
-    /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
+    /** @type {{event:DataRecord,contact:Readonly<{firstContactMs:number,hitDepthHalf:"front"|"back"}>,poseHistory:ReadonlyArray<Readonly<{t:number,pose:AeroResolvedEquipmentPose}>>,windowMs:number,volume:{scale:number,depthForward:number,depthBackward:number},afterWindowMs:number|null,hand:"left"|"right"}[]} */ const candidates = [];
     /** @type {{event:DataRecord,evidence:ColliderSample,nearMs:number,hand:"left"|"right"}[]} */ const nearMisses = [];
     for (const event of events) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
@@ -1376,17 +1382,21 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       }
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
-      candidates.push({ event, evidence: current, contactMs: swept.firstContactMs, hand, hitDepthHalf: swept.hitDepthHalf });
+      candidates.push({ event, contact: swept, poseHistory, windowMs, volume, afterWindowMs, hand });
     }
     /** @type {typeof candidates} */ const accepted = [];
     for (const hand of /** @type {const} */ (["left", "right"])) {
-      const ordered = candidates.filter((candidate) => candidate.hand === hand).sort((a, b) => a.contactMs - b.contactMs || Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
+      const ordered = candidates.filter((candidate) => candidate.hand === hand).sort((a, b) => a.contact.firstContactMs - b.contact.firstContactMs || Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
       if (ordered.length === 0) continue;
       const chordCenter = Number(ordered[0].event.centerTimestampMs);
       accepted.push(...ordered.filter((candidate) => Number(candidate.event.centerTimestampMs) === chordCenter));
     }
     accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
-    for (const candidate of accepted) recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contactMs, candidate.hitDepthHalf);
+    for (const candidate of accepted) {
+      const sliceT = internalFlowFirstContactSliceT(candidate.event, candidate.poseHistory, candidate.windowMs, candidate.volume, candidate.contact, candidate.afterWindowMs);
+      recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contact.firstContactMs, candidate.contact.hitDepthHalf);
+      if (sliceT !== null && Number.isFinite(sliceT) && sliceT >= 0.15 && sliceT <= 0.85) flowSliceByEventId.set(String(candidate.event.eventId), sliceT);
+    }
     // Near-miss judgements: result "miss" with "near_timing" diagnostic.
     // resolveScoringTier maps these to the "almost" tier (25 pts, combo alive).
     for (const near of nearMisses) recordJudgementAt(near.event, "miss", Object.freeze(["near_timing"]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, near.nearMs, null);
@@ -1881,7 +1891,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); flowSliceByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */

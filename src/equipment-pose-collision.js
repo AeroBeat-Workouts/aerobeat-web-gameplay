@@ -1,7 +1,7 @@
 // @ts-check
 
 import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveObb, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
-import { flowNoteCellBox } from "./flow-collider-collision.js";
+import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collision.js";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
 /** @typedef {Readonly<{x:number,y:number}>} Point2 */
@@ -378,6 +378,65 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   }
   if (firstNearMs !== null) return Object.freeze({ nearMiss: true, firstNearMs });
   return null;
+}
+
+/**
+ * INTERNAL presentation hint, not judgement or snapshot authority. Call only
+ * with the exact successful swept result for this event/history/window; a
+ * near-miss, absent result, or non-finite contact time has no slice. The judge
+ * tests an XY-projected capsule against a cell rectangle inside a time-depth
+ * slab, NOT a continuous 3D solid collision. Resolve the full 3D pose at the
+ * first sampled contact time, then choose the point on its projected blade
+ * axis closest to the cell center among axis points within one capsule radius
+ * of the rectangle. Ties choose the smaller axis parameter (start before end).
+ * This point is a deterministic locus of the projected overlap, not a physical
+ * 3D intersection point. Normalize its projection onto the authored arrow axis
+ * across the cell's projected extent; right/up increase toward the tip, and
+ * diagonal glyphs use both cell dimensions. Directionless orbs use 0.5.
+ * Clamp to [0.15, 0.85] to avoid slicing exactly at glyph edges.
+ *
+ * @param {DataRecord} event
+ * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
+ * @param {number} timingWindowMs
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ * @param {Readonly<{firstContactMs:number,hitDepthHalf:HitDepthHalf}> | null} contact Exact swept hit (not near-miss).
+ * @param {number | null} [afterWindowMs]
+ * @returns {number | null}
+ */
+export function internalFlowFirstContactSliceT(event, history, timingWindowMs, volume, contact, afterWindowMs = null) {
+  const t = contact?.firstContactMs;
+  if (!Number.isFinite(t) || !history.length || contact?.hitDepthHalf !== (t < Number(event.centerTimestampMs) ? "front" : "back")) return null;
+  const box = flowNoteCellBox(event);
+  const center = Number(event.centerTimestampMs);
+  if (t < center - timingWindowMs * (volume.depthForward ?? 1) || t > (afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1))) return null;
+  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
+  const capsule = resolveSaberCapsule(resolvePoseAt(history, t));
+  const start = capsule.start; const end = capsule.end;
+  if (!segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
+  const direction = event.direction == null ? null : authoredDirectionCone(String(event.direction), 0)?.direction;
+  if (!direction) return event.direction == null ? 0.5 : null;
+  // Distance to an axis point is convex along the segment. Ternary search its
+  // minimum, then binary-search the two radius crossings. The candidate nearest
+  // the cell center inside that interval is deterministic even for edge grazes.
+  const at = (p) => ({ x: start.x + (end.x - start.x) * p, y: start.y + (end.y - start.y) * p });
+  const distance = (p) => pointRectangleDistance(at(p), bounds);
+  let low = 0; let high = 1;
+  for (let i = 0; i < 64; i += 1) { const a = low + (high - low) / 3; const b = high - (high - low) / 3; if (distance(a) <= distance(b)) high = b; else low = a; }
+  const minimum = (low + high) / 2;
+  if (distance(minimum) > capsule.radius + Number.EPSILON) return null;
+  let first = 0; let last = minimum;
+  if (distance(first) > capsule.radius + Number.EPSILON) for (let i = 0; i < 64; i += 1) { const mid = (first + last) / 2; if (distance(mid) <= capsule.radius + Number.EPSILON) last = mid; else first = mid; }
+  const entry = distance(0) <= capsule.radius + Number.EPSILON ? 0 : last;
+  first = minimum; last = 1;
+  if (distance(last) > capsule.radius + Number.EPSILON) for (let i = 0; i < 64; i += 1) { const mid = (first + last) / 2; if (distance(mid) <= capsule.radius + Number.EPSILON) first = mid; else last = mid; }
+  const exit = distance(1) <= capsule.radius + Number.EPSILON ? 1 : first;
+  const dx = end.x - start.x; const dy = end.y - start.y;
+  const centerParameter = dx * dx + dy * dy === 0 ? 0 : ((bounds.minX + bounds.maxX) / 2 - start.x) * dx / (dx * dx + dy * dy) + ((bounds.minY + bounds.maxY) / 2 - start.y) * dy / (dx * dx + dy * dy);
+  const locus = at(Math.max(entry, Math.min(exit, centerParameter)));
+  const halfExtent = (bounds.maxX - bounds.minX) * Math.abs(direction.x) / 2 + (bounds.maxY - bounds.minY) * Math.abs(direction.y) / 2;
+  const projection = ((locus.x - box.centerX) * direction.x + (locus.y - box.centerY) * direction.y) / (2 * halfExtent);
+  const sliceT = Math.max(0.15, Math.min(0.85, 0.5 + projection));
+  return Number.isFinite(sliceT) ? sliceT : null;
 }
 
 /**

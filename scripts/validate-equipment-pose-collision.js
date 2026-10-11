@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
-import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
+import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
 const HASH = "c".repeat(64);
 const identity = { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: HASH };
@@ -86,6 +86,39 @@ for (const [mode, contact, target] of [["flow", resolvedSaberCapsuleContactsFlow
   assert.equal(contact(target, equipment, 1250, widthMs, customized), true, `${mode}: custom backward face remains at +250ms`);
   assert.equal(contact(target, equipment, 1250.001, widthMs, customized), false, `${mode}: custom back face outside`);
 }
+
+// The private visual slice uses the exact swept hit and the resolved contact-time
+// blade, never a stale wrist or the latest pose. These also cover axis glyphs.
+const slice = (entry, direction = "right", volume = {}, time = 1000) => {
+  const event = { ...flowEvent, direction };
+  const history = [{ t: time, pose: entry }];
+  const hit = sweptSaberContactsFlowTarget(event, history, 180, volume);
+  return internalFlowFirstContactSliceT(event, history, 180, volume, hit);
+};
+const close = (actual, expected, label) => assert.ok(actual !== null && Math.abs(actual - expected) < 1e-6, `${label}: expected ${expected}, got ${actual}`);
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 })), 0.5, "right arrow centered overlapping blade chooses cell-center locus");
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1.3, z: 0 }), "up"), 0.8, "up arrow uses positive judge Y");
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1.3, z: 0 }), "up-right"), 0.65, "diagonal arrow projects on normalized cell diagonal");
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }), null), 0.5, "directionless orb uses midpoint");
+const scaledBlade = pose("left_wrist", "flow", { x: 1.4, y: 1, z: 0 }, { scale: 2 });
+close(slice(scaledBlade, "right", { scale: 2 }), 0.7, "expanded cell rescales glyph coordinate");
+assert.ok(slice(scaledBlade, "right", { scale: 2 }) < slice(scaledBlade), "cell scale changes first-contact normalization");
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1.6, z: 0 }, { orientation: orientation(0, 0, 90) }), "up"), 0.85, "XY rotation changes projected blade contact locus");
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { orientation: orientation(0, 90, 0) })), 0.5, "Z tilt shortens projected blade");
+const movingEvent = { ...flowEvent, direction: "right" };
+const movingHistory = [
+  { t: 900, pose: pose("left_wrist", "flow", { x: -1, y: 1, z: 0 }) },
+  { t: 1100, pose: pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }) }
+];
+const firstHit = sweptSaberContactsFlowTarget(movingEvent, movingHistory, 180);
+assert.ok(firstHit && "firstContactMs" in firstHit && firstHit.firstContactMs > 900 && firstHit.firstContactMs < 1100, "first contact is sampled between frames");
+const firstSlice = internalFlowFirstContactSliceT(movingEvent, movingHistory, 180, {}, firstHit);
+assert.ok(firstSlice !== null && firstSlice < slice(movingHistory[1].pose), "interpolated first sampled contact differs from latest blade pose");
+assert.equal(internalFlowFirstContactSliceT(movingEvent, movingHistory, 180, {}, null), null, "no hit is not a slice");
+assert.equal(internalFlowFirstContactSliceT(movingEvent, movingHistory, 180, {}, { nearMiss: true, firstNearMs: 1000 }), null, "near miss is not a hit");
+assert.equal(internalFlowFirstContactSliceT(movingEvent, movingHistory, 180, {}, { firstContactMs: NaN, hitDepthHalf: "back" }), null, "nonfinite contact fails closed");
+assert.equal(internalFlowFirstContactSliceT(movingEvent, movingHistory, 180, {}, { firstContactMs: 2000, hitDepthHalf: "back" }), null, "out-of-window contact fails closed");
+assert.equal(slice(pose("left_wrist", "flow", { x: 3, y: 1, z: 0 })), null, "wrong-cell miss has no slice");
 
 const implementation = await readFile(new URL("../src/equipment-pose-collision.js", import.meta.url), "utf8");
 assert.doesNotMatch(implementation, /\.glb|\.gltf|mesh|modelBounds/iu, "collision math is GLB/model independent");

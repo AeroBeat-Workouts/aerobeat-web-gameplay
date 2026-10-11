@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot, isObstacleOutcome } from "@aerobeat/web-contracts";
 import { createPlaybackClock } from "../../aerobeat-web-audio/src/index.js";
+import { internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget } from "../src/equipment-pose-collision.js";
 import {
   aeroGameplaySessionCapabilities,
   createAeroGameplaySessionCoordinator
@@ -69,6 +70,70 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 2000, clock: clock(0, false) });
   coordinator.advance({ timestampMs: 3000, clock: clock(0, false) });
   assert.equal(coordinator.getSnapshot().session.state, "playing");
+}
+
+// Internal first-contact presentation hint follows the accepted Flow judge, never public JSON.
+{
+  const symbol = Symbol.for("aerobeat.web-gameplay.internal-flow-slice");
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-private-slice" });
+  const notes = [event("slice-a", 1000, "note", { hand: "left", placement: 5, direction: "right" }), event("slice-b", 1000, "note", { hand: "left", placement: 5, direction: "right" }), event("slice-staggered", 1050, "note", { hand: "left", placement: 5, direction: "right" }), event("slice-wrong", 1000, "note", { hand: "right", placement: 6, direction: "up" }), event("slice-near", 1000, "note", { hand: "right", placement: 8 }), event("slice-future", 5000, "note", { hand: "left", placement: 9 })];
+  readyVisualTest(coordinator, notes, variant("flow_colliders_v1", null));
+  const lookup = coordinator[symbol];
+  assert.equal(typeof lookup, "function");
+  assert.equal(Object.keys(coordinator).includes("internalFlowSlice"), false);
+  const base = setAnchorPosition(setAnchorPosition(evidence("slice-base", 900, []), "left_wrist", 0, 1), "right_wrist", 3.4, 0);
+  const hit = setAnchorPosition(setAnchorPosition(evidence("slice-hit", 1000, []), "left_wrist", 1, 1), "right_wrist", 3.4, 0);
+  const poseBase = equipmentPosesForEvidence(base, "flow");
+  const poseHit = equipmentPosesForEvidence(hit, "flow");
+  coordinator.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, base), equipmentPoses: poseBase, interaction: visualTestInteraction(1, 900) });
+  coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, hit), equipmentPoses: poseHit, interaction: visualTestInteraction(1, 900) });
+  const first = coordinator.getJudgements().find((entry) => entry.eventId === "slice-a");
+  assert.equal(first?.result, "hit");
+  assert.notEqual(first?.timingOffsetMs, 0, "sweep begins at first interpolated contact, not the evidence frame");
+  const history = Object.freeze([{ t: 900, pose: poseBase[0] }, { t: 1000, pose: poseHit[0] }]);
+  const contact = sweptSaberContactsFlowTarget(notes[0], history, 180, { scale: 1, depthForward: 1, depthBackward: 1 });
+  assert.ok(contact && "firstContactMs" in contact);
+  const expected = internalFlowFirstContactSliceT(notes[0], history, 180, { scale: 1, depthForward: 1, depthBackward: 1 }, contact);
+  assert.equal(lookup("slice-a"), expected, "frozen hint uses the winning interpolated contact");
+  assert.equal(lookup("slice-b"), expected, "exact same-center chord has independent accepted identity");
+  assert.ok(lookup("slice-a") >= 0.15 && lookup("slice-a") <= 0.85);
+  for (const id of ["slice-staggered", "slice-wrong", "slice-near", "slice-future", "unknown"]) assert.equal(lookup(id), null);
+  assert.equal(lookup({ toString() { throw Error("private getter coerced input"); } }), null);
+  const publicBefore = JSON.stringify({ snapshot: coordinator.getSnapshot(), judgements: coordinator.getJudgements(), partitions: coordinator.getScorePartitions() });
+  assert.equal(publicBefore.includes("sliceT"), false);
+  assert.equal(publicBefore.includes(String(expected)), false);
+  const later = setAnchorPosition(evidence("slice-later", 2500, []), "left_wrist", 3.4, 2);
+  coordinator.advance({ timestampMs: 2500, clock: clock(2500, true), input: productionInput(2500, later), equipmentPoses: equipmentPosesForEvidence(later, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.equal(lookup("slice-a"), expected, "hint survives pose-history eviction");
+  coordinator.pause(2501);
+  assert.equal(lookup("slice-a"), expected, "hint survives pause");
+  coordinator.synchronizePausedClock({ timestampMs: 2502, clock: clock(2500, false) });
+  assert.equal(lookup("slice-a"), expected, "natural paused-clock sync preserves scored hit hint");
+  assert.equal(coordinator.getJudgements().find((entry) => entry.eventId === "slice-a")?.result, "hit");
+  coordinator.applyFutureContent(config([event("slice-a", 1000, "note", { hand: "left", placement: 5, direction: "right" }), event("replacement", 6000, "note", { hand: "left", placement: 9 })], variant("flow_colliders_v1", null)));
+  assert.equal(lookup("slice-a"), expected, "judged identity survives future swap");
+  assert.equal(lookup("replacement"), null);
+  coordinator.stop(2503);
+  assert.equal(lookup("slice-a"), expected, "hint survives stop");
+  coordinator.seekTo(0);
+  assert.equal(lookup("slice-a"), null, "clean seek removes old run hints");
+  coordinator.reset(2504);
+  assert.equal(lookup("slice-b"), null);
+  coordinator.destroy();
+  assert.equal(lookup("slice-a"), null);
+
+  const restart = createAeroGameplaySessionCoordinator({ sessionId: "flow-private-restart" });
+  readyVisualTest(restart, [event("restart-note", 1000, "note", { hand: "left", placement: 5 })], variant("flow_colliders_v1", null));
+  const restartBase = setAnchorPosition(evidence("restart-base", 900, []), "left_wrist", 0, 1);
+  restart.advance({ timestampMs: 900, clock: clock(900, true), input: productionInput(900, restartBase), equipmentPoses: equipmentPosesForEvidence(restartBase, "flow"), interaction: visualTestInteraction(1, 900) });
+  const restartHit = setAnchorPosition(evidence("restart-hit", 1000, []), "left_wrist", 1, 1);
+  restart.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, restartHit), equipmentPoses: equipmentPosesForEvidence(restartHit, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.equal(restart.getJudgements().find((entry) => entry.eventId === "restart-note")?.result, "hit");
+  assert.ok(restart.getScorePartitions().some((entry) => entry.hits === 1));
+  assert.notEqual(restart[symbol]("restart-note"), null, "scored hit stores a private hint before restart");
+  assert.equal(restart.requestStart(1001, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" }).accepted, true);
+  assert.deepEqual(restart.getJudgements(), [], "explicit restart clears old judgements");
+  assert.equal(restart[symbol]("restart-note"), null, "explicit restart clears the scored hit hint");
 }
 
 // Initial calibration gate and immutable frozen countdown against authoritative audio.
