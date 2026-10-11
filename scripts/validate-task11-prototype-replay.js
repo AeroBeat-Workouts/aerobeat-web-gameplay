@@ -128,8 +128,10 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   ready(coordinator, config(candidate, [event(candidate,"past",1000,"hook_right"),event(candidate,"old-future",3000,"squat"),event(candidate,"replaceable-future",4000,"hook_right")], { shadowVariants:[shadowCandidate] }));
   coordinator.advance({ timestampMs:4000,clock:clock(1000,true),input:input(4000,evidence("shadow-frame",4000,["hook_left"])) });
   assert.equal(coordinator.getSnapshot().shadowJudgements[0].result,"hit");
+  assert.equal(coordinator.getJudgements().length,0,"diagnostic shadow hit does not judge the original hook_right");
   assert.equal(coordinator.getScorePartitions().reduce((sum,item)=>sum+item.hits,0),0);
   coordinator.advance({ timestampMs:4200,clock:clock(1200,true) });
+  assert.deepEqual(coordinator.getJudgements().filter((entry)=>entry.eventId === "past").map((entry)=>entry.result),["miss"],"unmatched past hook_right commits a miss");
   coordinator.setActiveEventIds(["old-future"]);
   coordinator.pause(4300);
   const next = {...candidate,chartId:"chart-semantic-row-revised",recipeId:"cut_family_source_height_v1"};
@@ -139,17 +141,23 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   coordinator.resume(4400);
   coordinator.advance({timestampMs:5400,clock:clock(1200,false)}); coordinator.advance({timestampMs:6400,clock:clock(1200,false)}); coordinator.advance({timestampMs:7400,clock:clock(1200,false)});
   coordinator.advance({timestampMs:9200,clock:clock(3000,true),input:input(9200,evidence("swap-settings",9200,["squat","weave_left"]))});
-  // 4-tier scoring: non-swept semantic-track hits resolve to "good" (50 each)
-  // at x1/x2 multipliers, independent of the legacy fractional settings. The
-  // old partition scores its two preserved hits (50+75=125); the locked
-  // partition has its first replacement hit (50) at this checkpoint.
-  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide")?.score,125,"same-ID preserved events keep their old partition identity");
+  assert.deepEqual(coordinator.getJudgements().filter((entry)=>entry.eventId === "old-future").map((entry)=>entry.result),["hit"],"active old-future squat remains preserved and scores");
+  assert.deepEqual(coordinator.getJudgements().filter((entry)=>entry.eventId === "replacement").map((entry)=>entry.result),["hit"],"new replacement weave scores in locked partition");
+  // The original past hook_right misses; only the preserved old-future squat
+  // scores Good (50 at x1) in the old partition. The locked partition has its
+  // first replacement Good hit (50 at x1) at this checkpoint.
+  assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide")?.score,50,"same-ID preserved events keep their old partition identity");
   assert.equal(coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked")?.score,50,"same-variant replacement keeps its locked partition identity");
   coordinator.advance({timestampMs:9700,clock:clock(3500,true),input:input(9700,evidence("swap-future",9700,["weave_right"]))});
   const oldPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.prototype-wide");
   const newPartition = coordinator.getScorePartitions().find((entry)=>entry.profileId === "aero.scoring.locked");
+  assert.deepEqual(coordinator.getJudgements().map((entry)=>[entry.eventId,entry.result]),[["past","miss"],["old-future","hit"],["replacement","hit"],["replaceable-future","hit"]],"swap preserves the original miss and exactly three distinct hits");
+  assert.equal(oldPartition.hits,1,"only the preserved squat hits in the old partition");
+  assert.equal(oldPartition.misses,1,"the original past hook remains a miss in the old partition");
   assert.equal(oldPartition.scoringSettings.hitPoints,1.25);
-  assert.equal(oldPartition.score,125,"preserved old events retain their old partition identity under 4-tier scoring");
+  assert.equal(oldPartition.score,50,"preserved old events retain their old partition identity under 4-tier scoring");
+  assert.equal(newPartition.hits,2,"both replacement events hit in the locked partition");
+  assert.equal(newPartition.misses,0,"no replacement event misses in the locked partition");
   assert.equal(newPartition.scoringSettings.hitPoints,1);
   assert.equal(newPartition.score,150,"replacement events score under the same 4-tier system");
   assert.equal(oldPartition.chartId,"chart-semantic-row");
