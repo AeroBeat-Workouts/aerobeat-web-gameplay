@@ -50,11 +50,11 @@ const FLOW_GRID_RULESET = "flow_grid_v2";
 const BOXING_COLLIDER_RULESET = "boxing_collider_v1";
 
 /** @type {readonly string[]} */
-const CHECKPOINT_ACTIONS = Object.freeze(["guard", "crossed_guard", "squat", "weave_left", "weave_right"]);
+const CHECKPOINT_ACTIONS = Object.freeze(["guard", "squat", "weave_left", "weave_right"]);
 /** @type {readonly string[]} */
 const PUNCH_ACTIONS = Object.freeze(["straight_left", "straight_right", "hook_left", "hook_right", "uppercut_left", "uppercut_right"]);
 /** @type {readonly string[]} */
-const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "crossed_guard", "no_obstacles", "no_squats", "no_weaves", "obstacle_visual_only"]);
+const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "no_obstacles", "no_squats", "no_weaves", "obstacle_visual_only"]);
 
 /**
  * @typedef {Object} GameplayCoordinatorOptions
@@ -1591,7 +1591,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         if (swept === null) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
         candidates.push({ event, evidence: current, contactMs: swept.firstContactMs, hand, hitDepthHalf: swept.hitDepthHalf });
-      } else if (action === "guard" || action === "crossed_guard") {
+      } else if (action === "guard") {
         const target = /** @type {DataRecord | undefined} */ (event.guardTarget);
         if (!target) continue;
         const leftCell = Number(target.leftCell); const rightCell = Number(target.rightCell);
@@ -1633,7 +1633,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const event of events) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId))) continue;
       const action = expectedAction(event);
-      if (action !== "guard" && action !== "crossed_guard") continue;
+      if (action !== "guard") continue;
       const checkpoint = /** @type {DataRecord | undefined} */ (event.checkpoint);
       const windowMs = checkpoint !== undefined && typeof checkpoint.timingWindowMs === "number" ? Number(checkpoint.timingWindowMs) : Number(boxingColliderSettings.timingWindowMs);
       if (latestEvidenceTimelineMs < Number(event.centerTimestampMs) - windowMs || latestEvidenceTimelineMs > Number(event.centerTimestampMs) + windowMs) continue;
@@ -1664,7 +1664,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
       const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
       const late = PUNCH_ACTIONS.includes(action) && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs, Number(settings.colliderDepthBackward)) : colliderBackFaceTimestampMs(center, windowMs, Number(settings.colliderDepthBackward));
-      if ((action === "guard" || action === "crossed_guard") && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
+      if (action === "guard" && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
         if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);
         continue;
@@ -2059,14 +2059,11 @@ function validateEventForVariant(event, selectedVariant) {
     const action = expectedAction(event);
     if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
     if (action === "squat" || action === "weave_left" || action === "weave_right") validateBoxingObstacle(event);
+    if (event.modifier === "crossed_guard" || (Array.isArray(event.runtimeModifiers) && event.runtimeModifiers.includes("crossed_guard"))) throw gameplayError("event_modifier_invalid", "Boxing event uses an unsupported modifier");
+    if (action === "guard") validateGuardTarget(event);
     if (selectedVariant.rulesetId === BOXING_COLLIDER_RULESET) {
       if (PUNCH_ACTIONS.includes(action)) { const target = requireRecord(event.spatialTarget, "spatial_target_invalid"); requireGridCell(target.targetCell, "spatial_target_invalid"); }
-    else if (action === "guard" || action === "crossed_guard") {
-        const target = requireRecord(event.guardTarget, "guard_target_invalid");
-        requireGridCell(target.leftCell, "guard_target_invalid");
-        requireGridCell(target.rightCell, "guard_target_invalid");
-        if (action === "crossed_guard" && target.crossed !== true) throw gameplayError("guard_target_invalid", "Crossed guards must set the crossed flag on their guard target");
-      } else if (event.checkpoint !== undefined) {
+      else if (action !== "guard" && event.checkpoint !== undefined) {
         const checkpoint = requireRecord(event.checkpoint, "checkpoint_invalid");
         if (checkpoint.kind !== "instantaneous" || typeof checkpoint.timingWindowMs !== "number") throw gameplayError("checkpoint_invalid", "Boxing Collider checkpoints must be instantaneous with a timing window");
       }
@@ -2077,11 +2074,7 @@ function validateEventForVariant(event, selectedVariant) {
         if (!Array.isArray(target.acceptedSubcells) || target.acceptedSubcells.length > 48 || target.acceptedSubcells.some((entry) => !Number.isInteger(entry) || entry < 0 || entry > 47)) throw gameplayError("spatial_target_invalid", "Spatial accepted subcells are invalid");
         if (target.sourceCell !== undefined && (!Number.isInteger(target.sourceCell) || Number(target.sourceCell) < -1 || Number(target.sourceCell) > 11)) throw gameplayError("spatial_target_invalid", "Spatial source cell must be the explicit -1 sentinel or a 4x3 grid cell");
         if (target.entryDirection !== undefined && cardinalDirectionName(target.entryDirection) === null) throw gameplayError("spatial_target_invalid", "Spatial entry direction is invalid");
-      } else if (action === "guard" || action === "crossed_guard") {
-        const target = requireRecord(event.guardTarget, "guard_target_invalid");
-        requireGridCell(target.leftCell, "guard_target_invalid");
-        requireGridCell(target.rightCell, "guard_target_invalid");
-      } else {
+      } else if (action !== "guard") {
         const checkpoint = requireRecord(event.checkpoint, "checkpoint_invalid");
         if (!Array.isArray(checkpoint.noseSafeCells) || checkpoint.noseSafeCells.length > 12 || checkpoint.noseSafeCells.some((entry) => !Number.isInteger(entry) || entry < 0 || entry > 11)) throw gameplayError("checkpoint_invalid", "Checkpoint nose-safe cells are invalid");
       }
@@ -2091,6 +2084,14 @@ function validateEventForVariant(event, selectedVariant) {
     const sourceIds = requireStringArray(event.sourceEventIds, "event_lineage_invalid", 256);
     if (new Set(sourceIds).size !== sourceIds.length) throw gameplayError("event_lineage_invalid", "Event lineage IDs must be unique");
   }
+}
+
+/** @param {DataRecord} event */
+function validateGuardTarget(event) {
+  const target = requireRecord(event.guardTarget, "guard_target_invalid");
+  const leftCell = requireGridCell(target.leftCell, "guard_target_invalid");
+  const rightCell = requireGridCell(target.rightCell, "guard_target_invalid");
+  if (Object.hasOwn(target, "crossed") || leftCell % 4 > 1 || rightCell % 4 < 2) throw gameplayError("guard_target_invalid", "Guards require unflagged same-side wrist targets");
 }
 
 /** @param {DataRecord} event */
@@ -2294,12 +2295,11 @@ function matchSpatial(event, action, evidence, input, diagnostics) {
       const qualified = isPlainRecord(qualification) && qualification.spatialQualified === true && start !== null && evidence.measurementTimestampMs - start >= prototypeJudgementDefaults.straightQualificationMs;
       if (!qualified) diagnostics.push("qualification_too_short");
     }
-  } else if (action === "guard" || action === "crossed_guard") {
+  } else if (action === "guard") {
     const target = isPlainRecord(event.guardTarget) ? event.guardTarget : null;
     const left = evidence.anchors.find((entry) => entry.anchor === "left_wrist");
     const right = evidence.anchors.find((entry) => entry.anchor === "right_wrist");
     if (!target || !left || !right || left.cell !== target.leftCell || right.cell !== target.rightCell) diagnostics.push("wrong_cell");
-    if (target?.crossed === true && !evidence.activeBoxingActions.includes("crossed_guard")) diagnostics.push("no_input");
   } else if (CHECKPOINT_ACTIONS.includes(action) && isPlainRecord(event.checkpoint) && Array.isArray(event.checkpoint.noseSafeCells)) {
     const nose = evidence.anchors.find((entry) => entry.anchor === "nose");
     // Only the squat's fractional lower row can be both mask-safe and inside
@@ -2320,9 +2320,9 @@ function makeJudgement(event, selectedVariant, result, diagnostics, evidence, ev
 }
 
 /** @param {DataRecord} event */
-function expectedAction(event) { if (event.type === "guard" && isPlainRecord(event.guardTarget) && event.guardTarget.crossed === true) return "crossed_guard"; return typeof event.type === "string" ? event.type : "note"; }
+function expectedAction(event) { return typeof event.type === "string" ? event.type : "note"; }
 /** @param {DataRecord} event */
-function eventCategory(event) { const action = expectedAction(event); return PUNCH_ACTIONS.includes(action) ? "punch" : action === "guard" || action === "crossed_guard" ? "guard" : "checkpoint"; }
+function eventCategory(event) { const action = expectedAction(event); return PUNCH_ACTIONS.includes(action) ? "punch" : action === "guard" ? "guard" : "checkpoint"; }
 /** @param {DataRecord} event */
 function lineageIds(event) { return Array.isArray(event.sourceEventIds) ? event.sourceEventIds.filter((entry) => typeof entry === "string") : []; }
 /** @param {DataRecord} left @param {DataRecord} right */

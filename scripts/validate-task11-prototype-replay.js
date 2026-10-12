@@ -10,8 +10,8 @@ const fixtureHash = fixture.fixtureHash;
 delete fixture.fixtureHash;
 assert.equal(fixtureHash, `sha256:${sha256PrototypeProfileHex(canonicalPrototypeProfileJson(fixture))}`);
 assert.equal(fixture.candidateMatrix.length, 5);
-assert.equal(new Set(fixture.requiredScenarios).size, 26);
-assert.deepEqual(fixture.modifierIds, ["any_punch", "cross_body", "crossed_guard", "no_squats", "no_weaves"]);
+assert.equal(new Set(fixture.requiredScenarios).size, 25);
+assert.deepEqual(fixture.modifierIds, ["any_punch", "cross_body", "no_squats", "no_weaves"]);
 
 function variant(candidate, modifierIds = []) { return { variantId: candidate.id, chartId: candidate.chartId ?? `chart-${candidate.id}`, mode: candidate.mode, rulesetId: candidate.rulesetId, recipeId: candidate.recipeId, modifierIds, ranked: false, mapHash: hash(), scoreIdentityHash: hash(), provenance: { baseVariantId: candidate.id } }; }
 function hash() { return { schema: "aerobeat/content_hash", version: 1, algorithm: "sha256", value: HASH }; }
@@ -66,19 +66,23 @@ for (const [action, hand, direction, sourceCell] of [["straight_left","left","up
   assert.deepEqual(coordinator.getSnapshot().selectedVariant.modifierIds, fixture.modifierIds);
 }
 
-// Standard/crossed guards and disjoint obstacle+punch versus overlapping guard/punch.
+// Same-side guards and disjoint obstacle+punch versus overlapping guard/punch.
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "guards-concurrency" });
   const candidate = fixture.candidateMatrix.find((entry) => entry.id === "spatial-row");
-  ready(coordinator, config(candidate, [event(candidate,"a-guard",1000,"guard",{guardTarget:{leftCell:5,rightCell:5}}),event(candidate,"b-hook",1000,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20]}})]));
-  coordinator.advance({ timestampMs: 4000, clock: clock(1000,true), input: input(4000,evidence("guard-overlap",4000,["guard","hook_left"])) });
+  ready(coordinator, config(candidate, [event(candidate,"a-guard",1000,"guard",{guardTarget:{leftCell:5,rightCell:6}}),event(candidate,"b-hook",1000,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20]}})]));
+  const guardOverlap = evidence("guard-overlap",4000,["guard","hook_left"]);
+  guardOverlap.anchors.find((entry) => entry.anchor === "right_wrist").cell = 6;
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000,true), input: input(4000,guardOverlap) });
   assert.deepEqual(coordinator.getJudgements().map((item)=>item.diagnostics), [[],["blocked_overlap"]]);
 }
 {
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "crossed-disjoint" });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "guard-disjoint" });
   const candidate = fixture.candidateMatrix.find((entry) => entry.id === "spatial-row");
-  ready(coordinator, config(candidate, [event(candidate,"a-crossed",1000,"guard",{guardTarget:{leftCell:5,rightCell:5,crossed:true}}),event(candidate,"b-squat",1500,"squat"),event(candidate,"c-hook",1500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20]}})]));
-  coordinator.advance({ timestampMs: 4000, clock: clock(1000,true), input: input(4000,evidence("crossed",4000,["crossed_guard"])) });
+  ready(coordinator, config(candidate, [event(candidate,"a-guard",1000,"guard",{guardTarget:{leftCell:5,rightCell:6}}),event(candidate,"b-squat",1500,"squat"),event(candidate,"c-hook",1500,"hook_left",{spatialTarget:{targetCell:5,acceptedSubcells:[20]}})]));
+  const guardSample = evidence("guard",4000,["guard"]);
+  guardSample.anchors.find((entry) => entry.anchor === "right_wrist").cell = 6;
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000,true), input: input(4000,guardSample) });
   coordinator.advance({ timestampMs: 4500, clock: clock(1500,true), input: input(4500,evidence("disjoint",4500,["squat","hook_left"])) });
   assert.deepEqual(coordinator.getJudgements().map((item)=>item.result), ["hit","hit","hit"]);
 }

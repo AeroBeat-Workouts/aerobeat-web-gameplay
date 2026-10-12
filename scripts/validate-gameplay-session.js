@@ -605,16 +605,43 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(coordinator.getJudgements()[0].rulesetId, "boxing_spatial_grid_v1");
 }
 
-// Spatial crossed-guard checkpoints consume the same measured wrist sample.
+// Spatial guards keep each wrist on its authored side and require guard input.
 {
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "crossed-guard" });
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "same-side-guard" });
   const spatial = variant("boxing_spatial_grid_v1", "row_family_balanced_height_v1");
-  readyPlaying(coordinator, [event("crossed", 1000, "guard", { guardTarget: { leftCell: 6, rightCell: 5, crossed: true } })], spatial);
-  const sample = evidence("frame-crossed", 4000, ["crossed_guard"]);
-  sample.anchors.find((entry) => entry.anchor === "left_wrist").cell = 6;
-  sample.anchors.find((entry) => entry.anchor === "right_wrist").cell = 5;
-  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, sample) });
+  readyPlaying(coordinator, [event("same-side", 1000, "guard", { guardTarget: { leftCell: 5, rightCell: 6 } })], spatial);
+  const wrongAction = evidence("frame-no-guard", 4000, []);
+  coordinator.advance({ timestampMs: 4000, clock: clock(1000, true), input: input(4000, wrongAction) });
+  assert.deepEqual(coordinator.getJudgements(), [], "two wrists without guard action cannot score");
+  const sample = evidence("frame-same-side", 4100, ["guard"]);
+  coordinator.advance({ timestampMs: 4100, clock: clock(1100, true), input: input(4100, sample) });
   assert.equal(coordinator.getJudgements()[0].result, "hit");
+  assert.equal(coordinator.getScorePartitions()[0].hits, 1);
+}
+
+// Signed legacy crossing and reversed guard cells reject transactionally in every Boxing ruleset.
+{
+  const baseline = event("safe", 1000, "guard", { guardTarget: { leftCell: 5, rightCell: 6 } });
+  for (const rulesetId of ["boxing_semantic_track_v1", "boxing_spatial_grid_v1", "boxing_collider_v1"]) {
+    const selected = variant(rulesetId);
+    const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `reject-crossing-${rulesetId}` });
+    coordinator.configureContent(config([baseline], selected));
+    const before = JSON.stringify(coordinator.getSnapshot());
+    for (const [label, change, error] of [
+      ["action", { type: "crossed_guard" }, /Boxing event type is unsupported/u],
+      ["flag", { guardTarget: { leftCell: 5, rightCell: 6, crossed: false } }, /same-side wrist targets/u],
+      ["reversed", { guardTarget: { leftCell: 6, rightCell: 5 } }, /same-side wrist targets/u],
+      ["left-crossed", { guardTarget: { leftCell: 6, rightCell: 6 } }, /same-side wrist targets/u],
+      ["right-crossed", { guardTarget: { leftCell: 5, rightCell: 5 } }, /same-side wrist targets/u],
+      ["beat-modifier", { modifier: "crossed_guard" }, /unsupported modifier/u],
+      ["runtime-modifier", { runtimeModifiers: ["crossed_guard"] }, /unsupported modifier/u]
+    ]) {
+      assert.throws(() => coordinator.configureContent(config([{ ...baseline, ...change }], selected)), error, `${rulesetId}: ${label}`);
+      assert.equal(JSON.stringify(coordinator.getSnapshot()), before, `${rulesetId}: ${label} cannot mutate configured truth`);
+    }
+    assert.throws(() => coordinator.configureContent(config([baseline], { ...selected, modifierIds: ["crossed_guard"] })), /Modifier identity must be supported/u);
+    assert.equal(JSON.stringify(coordinator.getSnapshot()), before, `${rulesetId}: rejected variant modifier preserves truth`);
+  }
 }
 
 // The retired Flow Grid ruleset is no longer an accepted variant input: historical reads are enforced at the authoring/content boundary.

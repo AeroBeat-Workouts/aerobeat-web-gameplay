@@ -43,7 +43,6 @@
     "uppercut_left_cardinal",
     "uppercut_right_cardinal",
     "standard_guard",
-    "crossed_guard",
     "obstacle_punch_disjoint",
     "guard_punch_overlap",
     "modifier_no_squats",
@@ -65,7 +64,6 @@
   "modifierIds": [
     "any_punch",
     "cross_body",
-    "crossed_guard",
     "no_squats",
     "no_weaves"
   ],
@@ -76,5 +74,5 @@
     "timingWindowBeforeMs": 180,
     "trackingLossMs": 500
   },
-  "fixtureHash": "sha256:558304773d68cb816d066fab1732dc9e5254d33b7104b5c0b2e926397f79dcf4"
+  "fixtureHash": "sha256:8cbd619a3c2d411d7152908dcd9ff7e16bd42b7e625126ef3f9c7bc09e718314"
 }

@@ -265,7 +265,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.deepEqual(judgementsAt(misdirectedStraight), [["mis-straight", "hit", []]], "straight ignores direction entirely");
 }
 
-// --- Guard collision mode: side ownership, crossed, both-required, miss window -------
+// --- Guard collision mode: same-side ownership, both-required, miss window -------
 {
   // Both wrists contacting their authored cells -> one Count (single judgement).
   const guardHit = ready([beat("g-both", 1000, "guard", { placement: 5, guardTarget: { leftCell: 5, rightCell: 6 }, checkpoint: { kind: "instantaneous", freshnessMs: 150, timingWindowMs: 180 } })]);
@@ -288,17 +288,11 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   send(guardRightOnly, 1181, [3.5, 1], [2, 1], [3, 2]);
   assert.deepEqual(judgementsAt(guardRightOnly), [["g-right", "miss", ["wrong_collider"]]]);
 
-  // Crossed guard: fists are swapped across the center line, so the LEFT
-  // authored cell is the right-side cell 6 and the RIGHT authored cell is the
-  // left-side cell 5; each wrist still owns its authored cell (sx 2 = column 2).
-  const crossedHit = ready([beat("x-both", 1000, "guard", { placement: 5, guardTarget: { leftCell: 6, rightCell: 5, crossed: true }, checkpoint: { kind: "instantaneous", freshnessMs: 150, timingWindowMs: 180 } })]);
-  send(crossedHit, 1000, [2, 1], [1, 1], [3, 2]);
-  assert.deepEqual(judgementsAt(crossedHit), [["x-both", "hit", []]], "crossed guard cells keep side ownership and count");
-  // A crossed event without the flag is rejected by validation.
-  const badCrossed = createAeroGameplaySessionCoordinator({ sessionId: "bad-crossed", countdownStepMs: 1 });
-  assert.throws(() => badCrossed.configureContent(config([beat("bad-x", 1000, "crossed_guard", { placement: 5, guardTarget: { leftCell: 6, rightCell: 5 } })])), /crossed flag/u);
-  const okCrossed = createAeroGameplaySessionCoordinator({ sessionId: "ok-crossed", countdownStepMs: 1 });
-  assert.doesNotThrow(() => okCrossed.configureContent(config([beat("ok-x", 1000, "guard", { placement: 5, guardTarget: { leftCell: 6, rightCell: 5, crossed: true } })])));
+  // Legacy crossed and reversed targets cannot enter collider scoring, with or without a flag.
+  const rejectedGuard = createAeroGameplaySessionCoordinator({ sessionId: "rejected-guard", countdownStepMs: 1 });
+  for (const guardTarget of [{ leftCell: 6, rightCell: 5 }, { leftCell: 5, rightCell: 6, crossed: true }]) {
+    assert.throws(() => rejectedGuard.configureContent(config([beat("bad-guard", 1000, "guard", { guardTarget })])), /same-side wrist targets/u);
+  }
   // Validation rejects non-guard-target punches/guards without placements and invalid cells.
   assert.throws(() => createAeroGameplaySessionCoordinator({ sessionId: "no-placement" }).configureContent(config([beat("np", 1000, "hook_left", {})])), /plain record|4x3 grid cell/u);
   assert.throws(() => createAeroGameplaySessionCoordinator({ sessionId: "bad-cell" }).configureContent(config([beat("bc", 1000, "hook_left", { placement: 42 })])), /4x3 grid cell/u);
