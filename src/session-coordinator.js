@@ -1810,12 +1810,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   /**
-   * 4-tier scoring: score for a beat is the tier base points times the combo
-   * multiplier. great / good / almost all increment the combo (they keep the
-   * multiplier climbing); only "miss" resets the combo to 0. "ignored" is
-   * non-scoring and leaves the partition untouched. The legacy scoring settings
-   * (hitPoints / comboBonusPerHit / missPenalty) are retained on the partition
-   * for identity stability but are no longer read for beat scoring.
+   * Score a beat with its tier base points times the combo multiplier. Current
+   * Flow uses great for real hilt-to-tip contact, good for narrow noncontact
+   * near_timing, and miss otherwise. Historical/non-Flow almost remains
+   * accepted; great / good / almost keep the combo climbing, miss resets it,
+   * and ignored leaves the partition untouched. Legacy scoring settings stay
+   * for identity stability but are not read for beat scoring.
    * @param {"great" | "good" | "almost" | "miss" | "ignored"} tier
    * @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings]
    */
@@ -2357,9 +2357,9 @@ function cardinalDirectionName(value) {
 /** @param {unknown} value @param {string} code */
 function requireGridCell(value, code) { if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 11) throw gameplayError(code, "Expected a 4x3 grid cell"); return Number(value); }
 /**
- * Tier base points for the 4-tier scoring system: great = 100 (full hit,
- * front-half contact), good = 50 (half hit, back-half contact), almost = 25
- * (quarter, timing-only miss in the correct cell), miss = 0 (full miss).
+ * Shared tier base points: current Flow contact anywhere in the eligible window
+ * is great = 100; bounded noncontact near_timing is good = 50; a distant miss
+ * is miss = 0. Historical/non-Flow almost = 25 remains for compatibility.
  * @type {Readonly<Record<"great" | "good" | "almost" | "miss" | "ignored", number>>}
  */
 const TIER_BASE_POINTS = Object.freeze({ great: 100, good: 50, almost: 25, miss: 0, ignored: 0 });
