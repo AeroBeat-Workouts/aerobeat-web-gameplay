@@ -293,9 +293,9 @@ function boxingSweptContactAtPose(target, pose, timingWindowMs, volume) {
  * window AND linearly interpolates between consecutive stored poses (anchor
  * + extents via the resolved volume), so sparse low-FPS histories catch a
  * crossing that the old single-snapshot test tunnels through. Returns the
- * EARLIEST contact time and which half of the window it falls in —
- * `front` for `t < center` (early/Great), `back` for `t >= center` (late/Good) —
- * or `null` when the beat is never contacted.
+ * EARLIEST contact time and its diagnostic temporal half — `front` for
+ * `t < center`, `back` for `t >= center` — or `null` when never contacted.
+ * Flow scores either real contact as Great; Boxing grading is independent.
  *
  * @param {DataRecord} event
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history

@@ -105,6 +105,25 @@ close(slice(scaledBlade, "right", { scale: 2 }), 0.7, "expanded cell rescales gl
 assert.ok(slice(scaledBlade, "right", { scale: 2 }) < slice(scaledBlade), "cell scale changes first-contact normalization");
 close(slice(pose("left_wrist", "flow", { x: 1, y: 1.6, z: 0 }, { orientation: orientation(0, 0, 90) }), "up"), 0.85, "XY rotation changes projected blade contact locus");
 close(slice(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { orientation: orientation(0, 90, 0) })), 0.5, "Z tilt shortens projected blade");
+// The same canonical capsule scores at both hilt and tip, early and late.
+// Behind-hilt near evidence must remain geometrically false, not a fake hit.
+for (const [label, anchorX, orientationZ] of [
+  ["hilt", 1.35, 0], ["tip", 0.22, 0]
+]) {
+  for (const t of [900, 1100]) {
+    const blade = pose("left_wrist", "flow", { x: anchorX, y: 1, z: 0 }, { orientation: orientation(0, 0, orientationZ) });
+    const swept = sweptSaberContactsFlowTarget(flowEvent, [{ t, pose: blade }], 180);
+    assert.equal(flowContact(blade, t), true, `${label} ${t}: canonical capsule contacts`);
+    assert.equal(swept?.firstContactMs, t, `${label} ${t}: swept contact keeps its true time`);
+    assert.equal(swept?.hitDepthHalf, t < 1000 ? "front" : "back", `${label} ${t}: temporal diagnostic remains honest`);
+  }
+}
+const behindHilt = pose("left_wrist", "flow", { x: 1.7, y: 1, z: 0 });
+assert.equal(flowContact(behindHilt), false, "behind hilt at 0.2 WU from cell edge never collides");
+assert.deepEqual(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: behindHilt }], 180), { nearMiss: true, firstNearMs: 1000 }, "strict spatial near band and quarter timing classify behind-hilt noncontact");
+assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1100, pose: behindHilt }], 180), null, "same near geometry outside quarter timing earns nothing");
+assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: pose("left_wrist", "flow", { x: 2.1, y: 1, z: 0 }) }], 180), null, "far geometry does not acquire near credit");
+
 const movingEvent = { ...flowEvent, direction: "right" };
 const movingHistory = [
   { t: 900, pose: pose("left_wrist", "flow", { x: -1, y: 1, z: 0 }) },

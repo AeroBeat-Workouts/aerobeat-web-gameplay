@@ -1371,9 +1371,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs);
       if (swept === null) continue;
       // Near-miss: the hand was near the correct cell within 1/4 beat of the
-      // center but the capsule never registered a contact. Record a miss
-      // with "near_timing" diagnostic so resolveScoringTier maps it to
-      // the "almost" tier.
+      // center but the capsule never registered a contact. Keep the truthful
+      // miss result and near_timing diagnostic; Flow awards the good tier.
       if ("nearMiss" in swept) {
         const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
         if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
@@ -1398,7 +1397,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (sliceT !== null && Number.isFinite(sliceT) && sliceT >= 0.15 && sliceT <= 0.85) flowSliceByEventId.set(String(candidate.event.eventId), sliceT);
     }
     // Near-miss judgements: result "miss" with "near_timing" diagnostic.
-    // resolveScoringTier maps these to the "almost" tier (25 pts, combo alive).
+    // Flow maps these to good (50 base points, combo alive), not blade contact.
     for (const near of nearMisses) recordJudgementAt(near.event, "miss", Object.freeze(["near_timing"]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, near.nearMs, null);
     evaluateColliderBombs(left, right, priorLeft, priorRight, !seedLeftOnly, !seedRightOnly);
     previousLeftWristSample = left; previousRightWristSample = right; lastColliderFrame = frame; satisfyWristRecoveryBaselines(left, right);
@@ -1751,23 +1750,22 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function recordJudgement(event, result, diagnostics, evidence, shadow) { recordJudgementAt(event, result, diagnostics, evidence, shadow, evidence ? latestEvidenceTimelineMs : null); }
 
   /**
-   * Resolve the committed 4-tier scoring result from the incoming judgement
-   * result. A positive hit (legacy "hit" or an already-resolved "great" /
-   * "good") maps through the swept collider depth half: "front" (early contact)
-   * is "great", "back" (late contact) is "good", and an absent depth half
-   * (non-swept hit paths such as the legacy live/judge grid evaluators and
-   * gesture-mode guards) conservatively defaults to "good". A miss without a
-   * spatial "wrong_cell" diagnostic — the hand was in the correct/nearby cell,
-   * so this is a timing-only miss — resolves to the "almost" quarter tier and
-   * keeps the combo alive; a miss WITH "wrong_cell" (or with no spatial
-   * diagnostic because there was no contact at all) is a full "miss" that
-   * breaks the combo. "ignored" is unchanged.
+   * Real Flow swept capsule contact is Great anywhere inside its existing
+   * eligible window. Narrow near_timing noncontact stays a truthful miss but
+   * earns Good; far misses still break the combo. Other rulesets retain their
+   * established temporal grading, including Boxing's early/late split.
    * @param {"hit" | "miss" | "ignored"} result
    * @param {readonly string[]} diagnostics
    * @param {"front" | "back" | null} depthHalf
+   * @param {string} rulesetId
    * @returns {"great" | "good" | "almost" | "miss" | "ignored"}
    */
-  function resolveScoringTier(result, diagnostics, depthHalf) {
+  function resolveScoringTier(result, diagnostics, depthHalf, rulesetId) {
+    if (rulesetId === FLOW_COLLIDER_RULESET) {
+      if (result === "hit") return "great";
+      if (result === "miss") return diagnostics.includes("near_timing") ? "good" : "miss";
+      return "ignored";
+    }
     if (result === "hit" || result === "great" || result === "good") {
       if (depthHalf === "front") return "great";
       if (depthHalf === "back") return "good";
@@ -1784,12 +1782,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function recordJudgementAt(event, result, diagnostics, evidence, shadow, evidenceTimelineMs, hitDepthHalf = null) {
     const eventVariant = variantForEvent(event);
     const eventProfile = profileForEvent(event);
-    // 0.0.96: resolve the scoring tier BEFORE the judgement record is built so
-    // the record carries it. The tier is presentation truth the renderer reads
-    // from `target.tier` to choose the Great/Good/Almost/Miss feedback label;
-    // without it the renderer defaulted every hit to "great" and every miss to
-    // "miss", hiding the Good and Almost tiers from the 0.0.94 scoring system.
-    const tier = resolveScoringTier(result, diagnostics, hitDepthHalf);
+    // Resolve the scoring tier before building the truthful judgement record;
+    // presentation reads its tier independently of collision result.
+    const tier = resolveScoringTier(result, diagnostics, hitDepthHalf, String(eventVariant.rulesetId));
     const judgement = makeJudgement(event, eventVariant, result, diagnostics, evidence, evidenceTimelineMs, timelinePositionMs, shadow, sessionPurpose, tier);
     if (shadow) shadowJudgements.push(judgement);
     else {

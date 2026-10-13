@@ -289,7 +289,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo, entry.score]), [[false, true, 2, 1, 0, 2, 300]]);
 }
 
-// Near-miss "Almost" tier: hand close to the correct cell within 1/4 beat of
+// Near-miss "Good" tier: hand close to the correct cell within 1/4 beat of
 // center, but the swept collider never registered a contact.
 // Placement 5 cell box: center (1.0, 1.0), half 0.5 -> [0.5,1.5]x[0.5,1.5].
 // Saber: length 0.75, radius 0.18. Wrist at judge (1.7, 1.0) -> capsule start
@@ -314,7 +314,35 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(judgements[0].eventId, "near-miss-beat");
   assert.equal(judgements[0].result, "miss", "near-miss resolves as a miss result");
   assert.deepEqual(judgements[0].diagnostics, ["near_timing"], "near-miss carries the near_timing diagnostic");
-  assert.equal(judgements[0].tier, "almost", "near-miss resolves to the almost tier");
+  assert.equal(judgements[0].tier, "good", "near noncontact awards Good without inventing blade contact");
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 0, 50, 1, 1]], "Good awards 50 base points and keeps combo alive");
+}
+
+// Production coordinator oracle: four genuine blade contacts versus near/far
+// noncontact, including late-after-center hits. This invokes the real resolved
+// equipment-pose boundary and checks judgement source truth and score/combo.
+for (const [label, wristX, timeMs] of [
+  ["hilt-early", 1.35, 900], ["hilt-late", 1.35, 1100],
+  ["tip-early", 0.22, 900], ["tip-late", 0.22, 1100]
+]) {
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `flow-${label}` });
+  readyVisualTest(coordinator, [event(label, 1000, "note", { hand: "left", placement: 5 })], variant("flow_colliders_v1", null));
+  const baseline = setAnchorPosition(evidence(`${label}-base`, 800, []), "left_wrist", wristX, 1);
+  coordinator.advance({ timestampMs: 800, clock: clock(800, true), input: productionInput(800, baseline), equipmentPoses: equipmentPosesForEvidence(baseline, "flow"), interaction: visualTestInteraction(1, 800) });
+  const contact = setAnchorPosition(evidence(`${label}-contact`, timeMs, []), "left_wrist", wristX, 1);
+  coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, contact), equipmentPoses: equipmentPosesForEvidence(contact, "flow"), interaction: visualTestInteraction(1, 800) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.result, entry.tier, entry.diagnostics]), [["hit", "great", []]], `${label}: real canonical capsule contact is Great`);
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo]), [[1, 0, 100, 1]], `${label}: Great awards 100 base points`);
+}
+{
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-near-then-far" });
+  readyVisualTest(coordinator, [event("near", 1000, "note", { hand: "left", placement: 5 }), event("far", 1500, "note", { hand: "right", placement: 6 })], variant("flow_colliders_v1", null));
+  for (const [frame, timeMs, leftX] of [["seed", 800, 1.7], ["near", 1000, 1.7], ["far", 1700, 3.4]]) {
+    const sample = setAnchorPosition(setAnchorPosition(evidence(`near-far-${frame}`, timeMs, []), "left_wrist", leftX, 1), "right_wrist", 3.4, 0);
+    coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow"), interaction: visualTestInteraction(1, 800) });
+  }
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.tier, entry.diagnostics]), [["near", "miss", "good", ["near_timing"]], ["far", "miss", "miss", ["wrong_collider"]]], "near noncontact is truthful Good and far is full Miss");
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 1, 50, 0, 1]], "Good gives 50 and preserves combo until far Miss breaks it");
 }
 
 // Authority boundary rejects malformed/automatic/unauthorized calls transactionally without invoking accessors.
