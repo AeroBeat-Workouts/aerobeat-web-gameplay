@@ -219,11 +219,26 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.deepEqual(run(events),run([...events].reverse()));
 }
 
+// Real Play uses the existing extended note deadline (center +1000ms). A
+// qualified center near stays pending, then becomes Almost/50 at strict >late.
+{
+  const c=ready([beat("play-near",1000,"note",{hand:"left",placement:5})]);
+  send(c,900,900,[1.7,1],[3.4,0],[3,2]);
+  send(c,1000,1000,[1.7,1],[3.4,0],[3,2]);
+  assert.deepEqual(c.getJudgements(),[],"Play center near has no early judgement");
+  assert.deepEqual(c.getScorePartitions(),[],"Play center near has no early points");
+  send(c,2000,2000,[1.7,1],[3.4,0],[3,2]);
+  assert.deepEqual(c.getJudgements(),[],"Play's inclusive extended late bound remains pending");
+  send(c,2001,2001,[1.7,1],[3.4,0],[3,2]);
+  assert.deepEqual(c.getJudgements().map(j=>[j.result,j.tier,j.diagnostics,j.committedTimelinePositionMs]),[["miss","almost",["near_timing"],2001]]);
+  assert.deepEqual(c.getScorePartitions().map(p=>[p.hits,p.misses,p.score,p.combo]),[[1,0,50,1]]);
+}
+
 // Wrong hand cannot score; either wrist detonates a bomb after simultaneous note scoring and breaks combo once.
 {
   const events=[beat("note",1000,"note",{hand:"left",placement:5}),beat("bomb",1000,"bomb",{placement:5})];const c=ready(events);send(c,900,900,[-.5,1],[3.4,1],[3,2]);send(c,1000,1000,[1,1],[3.4,1],[3,2]);
   assert.deepEqual(c.getJudgements().map(j=>[j.eventId,j.result]),[["note","hit"]]);assert.deepEqual(c.getHazardOutcomes().map(o=>[o.kind,o.result]),[["bomb","contact"]]);assert.deepEqual({hits:c.getScorePartitions()[0].hits,bombs:c.getScorePartitions()[0].bombContacts,combo:c.getScorePartitions()[0].combo},{hits:1,bombs:1,combo:0});
-  const wrong=ready([beat("owned",1000,"note",{hand:"left",placement:5})]);send(wrong,1000,1000,[-.5,1],[1,1],[3,2]);send(wrong,1181,1181,[-.5,1],[1,1],[3,2]);assert.equal(wrong.getJudgements()[0].result,"miss");
+  const wrong=ready([beat("owned",1000,"note",{hand:"left",placement:5})]);send(wrong,1000,1000,[-.5,1],[1,1],[3,2]);send(wrong,1181,1181,[-.5,1],[1,1],[3,2]);assert.equal(wrong.getJudgements().length,0,"Play note stays pending through its existing extended deadline");send(wrong,2001,2001,[-.5,1],[1,1],[3,2]);assert.equal(wrong.getJudgements()[0].result,"miss");
 }
 
 // The equipment capsule may score a note but cannot detonate a bomb when its

@@ -289,8 +289,8 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo, entry.score]), [[false, true, 2, 1, 0, 2, 300]]);
 }
 
-// Near-miss "Good" tier: hand close to the correct cell within 1/4 beat of
-// center, but the swept collider never registered a contact.
+// A narrow Flow noncontact remains pending until the existing Miss boundary;
+// later genuine capsule contact can supersede it with Great and a slice hint.
 // Placement 5 cell box: center (1.0, 1.0), half 0.5 -> [0.5,1.5]x[0.5,1.5].
 // Saber: length 0.75, radius 0.18. Wrist at judge (1.7, 1.0) -> capsule start
 // (1.7,1) is 0.2 from the cell edge (x=1.5). 0.2 > 0.18 (no contact) and
@@ -306,16 +306,46 @@ function readyPlaying(coordinator, events, selected = variant()) {
   // At 1000ms (beat center), wrist still at (1.7, 1) — no contact, but near.
   const atCenter = setAnchorPosition(evidence("near-miss-center", 1000, []), "left_wrist", 1.7, 1);
   coordinator.advance({ timestampMs: 1000, clock: clock(1000, true), input: productionInput(1000, atCenter), equipmentPoses: equipmentPosesForEvidence(atCenter, "flow"), interaction: visualTestInteraction(1, 900) });
-  // After the window closes, the beat resolves as a near-miss miss.
-  const after = setAnchorPosition(evidence("near-miss-after", 1300, []), "left_wrist", 0, 1);
+  assert.deepEqual(coordinator.getJudgements(), [], "first near sample cannot commit a judgement before genuine contact remains possible");
+  assert.deepEqual(coordinator.getScorePartitions(), [], "first near sample cannot award points or change combo");
+  const atLate = setAnchorPosition(evidence("near-miss-late", 1180, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 1180, clock: clock(1180, true), input: productionInput(1180, atLate), equipmentPoses: equipmentPosesForEvidence(atLate, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.deepEqual(coordinator.getJudgements(), [], "inclusive late bound still allows a real hit");
+  // Only after the existing strict late boundary does pending near become Almost.
+  const after = setAnchorPosition(evidence("near-miss-after", 1300, []), "left_wrist", 1.7, 1);
   coordinator.advance({ timestampMs: 1300, clock: clock(1300, true), input: productionInput(1300, after), equipmentPoses: equipmentPosesForEvidence(after, "flow"), interaction: visualTestInteraction(1, 900) });
   const judgements = coordinator.getJudgements();
   assert.equal(judgements.length, 1, "one judgement for the near-miss beat");
   assert.equal(judgements[0].eventId, "near-miss-beat");
   assert.equal(judgements[0].result, "miss", "near-miss resolves as a miss result");
   assert.deepEqual(judgements[0].diagnostics, ["near_timing"], "near-miss carries the near_timing diagnostic");
-  assert.equal(judgements[0].tier, "good", "near noncontact awards Good without inventing blade contact");
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 0, 50, 1, 1]], "Good awards 50 base points and keeps combo alive");
+  assert.equal(judgements[0].tier, "almost", "final noncontact awards Almost without inventing blade contact");
+  assert.equal(judgements[0].committedTimelinePositionMs, 1300);
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 0, 50, 1, 1]], "Almost awards 50 base points and keeps combo alive");
+  const repeat = setAnchorPosition(evidence("near-miss-repeat", 1400, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 1400, clock: clock(1400, true), input: productionInput(1400, repeat), equipmentPoses: equipmentPosesForEvidence(repeat, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.equal(coordinator.getJudgements().length, 1, "expired near cannot be judged twice");
+}
+
+// Pending near at center must yield to a later genuine hilt or tip contact;
+// the accepted hit is the only judgement and carries the private slice hint.
+for (const [label, wristX] of [["hilt", 1.35], ["tip", 0.22]]) {
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `flow-near-then-${label}` });
+  readyVisualTest(coordinator, [event(label, 1000, "note", { hand: "left", placement: 5 })], variant("flow_colliders_v1", null));
+  for (const [frame, timeMs, leftX] of [["seed", 900, 1.7], ["near", 1000, 1.7]]) {
+    const sample = setAnchorPosition(evidence(`${label}-${frame}`, timeMs, []), "left_wrist", leftX, 1);
+    coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow"), interaction: visualTestInteraction(1, 900) });
+  }
+  assert.deepEqual(coordinator.getJudgements(), [], `${label}: near does not preempt contact`);
+  assert.deepEqual(coordinator.getScorePartitions(), [], `${label}: near leaves score untouched`);
+  const contact = setAnchorPosition(evidence(`${label}-contact`, 1100, []), "left_wrist", wristX, 1);
+  coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, contact), equipmentPoses: equipmentPosesForEvidence(contact, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.result, entry.tier, entry.diagnostics]), [["hit", "great", []]], `${label}: real contact supersedes near`);
+  assert.notEqual(coordinator[Symbol.for("aerobeat.web-gameplay.internal-flow-slice")](label), null, `${label}: accepted contact supplies actual slice hint`);
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo]), [[1, 0, 100, 1]], `${label}: exactly one Great/100`);
+  const after = setAnchorPosition(evidence(`${label}-after`, 1300, []), "left_wrist", wristX, 1);
+  coordinator.advance({ timestampMs: 1300, clock: clock(1300, true), input: productionInput(1300, after), equipmentPoses: equipmentPosesForEvidence(after, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.equal(coordinator.getJudgements().length, 1, `${label}: no delayed Almost after contact`);
 }
 
 // Production coordinator oracle: four genuine blade contacts versus near/far
@@ -341,8 +371,8 @@ for (const [label, wristX, timeMs] of [
     const sample = setAnchorPosition(setAnchorPosition(evidence(`near-far-${frame}`, timeMs, []), "left_wrist", leftX, 1), "right_wrist", 3.4, 0);
     coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow"), interaction: visualTestInteraction(1, 800) });
   }
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.tier, entry.diagnostics]), [["near", "miss", "good", ["near_timing"]], ["far", "miss", "miss", ["wrong_collider"]]], "near noncontact is truthful Good and far is full Miss");
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 1, 50, 0, 1]], "Good gives 50 and preserves combo until far Miss breaks it");
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.tier, entry.diagnostics]), [["near", "miss", "almost", ["near_timing"]], ["far", "miss", "miss", ["wrong_collider"]]], "near noncontact becomes Almost only at finalization; far remains Miss");
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 1, 50, 0, 1]], "Almost gives 50 and preserves combo until far Miss breaks it");
 }
 
 // Authority boundary rejects malformed/automatic/unauthorized calls transactionally without invoking accessors.
