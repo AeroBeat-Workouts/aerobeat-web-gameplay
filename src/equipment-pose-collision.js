@@ -137,8 +137,10 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
 }
 
 /**
- * Use the single contracts volume authority for both modes. Visibility is
- * presentation-only: toggling the wireframe cannot alter scoring.
+ * Use the shared contracts bounds for timing and the fixed base note cell in
+ * Flow; its saber controls only resize the blade, never the target or slab.
+ * Boxing keeps its historical target scale/depth. Wireframe visibility never
+ * alters either mode's scoring.
  * @param {"flow"|"boxing"} mode
  * @param {Point2} center
  * @param {Point2} halfSize

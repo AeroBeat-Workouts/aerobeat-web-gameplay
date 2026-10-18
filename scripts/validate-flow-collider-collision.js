@@ -374,6 +374,35 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const grid=createAeroGameplaySessionCoordinator({sessionId:"grid"});const gridEvent={...beat("grid-note",1000,"note",{hand:"left",placement:5}),variantId:"grid",chartId:"chart-grid"};grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[gridEvent]});assert.equal(grid.getSnapshot().session.rulesetId,"flow_colliders_v1");assert.doesNotThrow(()=>grid.configureContent({packageId:"package",selectedVariant:flowGrid(),resolvedEvents:[],flowColliderSettings:settings()}),"Flow Collider settings now bind the sole ranked Flow ruleset, not a retired non-collider variant");
 }
 
+// Play configuration uses Flow-specific normalization all the way through
+// event truth and swept scoring. A disabled saber cannot hit even when its
+// swept axis crosses the unchanged cell; tiny/huge finite values remain legal.
+{
+  const hitEvent=beat("flow-scale-play",1000,"note",{hand:"left",placement:5});
+  const run=(overrides, first=[-.5,1], second=[1,1])=>{
+    const c=ready([hitEvent],settings({enforceAuthoredDirection:false,...overrides}));
+    send(c,900,900,first,[3.5,1],[3,2]);
+    send(c,1000,1000,second,[3.5,1],[3,2]);
+    return c;
+  };
+  const disabled=run({colliderScale:0,colliderDepthForward:1,colliderDepthBackward:0});
+  assert.deepEqual(disabled.getJudgements(),[],"Scale0 Play ignores the saber axis crossing the note on a scored sweep");
+  send(disabled,2001,2001,[3.5,1],[3.5,1],[3,2]);
+  assert.deepEqual(disabled.getJudgements().map(j=>[j.result,j.tier]),[["miss","miss"]],"disabled saber cannot earn either hit or Almost credit");
+  for(const value of [0,.00001,9999999]) {
+    const configured=settings({colliderScale:value,colliderDepthForward:value,colliderDepthBackward:value,enforceAuthoredDirection:false});
+    const c=ready([hitEvent],configured);
+    assert.equal(flowColliderSettingsIdentity(configured),flowColliderSettingsIdentity(createFlowColliderSettings(configured)),`Play accepts finite Flow controls ${value} without legacy generic normalization`);
+    send(c,900,900,[-.5,1],[3.5,1],[3,2]);
+    send(c,1000,1000,[1,1],[3.5,1],[3,2]);
+    assert.deepEqual(c.getJudgements().map(j=>j.result),value===0?[]:["hit"],`Play scores actual Flow geometry for ${value}`);
+  }
+  const narrow=run({colliderScale:1,colliderDepthForward:1,colliderDepthBackward:0},[.1,1.525],[.1,1.525]);
+  assert.deepEqual(narrow.getJudgements(),[],"Scale1 blade does not grow the Flow target half-size");
+  const scaled=run({colliderScale:2,colliderDepthForward:1,colliderDepthBackward:0},[.1,1.525],[.1,1.525]);
+  assert.deepEqual(scaled.getJudgements().map(j=>j.result),["hit"],"larger scored blade radius, not wider target, reaches same point");
+}
+
 // Scored Play notes stay eligible until the full note is beyond the camera.
 // Saber reach changes actual contact, never admission or the note deadline.
 {

@@ -137,6 +137,9 @@ assert.ok(slice(edgeBlade, "up", { scale: 2, depthForward: 1, depthBackward: 0 }
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }), 1000, 180, { scale: 0, depthForward: 1, depthBackward: 0 }), false, "Scale0 never scores even inside note");
 const pointBlade = pose("left_wrist", "flow", { x: 1, y: 1, z: 0 });
 assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: pointBlade }], 180, { scale: 0 }), null, "Scale0 swept contact and Almost are absent");
+const crossingBladeHistory = [{ t: 900, pose: pose("left_wrist", "flow", { x: -.5, y: 1, z: 0 }) }, { t: 1000, pose: pointBlade }];
+assert.equal(sweptSaberContactsFlowTarget(flowEvent, crossingBladeHistory, 180, { scale: 0, depthForward: 1, depthBackward: 0 }), null, "Scale0 swept axis crosses a note but yields neither contact nor Almost");
+assert.ok(sweptSaberContactsFlowTarget(flowEvent, crossingBladeHistory, 180, { scale: 1, depthForward: 1, depthBackward: 0 })?.firstContactMs >= 900, "the same nonzero swept axis really crosses that note");
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { scale: 1, depthForward: 0, depthBackward: 0 }), true, "zero/zero reach is a sphere at hilt when radius positive");
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { scale: 0, depthForward: 0, depthBackward: 0 }), false, "zero/zero reach and zero radius cannot score");
 for (const value of [0, .00001, 9999999]) {
@@ -162,6 +165,16 @@ for (const volume of [{ depthForward: 0.25, depthBackward: 0 }, { depthForward: 
 assert.equal(effectivePlayNoteAfterWindowMs(1000, 300), 2000, "Play note deadline is independent of blade length");
 // A unit front ends at the contracted visible tip; rear zero is exactly the hilt.
 assert.equal(saberGeometry.length, 0.75, "the test measures visible local +X reach");
+for (const [label, x] of [["hilt", 1.5 + flowSolidBladeRadiusWu], ["tip", .5 - saberGeometry.length - flowSolidBladeRadiusWu]]) {
+  const volume = { scale: 1, depthForward: 1, depthBackward: 0 };
+  const at = (anchorX) => pose("left_wrist", "flow", { x: anchorX, y: 1, z: 0 });
+  const outerX = label === "hilt" ? x + .000001 : x - .000001;
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, at(x), 1000, 180, volume), true, `exact ${label} boundary at solid blade radius touches the unchanged cell`);
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, at(outerX), 1000, 180, volume), false, `${label} one microunit beyond the solid radius misses`);
+  assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: at(x) }], 180, volume)?.firstContactMs, 1000, `${label} exact boundary scores in swept Play geometry`);
+  assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: at(outerX) }], 180, volume)?.nearMiss, true, `${label} just beyond boundary is only near`);
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, at(x), 1000, 180, { ...volume, scale: 0 }), false, `${label} scored boundary disables with Flow Scale0`);
+}
 for (const [label, angle, anchor] of [["hand-up", 90, { x: 1, y: -0.48, z: 0 }], ["hand-down", -90, { x: 1, y: 2.48, z: 0 }]]) {
   const blade = pose("left_wrist", "flow", anchor, { orientation: orientation(0, 0, angle) });
   const at = (volume) => resolvedSaberCapsuleContactsFlowTarget(flowEvent, blade, 1000, 180, volume);
