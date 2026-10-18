@@ -222,7 +222,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 // Real Play uses the existing extended note deadline (center +1000ms). A
 // qualified center near stays pending, then becomes Almost/50 at strict >late.
 {
-  const c=ready([beat("play-near",1000,"note",{hand:"left",placement:5})]);
+  const c=ready([beat("play-near",1000,"note",{hand:"left",placement:5})], settings({colliderDepthBackward:0}));
   send(c,900,900,[1.7,1],[3.4,0],[3,2]);
   send(c,1000,1000,[1.7,1],[3.4,0],[3,2]);
   assert.deepEqual(c.getJudgements(),[],"Play center near has no early judgement");
@@ -306,7 +306,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 
 // Recovery baselines are independent per anchor; unavailable peers remain seed-only until their own first valid sample.
 {
-  const c=ready([beat("asymmetric-left",1000,"note",{hand:"left",placement:5}),beat("asymmetric-right",1000,"note",{hand:"right",placement:6}),wall("asymmetric-wall")]);send(c,900,900,[-.5,1],[3,1],[0,1]);c.pause(950);finishResumeCountdown(c,951,900);
+  const c=ready([beat("asymmetric-left",1000,"note",{hand:"left",placement:5}),beat("asymmetric-right",1000,"note",{hand:"right",placement:6}),wall("asymmetric-wall")],settings({colliderDepthBackward:0}));send(c,900,900,[-.5,1],[3,1],[0,1]);c.pause(950);finishResumeCountdown(c,951,900);
   const leftOnly=invalidateWrist(evidence("left-only-seed",1000,[1,1],[3.4,1],[1,1]),"nose");c.advance({timestampMs:1000,clock:clock(1000,true),input:input(1000,leftOnly),equipmentPoses:equipmentPosesForEvidence(leftOnly)});assert.equal(c.getJudgements().length,0);
   const peersSeed=evidence("peers-seed",1050,[1.2,1],[3.4,1],[1,1]);c.advance({timestampMs:1050,clock:clock(1050,true),input:input(1050,peersSeed),equipmentPoses:equipmentPosesForEvidence(peersSeed)});assert.deepEqual(c.getJudgements().map((entry)=>entry.eventId),["asymmetric-left"],"left evaluates while newly available nose seeds and the right wrist remains away");assert.equal(c.getHazardOutcomes().length,0);
   send(c,1100,1100,[1.2,1],[2.2,1],[1.2,1],"camera-a","peers-second");assert.deepEqual(c.getJudgements().map((entry)=>entry.eventId),["asymmetric-left","asymmetric-right"]);assert.equal(c.getHazardOutcomes().find((outcome)=>outcome.kind==="wall")?.result,"contact");
@@ -356,9 +356,11 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 
 // Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
 {
-  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},wristBombColliderScale:{minimum:0,maximum:2},colliderDepthForward:{minimum:1,maximum:4},colliderDepthBackward:{minimum:1,maximum:4}});
+  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},wristBombColliderScale:{minimum:0,maximum:2},colliderDepthForward:{minimum:1,maximum:4},colliderDepthBackward:{minimum:0,maximum:4}});
   assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(publicDefaultFlowColliderSettings.colliderVisible,false);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
   assert.equal(createFlowColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field volume accepted");
+  assert.equal(createFlowColliderSettings(settings({colliderDepthBackward:0})).colliderDepthBackward,0,"zero rear is an accepted Flow scoring setting");
+  assert.equal(flowColliderSettingsIdentity(settings({colliderDepthBackward:0})) === flowColliderSettingsIdentity(settings({colliderDepthBackward:1})),false,"hilt-only and extended-rear runs remain separate score partitions");
   assert.throws(()=>createFlowColliderSettings(settings({colliderVisible:null})),/visibility/u);
   assert.equal(flowColliderSettingsIdentity(settings({colliderVisible:true})),flowColliderSettingsIdentity(settings({colliderVisible:false})),"wireframe visibility never changes scoring identity");
   assert.throws(()=>createFlowColliderSettings({...publicDefaultFlowColliderSettings,extra:true}),/every exact field/u);const accessor={...publicDefaultFlowColliderSettings};Object.defineProperty(accessor,"colliderRadius",{enumerable:true,get(){throw new Error("must not execute");}});assert.throws(()=>createFlowColliderSettings(accessor),/accessors/u);
@@ -377,15 +379,15 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const event = beat("depth-note",1000,"note",{hand:"left",placement:5});
   for (const depth of [1,2,3]) {
     const pending=ready([event],settings({colliderDepthBackward:depth}));
-    for(const at of [1540,1999,2000]) {send(pending,at,at,[3,1],[3,1],[3,2]);assert.equal(pending.getJudgements().length,0,`Play note remains pending at ${at}`);}
-    send(pending,2000.001,2000.001,[3,1],[3,1],[3,2]);
+    for(const at of [1540,1999,2000]) {send(pending,at,at,[-.5,1],[3,1],[3,2]);assert.equal(pending.getJudgements().length,0,`Play note remains pending at ${at}`);}
+    send(pending,2000.001,2000.001,[-.5,1],[3,1],[3,2]);
     assert.deepEqual(pending.getJudgements().map(j=>j.result),["miss"],"full Miss commits strictly after +1000ms");
     const late=ready([event],settings({colliderDepthBackward:depth}));
     send(late,1999,1999,[1,1],[3,1],[3,2]);
     assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"],"late Play contact remains hittable");
   }
   const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:4}));
-  send(larger,2000.001,2000.001,[3,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0,"configured +1200ms remains later than floor");
+  send(larger,2000.001,2000.001,[-.5,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0,"configured +1200ms remains later than floor");
   send(larger,2200,2200,[1,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["hit"]);
   const forward=ready([event],settings({colliderDepthForward:2}));
   send(forward,640,640,[1,1],[3,1],[3,2]);

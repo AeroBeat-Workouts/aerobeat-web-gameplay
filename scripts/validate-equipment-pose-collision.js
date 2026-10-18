@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
+import { saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
 const HASH = "c".repeat(64);
@@ -118,6 +119,29 @@ for (const [label, anchorX, orientationZ] of [
     assert.equal(swept?.hitDepthHalf, t < 1000 ? "front" : "back", `${label} ${t}: temporal diagnostic remains honest`);
   }
 }
+// Reach factors change the pose-axis capsule, not merely the target's timing slab.
+// A unit front ends at the contracted visible tip; rear zero is exactly the hilt.
+assert.equal(saberGeometry.length, 0.75, "the test measures visible local +X reach");
+for (const [label, angle, anchor] of [["hand-up", 90, { x: 1, y: -0.48, z: 0 }], ["hand-down", -90, { x: 1, y: 2.48, z: 0 }]]) {
+  const blade = pose("left_wrist", "flow", anchor, { orientation: orientation(0, 0, angle) });
+  const at = (volume) => resolvedSaberCapsuleContactsFlowTarget(flowEvent, blade, 1000, 180, volume);
+  const swept = (volume) => sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: blade }], 180, volume);
+  assert.equal(at({ depthForward: 1, depthBackward: 0 }), false, `${label}: visible unit tip ends short of target`);
+  assert.equal(at({ depthForward: 1.5, depthBackward: 0 }), true, `${label}: longer forward blade reaches target`);
+  assert.equal(swept({ depthForward: 1, depthBackward: 0 })?.nearMiss, true, `${label}: shorter tip is near but not a hit`);
+  assert.equal(swept({ depthForward: 1.5, depthBackward: 0 })?.firstContactMs, 1000, `${label}: longer tip scores swept contact`);
+}
+const rearPose = pose("left_wrist", "flow", { x: 1.7, y: 1, z: 0 });
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, rearPose, 1000, 180, { depthForward: 1, depthBackward: 0 }), false, "rear zero starts at hilt, without hidden backward blade");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, rearPose, 1000, 180, { depthForward: 1, depthBackward: 1 }), true, "positive rear reaches behind hilt");
+assert.deepEqual(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: rearPose }], 180, { depthForward: 1, depthBackward: 0 }), { nearMiss: true, firstNearMs: 1000 }, "rear zero retains Almost near evidence rather than a false hit");
+assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: rearPose }], 180, { depthForward: 1, depthBackward: 1 })?.firstContactMs, 1000, "positive rear turns that near into real contact");
+const frontPose = pose("left_wrist", "flow", { x: -0.05, y: 1, z: 0 });
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, frontPose, 1000, 180, { depthForward: 0.25, depthBackward: 0 }), false, "shortened forward reach cannot touch beyond its tip");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, frontPose, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "unit forward reaches visible tip at 0.75 times pose scale");
+const scaledFrontPose = pose("left_wrist", "flow", { x: -0.95, y: 1, z: 0 }, { scale: 2 });
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, scaledFrontPose, 1000, 180, { depthForward: 0.5, depthBackward: 0 }), false, "shortened scaled blade stops before target");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, scaledFrontPose, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "unit forward multiplies the contracted tip by pose scale");
 const behindHilt = pose("left_wrist", "flow", { x: 1.7, y: 1, z: 0 });
 assert.equal(flowContact(behindHilt), false, "behind hilt at 0.2 WU from cell edge never collides");
 assert.deepEqual(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: behindHilt }], 180), { nearMiss: true, firstNearMs: 1000 }, "strict spatial near band and quarter timing classify behind-hilt noncontact");

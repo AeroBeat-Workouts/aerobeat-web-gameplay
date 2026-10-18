@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot, isObstacleOutcome } from "@aerobeat/web-contracts";
 import { createPlaybackClock } from "../../aerobeat-web-audio/src/index.js";
 import { internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget } from "../src/equipment-pose-collision.js";
+import { defaultFlowColliderSettings } from "../src/flow-collider-collision.js";
 import {
   aeroGameplaySessionCapabilities,
   createAeroGameplaySessionCoordinator
@@ -56,8 +57,8 @@ function equipmentPosesForEvidence(sample, mode, options = {}) {
   return ["left_wrist", "right_wrist"].map((role) => { const anchor = sample.anchors.find((entry) => entry.anchor === role); return { role, mode, anchor: { x: anchor.x * 4 - 0.5, y: 2.5 - anchor.y * 3, z: 0 }, scale: options.scale ?? 1, orientation: options.orientation ?? { x: 0, y: 0, z: 0, w: 1 }, geometryIdentity: mode === "flow" ? "aerobeat/saber_capsule_v1" : "aerobeat/glove_obb_v1", configIdentity: identity }; });
 }
 function setAnchorPosition(sample, name, sx, sy) { const target = sample.anchors.find((entry) => entry.anchor === name); target.x = (sx + 0.5) / 4; target.y = (2.5 - sy) / 3; return sample; }
-function readyVisualTest(coordinator, events, selected) {
-  coordinator.configureContent(config(events, selected), { purpose: "visual_test" });
+function readyVisualTest(coordinator, events, selected, flowColliderSettings = null) {
+  coordinator.configureContent({ ...config(events, selected), ...(flowColliderSettings === null ? {} : { flowColliderSettings }) }, { purpose: "visual_test" });
   assert.equal(coordinator.requestStart(0, { schema: "aerobeat/gameplay_session_start", version: 1, purpose: "visual_test" }).accepted, true);
   assert.equal(coordinator.getSnapshot().session.state, "playing");
 }
@@ -298,7 +299,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 {
   const flow = variant("flow_colliders_v1", null);
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "visual-production-near-miss" });
-  readyVisualTest(coordinator, [event("near-miss-beat", 1000, "note", { hand: "left", placement: 5 })], flow);
+  readyVisualTest(coordinator, [event("near-miss-beat", 1000, "note", { hand: "left", placement: 5 })], flow, { ...defaultFlowColliderSettings, colliderDepthBackward: 0 });
   // Wrist at judge (1.7, 1.0): 0.2 WU from cell edge, outside the 0.18 contact
   // radius but within the 0.25 near-miss margin.
   const base = setAnchorPosition(evidence("near-miss-base", 900, []), "left_wrist", 1.7, 1);
@@ -331,7 +332,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
 // the accepted hit is the only judgement and carries the private slice hint.
 for (const [label, wristX] of [["hilt", 1.35], ["tip", 0.22]]) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `flow-near-then-${label}` });
-  readyVisualTest(coordinator, [event(label, 1000, "note", { hand: "left", placement: 5 })], variant("flow_colliders_v1", null));
+  readyVisualTest(coordinator, [event(label, 1000, "note", { hand: "left", placement: 5 })], variant("flow_colliders_v1", null), { ...defaultFlowColliderSettings, colliderDepthBackward: 0 });
   for (const [frame, timeMs, leftX] of [["seed", 900, 1.7], ["near", 1000, 1.7]]) {
     const sample = setAnchorPosition(evidence(`${label}-${frame}`, timeMs, []), "left_wrist", leftX, 1);
     coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow"), interaction: visualTestInteraction(1, 900) });
@@ -366,7 +367,7 @@ for (const [label, wristX, timeMs] of [
 }
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-near-then-far" });
-  readyVisualTest(coordinator, [event("near", 1000, "note", { hand: "left", placement: 5 }), event("far", 1500, "note", { hand: "right", placement: 6 })], variant("flow_colliders_v1", null));
+  readyVisualTest(coordinator, [event("near", 1000, "note", { hand: "left", placement: 5 }), event("far", 1500, "note", { hand: "right", placement: 6 })], variant("flow_colliders_v1", null), { ...defaultFlowColliderSettings, colliderDepthBackward: 0 });
   for (const [frame, timeMs, leftX] of [["seed", 800, 1.7], ["near", 1000, 1.7], ["far", 1700, 3.4]]) {
     const sample = setAnchorPosition(setAnchorPosition(evidence(`near-far-${frame}`, timeMs, []), "left_wrist", leftX, 1), "right_wrist", 3.4, 0);
     coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow"), interaction: visualTestInteraction(1, 800) });

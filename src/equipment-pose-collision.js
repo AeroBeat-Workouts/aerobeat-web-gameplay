@@ -17,7 +17,8 @@ export const equipmentPoseAnchorEpsilonWu = 1e-6;
  * A beat approaches from future -Z, crosses the equipment judge plane at its
  * center timestamp, then exits through the past +Z face. Contracts owns the
  * world-Z volume: offset milliseconds multiplied by 0.006 world units/ms.
- * Inclusive faces remain hittable; only strict back-face crossing misses.
+ * Reach below one keeps the existing timing slab unchanged, not a zero-width
+ * deadline. Inclusive faces remain hittable; only strict back-face crossing misses.
  * @param {number} centerTimestampMs
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
@@ -25,13 +26,13 @@ export const equipmentPoseAnchorEpsilonWu = 1e-6;
  * @param {number} [depthBackward]
  */
 export function beatInsideColliderDepth(centerTimestampMs, songTimeMs, timingWindowMs, depthForward = 1, depthBackward = 1) {
-  const bounds = resolveColliderBounds({ mode: "flow", center: { x: 0, y: 0, z: 0 }, halfWidth: 1, halfHeight: 1, settings: { ...colliderSettingsDefaults.flow, colliderDepthForward: depthForward, colliderDepthBackward: depthBackward }, timingWindowMs, speedWuPerMs: 0.006 });
+  const bounds = resolveColliderBounds({ mode: "flow", center: { x: 0, y: 0, z: 0 }, halfWidth: 1, halfHeight: 1, settings: { ...colliderSettingsDefaults.flow, colliderDepthForward: Math.max(1, depthForward), colliderDepthBackward: Math.max(1, depthBackward) }, timingWindowMs, speedWuPerMs: 0.006 });
   return isPointInsideColliderBounds({ x: 0, y: 0, z: (songTimeMs - centerTimestampMs) * 0.006 }, bounds);
 }
 
 /** @param {number} centerTimestampMs @param {number} timingWindowMs @param {number} [depthBackward] */
 export function colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, depthBackward = 1) {
-  return centerTimestampMs + timingWindowMs * depthBackward;
+  return centerTimestampMs + timingWindowMs * Math.max(1, depthBackward);
 }
 
 /**
@@ -50,8 +51,33 @@ export function effectivePlayNoteAfterWindowMs(centerTimestampMs, timingWindowMs
 }
 
 /**
- * Test a contract-resolved 3D saber capsule after exact projection into judge XY.
- * Local-axis roll leaves the projection unchanged; out-of-plane tilt shortens it.
+ * Keep the contract's pose validation, axis and scaled radius. Reach endpoints
+ * are measured along that same rotating local +X axis: rear zero is the hilt,
+ * front one is the contracted visible tip at 0.75 times the pose scale.
+ * @param {unknown} pose
+ * @param {{depthForward?:number,depthBackward?:number}} volume
+ */
+function resolveFlowSaberReach(pose, volume) {
+  const capsule = resolveSaberCapsule(pose);
+  const length = Math.hypot(capsule.end.x - capsule.start.x, capsule.end.y - capsule.start.y, capsule.end.z - capsule.start.z); // 0.75 WU × pose scale
+  const rear = volume.depthBackward ?? 0;
+  const front = volume.depthForward ?? 1;
+  const start = Object.freeze({
+    x: capsule.start.x - capsule.axis.x * length * rear,
+    y: capsule.start.y - capsule.axis.y * length * rear,
+    z: capsule.start.z - capsule.axis.z * length * rear
+  });
+  const end = Object.freeze({
+    x: capsule.start.x + capsule.axis.x * length * front,
+    y: capsule.start.y + capsule.axis.y * length * front,
+    z: capsule.start.z + capsule.axis.z * length * front
+  });
+  return Object.freeze({ start, end, radius: capsule.radius });
+}
+
+/**
+ * Test the pose-axis Flow saber reach after projection into judge XY.
+ * Local-axis roll leaves projection unchanged; out-of-plane tilt shortens it.
  * @param {DataRecord} event
  * @param {unknown} pose
  * @param {number} songTimeMs
@@ -62,7 +88,7 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
   const box = flowNoteCellBox(event);
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
   if (!isPointInsideColliderBounds({ x: box.centerX, y: box.centerY, z: (songTimeMs - Number(event.centerTimestampMs)) * 0.006 }, bounds)) return false;
-  const capsule = resolveSaberCapsule(pose);
+  const capsule = resolveFlowSaberReach(pose, volume);
   return segmentContactsRectangle(
     Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
     Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
@@ -111,7 +137,7 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  */
 function resolveTargetColliderBounds(mode, center, halfSize, timingWindowMs, volume) {
-  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: volume.scale ?? 1, colliderDepthForward: volume.depthForward ?? 1, colliderDepthBackward: volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
+  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: volume.scale ?? 1, colliderDepthForward: mode === "flow" ? Math.max(1, volume.depthForward ?? 1) : volume.depthForward ?? 1, colliderDepthBackward: mode === "flow" ? Math.max(1, volume.depthBackward ?? 1) : volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
 }
 
 /** @param {Point2} start @param {Point2} end @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */
@@ -179,7 +205,7 @@ function convexPolygonsContact(left, right) {
  *
  * A hit is no longer a single snapshot in time: the equipment is swept
  * through every song-time inside the beat's timing window
- * `[center - window*depthForward, afterWindowMs ?? center + window*depthBackward]` and the
+ * `[center - window*max(1,depthForward), afterWindowMs ?? center + window*max(1,depthBackward)]` and the
  * beat's XY cell box is tested at each sampled and interpolated pose. The
  * depth condition is automatic — a beat's Z is `(t - center) * 0.006`, which
  * lies inside the collider Z-range exactly when t lies inside that window.
@@ -255,7 +281,7 @@ export function lerpResolvedEquipmentPose(start, target, progress) {
 /** @param {DataRecord} event @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume @param {number} timingWindowMs */
 function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
-  const capsule = resolveSaberCapsule(pose);
+  const capsule = resolveFlowSaberReach(pose, volume);
   return segmentContactsRectangle(
     Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
     Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
@@ -307,8 +333,8 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   if (history.length === 0) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
-  const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
-  const windowEnd = afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1);
+  const windowStart = center - timingWindowMs * Math.max(1, volume.depthForward ?? 1);
+  const windowEnd = afterWindowMs ?? center + timingWindowMs * Math.max(1, volume.depthBackward ?? 1);
   const contacts = [];
   /** @type {number[]} */ const sampleTimes = [];
   for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
@@ -353,7 +379,7 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   const nearProbe = (t) => {
     if (t < nearStart || t > nearEnd) return;
     const pose = resolvePoseAt(history, t);
-    const capsule = resolveSaberCapsule(pose);
+    const capsule = resolveFlowSaberReach(pose, volume);
     if (saberNearCell(capsule, box, nearMargin)) {
       if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
     }
@@ -369,7 +395,7 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
       const t = from.t + (to.t - from.t) * (step / steps);
       if (t < nearStart || t > nearEnd) continue;
       const pose = resolvePoseAt(history, t);
-      const capsule = resolveSaberCapsule(pose);
+      const capsule = resolveFlowSaberReach(pose, volume);
       if (saberNearCell(capsule, box, nearMargin)) {
         if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
         break;
@@ -408,9 +434,9 @@ export function internalFlowFirstContactSliceT(event, history, timingWindowMs, v
   if (!Number.isFinite(t) || !history.length || contact?.hitDepthHalf !== (t < Number(event.centerTimestampMs) ? "front" : "back")) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
-  if (t < center - timingWindowMs * (volume.depthForward ?? 1) || t > (afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1))) return null;
+  if (t < center - timingWindowMs * Math.max(1, volume.depthForward ?? 1) || t > (afterWindowMs ?? center + timingWindowMs * Math.max(1, volume.depthBackward ?? 1))) return null;
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
-  const capsule = resolveSaberCapsule(resolvePoseAt(history, t));
+  const capsule = resolveFlowSaberReach(resolvePoseAt(history, t), volume);
   const start = capsule.start; const end = capsule.end;
   if (!segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
   const direction = event.direction == null ? null : authoredDirectionCone(String(event.direction), 0)?.direction;
