@@ -1,6 +1,7 @@
 // @ts-check
 
 import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveObb, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
+import { flowSolidBladeRadiusWu } from "@aerobeat/web-contracts/equipment-contracts";
 import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collision.js";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
@@ -50,28 +51,36 @@ export function effectivePlayNoteAfterWindowMs(centerTimestampMs, timingWindowMs
 }
 
 /**
- * Keep the contract's pose validation, axis and scaled radius. Reach endpoints
- * are measured along that same rotating local +X axis: rear zero is the hilt,
- * front one is the contracted visible tip at 0.75 times the pose scale.
+ * Keep the contract's pose validation, axis and length. Reach endpoints
+ * follow rotating local +X: rear zero is the hilt and front one reaches the
+ * visible 0.75-WU tip times pose scale. Scored radius is the shared solid GLB
+ * blade radius times pose scale times Flow collider scale, not legacy .18.
  * @param {unknown} pose
- * @param {{depthForward?:number,depthBackward?:number}} volume
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  */
 function resolveFlowSaberReach(pose, volume) {
-  const capsule = resolveSaberCapsule(pose);
+  const resolvedPose = createResolvedEquipmentPose(pose);
+  const capsule = resolveSaberCapsule(resolvedPose);
   const length = Math.hypot(capsule.end.x - capsule.start.x, capsule.end.y - capsule.start.y, capsule.end.z - capsule.start.z); // 0.75 WU × pose scale
   const rear = volume.depthBackward ?? 0;
   const front = volume.depthForward ?? 1;
+  const scale = volume.scale ?? 1;
+  if (![rear, front, scale].every((value) => Number.isFinite(value) && value >= 0)) throw new TypeError("flow_saber_reach_invalid");
+  const rearLength = length * rear; const frontLength = length * front;
+  const radius = flowSolidBladeRadiusWu * resolvedPose.scale * scale;
+  if (![length, rearLength, frontLength, radius, rearLength + frontLength, radius * 2].every(Number.isFinite)) throw new TypeError("flow_saber_geometry_nonfinite");
   const start = Object.freeze({
-    x: capsule.start.x - capsule.axis.x * length * rear,
-    y: capsule.start.y - capsule.axis.y * length * rear,
-    z: capsule.start.z - capsule.axis.z * length * rear
+    x: capsule.start.x - capsule.axis.x * rearLength,
+    y: capsule.start.y - capsule.axis.y * rearLength,
+    z: capsule.start.z - capsule.axis.z * rearLength
   });
   const end = Object.freeze({
-    x: capsule.start.x + capsule.axis.x * length * front,
-    y: capsule.start.y + capsule.axis.y * length * front,
-    z: capsule.start.z + capsule.axis.z * length * front
+    x: capsule.start.x + capsule.axis.x * frontLength,
+    y: capsule.start.y + capsule.axis.y * frontLength,
+    z: capsule.start.z + capsule.axis.z * frontLength
   });
-  return Object.freeze({ start, end, radius: capsule.radius });
+  if (![start.x, start.y, start.z, end.x, end.y, end.z, end.x - start.x, end.y - start.y, end.z - start.z].every(Number.isFinite)) throw new TypeError("flow_saber_geometry_nonfinite");
+  return Object.freeze({ start, end, radius });
 }
 
 /**
@@ -88,6 +97,7 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
   if (!isPointInsideColliderBounds({ x: box.centerX, y: box.centerY, z: (songTimeMs - Number(event.centerTimestampMs)) * 0.006 }, bounds)) return false;
   const capsule = resolveFlowSaberReach(pose, volume);
+  if (volume.scale === 0) return false;
   return segmentContactsRectangle(
     Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
     Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
@@ -136,7 +146,7 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  */
 function resolveTargetColliderBounds(mode, center, halfSize, timingWindowMs, volume) {
-  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: volume.scale ?? 1, colliderDepthForward: mode === "flow" ? 1 : volume.depthForward ?? 1, colliderDepthBackward: mode === "flow" ? 1 : volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
+  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: mode === "flow" ? 1 : volume.scale ?? 1, colliderDepthForward: mode === "flow" ? 1 : volume.depthForward ?? 1, colliderDepthBackward: mode === "flow" ? 1 : volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
 }
 
 /** @param {Point2} start @param {Point2} end @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */
@@ -281,6 +291,7 @@ export function lerpResolvedEquipmentPose(start, target, progress) {
 function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
   const capsule = resolveFlowSaberReach(pose, volume);
+  if (volume.scale === 0) return false;
   return segmentContactsRectangle(
     Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
     Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
@@ -366,9 +377,9 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   // tight margin of the cell box at some time inside the 1/4-beat sub-window
   // around the beat center. This captures "close but not quite" — the hand
   // was in the correct cell area with good timing but the capsule didn't
-  // touch. The margin (0.25 WU) is slightly larger than the saber radius
-  // (0.18) so there is a valid near-miss band: no contact (> 0.18) but near
-  // (<= 0.25). Passing through the cell's general area during a sweep does
+  // touch. The independent 0.25-WU near margin forms a band around the
+  // scored Scale1 solid blade radius (.024 WU); at large scales actual hits
+  // still take priority. Crossing the cell's general area during a sweep does
   // not qualify — only being close to the cell edge at the right time does.
   const quarterWindow = timingWindowMs * 0.25;
   const nearStart = center - quarterWindow;
@@ -379,7 +390,7 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
     if (t < nearStart || t > nearEnd) return;
     const pose = resolvePoseAt(history, t);
     const capsule = resolveFlowSaberReach(pose, volume);
-    if (saberNearCell(capsule, box, nearMargin)) {
+    if (volume.scale !== 0 && saberNearCell(capsule, box, nearMargin)) {
       if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
     }
   };
@@ -395,7 +406,7 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
       if (t < nearStart || t > nearEnd) continue;
       const pose = resolvePoseAt(history, t);
       const capsule = resolveFlowSaberReach(pose, volume);
-      if (saberNearCell(capsule, box, nearMargin)) {
+      if (volume.scale !== 0 && saberNearCell(capsule, box, nearMargin)) {
         if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
         break;
       }
@@ -438,7 +449,7 @@ export function internalFlowFirstContactSliceT(event, history, timingWindowMs, v
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
   const capsule = resolveFlowSaberReach(resolvePoseAt(history, t), volume);
   const start = capsule.start; const end = capsule.end;
-  if (!segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
+  if (volume.scale === 0 || !segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
   const direction = event.direction == null ? null : authoredDirectionCone(String(event.direction), 0)?.direction;
   if (!direction) return event.direction == null ? 0.5 : null;
   // Distance to an axis point is convex along the segment. Ternary search its

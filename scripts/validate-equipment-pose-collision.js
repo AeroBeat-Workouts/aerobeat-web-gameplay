@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isColliderSettings, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
-import { saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
+import { flowSolidBladeRadiusWu, saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
 const HASH = "c".repeat(64);
@@ -22,12 +22,12 @@ assert.equal(equipmentPoseAnchorEpsilonWu, 1e-6, "the strict measured-anchor eps
 for (const role of ["left_wrist", "right_wrist"]) {
   for (const scale of [0.75, 1, 2]) assert.equal(flowContact(pose(role, "flow", { x: 1, y: 1, z: 0 }, { scale })), true, `${role} scale ${scale} center contact`);
 }
-assert.equal(flowContact(pose("left_wrist", "flow", { x: 1.68, y: 1, z: 0 }, { orientation: orientation(0, 0, 0) })), true, "capsule radius exact touch counts");
-assert.equal(flowContact(pose("left_wrist", "flow", { x: 1.680001, y: 1, z: 0 }, { orientation: orientation(0, 0, 0) })), false, "capsule radius just miss stays outside");
+assert.equal(flowContact(pose("left_wrist", "flow", { x: 1.524, y: 1, z: 0 }, { orientation: orientation(0, 0, 0) })), true, "capsule radius exact touch counts");
+assert.equal(flowContact(pose("left_wrist", "flow", { x: 1.524001, y: 1, z: 0 }, { orientation: orientation(0, 0, 0) })), false, "capsule radius just miss stays outside");
 assert.equal(flowContact(pose("left_wrist", "flow", { x: 3, y: 0.5, z: 0 }, { orientation: orientation(0, 0, 0) })), false, "collinear but disjoint capsule axis cannot false-positive on a target edge");
 assert.equal(flowContact(pose("right_wrist", "flow", { x: 2.5, y: 1, z: 0 }, { scale: 2, orientation: orientation(0, 0, 180) })), true, "Z swing rotates the projected saber into target");
 assert.equal(flowContact(pose("right_wrist", "flow", { x: 2.5, y: 1, z: 0 }, { scale: 1, orientation: orientation(0, 0, 180) })), false, "scale-one Z swing cannot bridge scale-two reach");
-assert.equal(flowContact(pose("left_wrist", "flow", { x: 1.68, y: 1, z: 0 }, { orientation: orientation(90, 0, 0) })), true, "local X roll leaves saber projection unchanged");
+assert.equal(flowContact(pose("left_wrist", "flow", { x: 1.524, y: 1, z: 0 }, { orientation: orientation(90, 0, 0) })), true, "local X roll leaves saber projection unchanged");
 assert.equal(flowContact(pose("left_wrist", "flow", { x: 2.2, y: 1, z: 0 }, { orientation: orientation(0, 0, 180) })), true, "in-plane reversed saber reaches the target");
 assert.equal(flowContact(pose("left_wrist", "flow", { x: 2.2, y: 1, z: 0 }, { orientation: orientation(0, 90, 180) })), false, "out-of-plane Y tilt shortens the same projected reach");
 assert.equal(flowContact(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { scale: 0.75, orientation: orientation(25, 35, 65) })), true, "combined normalized quaternion resolves deterministically");
@@ -66,9 +66,9 @@ for (const [mode, contact, target] of [
   assert.equal(contact(target, equipment, 640, 180, { depthBackward: 2 }), false, `${mode}: depth- cannot extend future -Z`);
   assert.equal(contact(target, equipment, 1360, 180, { depthBackward: 2 }), mode === "Boxing", `${mode}: extra rear reach changes only Boxing timing`);
   assert.equal(contact(target, equipment, 1360.001, 180, { depthBackward: 2 }), false, `${mode}: beyond extended back face misses`);
-  const distant = pose("left_wrist", mode.toLowerCase(), { x: mode === "Flow" ? 1.8 : 1.9, y: 1, z: 0 });
+  const distant = pose("left_wrist", mode.toLowerCase(), { x: mode === "Flow" ? 1.54 : 1.9, y: 1, z: 0 });
   assert.equal(contact(target, distant, 1000, 180), false, `${mode}: default XY target outside`);
-  assert.equal(contact(target, distant, 1000, 180, { scale: 2 }), true, `${mode}: scale expands XY contact`);
+  assert.equal(contact(target, distant, 1000, 180, { scale: 2 }), true, `${mode}: scale expands the scored Flow blade or Boxing target, respectively`);
 }
 assert.equal(beatInsideColliderDepth(1000, 640, 180), false, "a future note remains ineligible beyond its timing window");
 assert.equal(beatInsideColliderDepth(1000, 820, 180), true, "Flow front face stays inclusive");
@@ -108,9 +108,9 @@ close(slice(pose("left_wrist", "flow", { x: 1, y: 1.3, z: 0 }), "up"), 0.8, "up 
 close(slice(pose("left_wrist", "flow", { x: 1, y: 1.3, z: 0 }), "up-right"), 0.65, "diagonal arrow projects on normalized cell diagonal");
 close(slice(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }), null), 0.5, "directionless orb uses midpoint");
 const scaledBlade = pose("left_wrist", "flow", { x: 1.4, y: 1, z: 0 }, { scale: 2 });
-close(slice(scaledBlade, "right", { scale: 2 }), 0.7, "expanded cell rescales glyph coordinate");
-assert.ok(slice(scaledBlade, "right", { scale: 2 }) < slice(scaledBlade), "cell scale changes first-contact normalization");
-close(slice(pose("left_wrist", "flow", { x: 1, y: 1.6, z: 0 }, { orientation: orientation(0, 0, 90) }), "up"), 0.85, "XY rotation changes projected blade contact locus");
+close(slice(scaledBlade, "right", { scale: 2 }), 0.85, "Flow scale grows blade radius without changing cell glyph coordinates");
+assert.equal(slice(scaledBlade, "right", { scale: 2 }), slice(scaledBlade), "Flow scale does not expand the note cell");
+close(slice(pose("left_wrist", "flow", { x: 1, y: 1.52, z: 0 }, { orientation: orientation(0, 0, 90) }), "up"), 0.85, "XY rotation changes projected blade contact locus");
 close(slice(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { orientation: orientation(0, 90, 0) })), 0.5, "Z tilt shortens projected blade");
 // The same canonical capsule scores at both hilt and tip, early and late.
 // Behind-hilt near evidence must remain geometrically false, not a fake hit.
@@ -124,6 +124,30 @@ for (const [label, anchorX, orientationZ] of [
     assert.equal(swept?.firstContactMs, t, `${label} ${t}: swept contact keeps its true time`);
     assert.equal(swept?.hitDepthHalf, t < 1000 ? "front" : "back", `${label} ${t}: temporal diagnostic remains honest`);
   }
+}
+// Flow Scale multiplies the solid blade radius, not the cell target. Zero
+// disables scoring even when its collapsed axis lies inside the target.
+assert.equal(flowSolidBladeRadiusWu, 0.024);
+const edgeBlade = pose("left_wrist", "flow", { x: 1, y: 1.525, z: 0 });
+for (const scale of [0, 0.00001, 1]) assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, edgeBlade, 1000, 180, { scale, depthForward: 1, depthBackward: 0 }), false, `Flow Scale${scale} has no solid blade overlap`);
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, edgeBlade, 1000, 180, { scale: 2, depthForward: 1, depthBackward: 0 }), true, "Flow Scale2 grows the scored saber radius rather than note target");
+assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: edgeBlade }], 180, { scale: 2, depthForward: 1, depthBackward: 0 })?.firstContactMs, 1000, "swept scoring uses solid blade radius");
+assert.equal(slice(edgeBlade, "up", { scale: 1, depthForward: 1, depthBackward: 0 }), null, "noncontact solid blade has no slice hint");
+assert.ok(slice(edgeBlade, "up", { scale: 2, depthForward: 1, depthBackward: 0 }) !== null, "scaled solid blade contact supplies aligned slice hint");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }), 1000, 180, { scale: 0, depthForward: 1, depthBackward: 0 }), false, "Scale0 never scores even inside note");
+const pointBlade = pose("left_wrist", "flow", { x: 1, y: 1, z: 0 });
+assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: pointBlade }], 180, { scale: 0 }), null, "Scale0 swept contact and Almost are absent");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { scale: 1, depthForward: 0, depthBackward: 0 }), true, "zero/zero reach is a sphere at hilt when radius positive");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { scale: 0, depthForward: 0, depthBackward: 0 }), false, "zero/zero reach and zero radius cannot score");
+for (const value of [0, .00001, 9999999]) {
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { scale: value, depthForward: value, depthBackward: value }), value !== 0, `finite Scale/Depth ${value} changes real scored saber contact`);
+}
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, edgeBlade, 1000, 180, { scale: 9999999, depthForward: 0, depthBackward: 0 }), true, "huge finite radius can score off-center without widening target");
+assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { depthForward: Number.MAX_VALUE, depthBackward: Number.MAX_VALUE }), /flow_saber_geometry_nonfinite/u, "derived saber length overflow rejects instead of scoring corrupt geometry");
+assert.throws(() => sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: pointBlade }], 180, { depthForward: Number.MAX_VALUE, depthBackward: Number.MAX_VALUE }), /flow_saber_geometry_nonfinite/u, "swept overflow rejects too");
+assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { scale: 100 }), 1000, 180, { scale: Number.MAX_VALUE }), /flow_saber_geometry_nonfinite/u, "derived scored radius overflow rejects");
+for (const key of ["scale", "depthForward", "depthBackward"]) for (const bad of [-1, NaN, Infinity]) {
+  assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { [key]: bad }), /flow_saber_reach_invalid/u, `invalid ${key} fails before scoring`);
 }
 // Reach factors change the pose-axis capsule, not the Flow note timing slab.
 const temporalBlade = pose("left_wrist", "flow", { x: 1, y: 1, z: 0 });

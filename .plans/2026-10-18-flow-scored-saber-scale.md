@@ -1,0 +1,21 @@
+# Flow scored saber scale
+
+**Status:** Owner implementation validated; commit/push pending. **Owner:** gameplay, linked Bead `aerobeat-web-assembly-ey1h`. **Parent plan:** `/home/derrick/.dsh/projects/aerobeat/aerobeat-web-assembly/.plans/2026-10-17-flow-collider-scale-visible-equipment.md`. **Next acceptance:** Flow Scale1 radius `.024 × pose.scale` scores the same fixed note cell, Scale0 never scores, and both depths admit finite nonnegative controls without touching Boxing.
+
+## Goal and boundaries
+
+Apply Flow Collider Scale to the scored rotating saber radius, not target width/height. Keep depth reach along the same resolved axis: forward1 tip `.75 × pose.scale`, rear0 hilt, zero/zero reach well-defined. Accept finite nonnegative Scale/Depth values without arbitrary caps; reject nonfinite derived geometry truthfully before it enters contact tests. Preserve near/Almost semantics where equipment is present and keep Boxing rules, bomb geometry and independent note timing unchanged. No assembly/renderer edits or public cutover. Documentation: update gameplay README.
+
+## Tasks
+
+1. Add old-RED/new-GREEN focused tests for Scale0/1/tiny/large, note target independence, depth0/0, huge finite settings and pose-derived arithmetic (`ey1h`).
+2. Implement Flow-only validation and same authoritative blade radius across initial, swept, near and slice-hint paths; verify Boxing isolation (`ey1h`).
+3. Run `npm run check`, relevant/full tests; update README, commit/push clean `main`, report SHA and integration needs (`ey1h`).
+
+## Diagnosis and current decision
+
+Flow target bounds currently multiply `colliderScale`, while `resolveFlowSaberReach` retains the old `.18 × pose.scale` radius. Settings enforce Scale `.25..4`, front `1..4`, rear `0..4`; huge finite inputs must remain legal unless a particular resulting shape cannot be represented. Existing contract capsule still supplies validated pose, axis and length; the shared new `.024` solid-art radius supplies the actual Flow score radius. Scale0 means disabled Flow saber contact rather than a zero-radius line hit.
+
+## Results
+
+Uses shared `flowSolidBladeRadiusWu` (`.024`) times resolved pose scale times Flow collider scale. Flow target XY remains fixed and independent; zero Scale disables contact/near and zero/zero reach forms a sphere when Scale is positive. Flow controls accept every finite nonnegative input; unrepresentable derived reach/radius/endpoints fail with `flow_saber_geometry_nonfinite`. Boxing retains its prior `.25..4` scale, `1..4` front/rear guards and old scoring. Existing public wrist/direction-only `saberCapsuleContactsFlowTarget` is legacy and not called by session scoring; authoritative pose-based entrypoints were changed. RED: Scale1 at .025-WU offset falsely scored with old radius; Flow settings still reported bounded `.25..4`. GREEN `node scripts/validate-equipment-pose-collision.js`, `node scripts/validate-flow-collider-collision.js`, `node scripts/validate-boxing-collider-scoring.js`, `npm run check`, `npm test`, `git diff --check`. Actual signed renderer/browser/phone integration remains assembly/renderer ownership.

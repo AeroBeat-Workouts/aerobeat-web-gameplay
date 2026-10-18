@@ -86,10 +86,10 @@ export function createBoxingColliderSettings(value = defaultBoxingColliderSettin
   const timingWindowMs = boundedSetting(record.timingWindowMs, flowColliderSettingsBounds.timingWindowMs, "timing window");
   if (record.colliderVisible !== undefined && typeof record.colliderVisible !== "boolean") throw new TypeError("Boxing Collider visibility must be boolean");
   const colliderVisible = record.colliderVisible ?? false;
-  const colliderScale = boundedSetting(record.colliderScale ?? 1, flowColliderSettingsBounds.colliderScale, "collider scale");
+  const colliderScale = boundedSetting(record.colliderScale ?? 1, { minimum: 0.25, maximum: 4 }, "collider scale");
   const wristBombColliderScale = boundedSetting(record.wristBombColliderScale ?? 1, flowColliderSettingsBounds.wristBombColliderScale, "wrist bomb collider scale");
-  const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, flowColliderSettingsBounds.colliderDepthForward, "forward depth");
-  const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, flowColliderSettingsBounds.colliderDepthBackward, "backward depth");
+  const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, { minimum: 1, maximum: 4 }, "forward depth");
+  const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, { minimum: 1, maximum: 4 }, "backward depth");
   return Object.freeze({ schema: "aerobeat/flow_collider_settings", version: 1, algorithm: "swept_athlete_plane_v1", colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, topRowReachWU: setup.topRowReachWU, bottomRowReachWU: setup.bottomRowReachWU, guardCountMode: setup.guardCountMode, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }) });
 }
 

@@ -245,7 +245,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 // wrist sphere is outside. Either measured wrist can contact independently.
 {
   const events=[beat("equipment-note",1000,"note",{hand:"left",placement:5}),beat("wrist-bomb",1000,"bomb",{placement:5})];
-  const equipmentOnly=ready(events);send(equipmentOnly,1000,1000,[1,.35],[3,2],[3,2]);
+  const equipmentOnly=ready(events,settings({colliderScale:7}));send(equipmentOnly,1000,1000,[1,.35],[3,2],[3,2]);
   assert.deepEqual(equipmentOnly.getJudgements().map(j=>j.result),["hit"],"the resolved saber reaches the note");
   assert.equal(equipmentOnly.getHazardOutcomes().length,0,"equipment overlap alone cannot touch the bomb");
   send(equipmentOnly,1050,1050,[1,1],[3,2],[3,2]);
@@ -356,9 +356,10 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 
 // Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
 {
-  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:.25,maximum:4},wristBombColliderScale:{minimum:0,maximum:2},colliderDepthForward:{minimum:1,maximum:4},colliderDepthBackward:{minimum:0,maximum:4}});
+  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:0,maximum:Number.POSITIVE_INFINITY},wristBombColliderScale:{minimum:0,maximum:2},colliderDepthForward:{minimum:0,maximum:Number.POSITIVE_INFINITY},colliderDepthBackward:{minimum:0,maximum:Number.POSITIVE_INFINITY}});
   assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(publicDefaultFlowColliderSettings.colliderVisible,false);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
   assert.equal(createFlowColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field volume accepted");
+  for(const key of ["colliderScale","colliderDepthForward","colliderDepthBackward"]){for(const value of [0,.00001,9999999,Number.MAX_VALUE])assert.equal(createFlowColliderSettings(settings({[key]:value}))[key],value,`${key} accepts finite nonnegative ${value}`);for(const bad of [-1,NaN,Infinity,-Infinity])assert.throws(()=>createFlowColliderSettings(settings({[key]:bad})),/Flow Collider/u,`${key} rejects ${bad}`);}
   assert.equal(createFlowColliderSettings(settings({colliderDepthBackward:0})).colliderDepthBackward,0,"zero rear is an accepted Flow scoring setting");
   assert.equal(flowColliderSettingsIdentity(settings({colliderDepthBackward:0})) === flowColliderSettingsIdentity(settings({colliderDepthBackward:1})),false,"hilt-only and extended-rear runs remain separate score partitions");
   assert.throws(()=>createFlowColliderSettings(settings({colliderVisible:null})),/visibility/u);

@@ -88,6 +88,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.equal(defaultBoxingColliderSettings.directionToleranceDegrees, 45, "default tolerance stays 45");
   assert.equal(exact.colliderVisible,false,"boxing visibility defaults off");
   assert.equal(createBoxingColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field boxing volume accepted");
+  for (const [key, invalid] of [["colliderScale", 0], ["colliderScale", 9999999], ["colliderDepthForward", 0], ["colliderDepthForward", 9999999], ["colliderDepthBackward", 0], ["colliderDepthBackward", 9999999]]) assert.throws(() => createBoxingColliderSettings(settings({ [key]: invalid })), /Boxing Collider/u, `Flow control relaxation cannot change Boxing ${key} bound`);
   assert.throws(()=>createBoxingColliderSettings(settings({colliderVisible:0})),/visibility/u);
   assert.equal(boxingColliderSettingsIdentity(settings({colliderVisible:true})),boxingColliderSettingsIdentity(settings({colliderVisible:false})),"visibility does not partition scoring");
   assert.equal(boxingColliderSettingsIdentity(settings()), boxingColliderSettingsIdentity(createBoxingColliderSettings()));

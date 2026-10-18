@@ -15,10 +15,10 @@ export const flowColliderSettingsBounds = Object.freeze({
   colliderRadius: Object.freeze({ minimum: 0, maximum: 0.5 }),
   directionToleranceDegrees: Object.freeze({ minimum: 0, maximum: 90 }),
   timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 }),
-  colliderScale: Object.freeze({ minimum: 0.25, maximum: 4 }),
+  colliderScale: Object.freeze({ minimum: 0, maximum: Number.POSITIVE_INFINITY }),
   wristBombColliderScale: Object.freeze({ minimum: 0, maximum: 2 }),
-  colliderDepthForward: Object.freeze({ minimum: 1, maximum: 4 }),
-  colliderDepthBackward: Object.freeze({ minimum: 0, maximum: 4 })
+  colliderDepthForward: Object.freeze({ minimum: 0, maximum: Number.POSITIVE_INFINITY }),
+  colliderDepthBackward: Object.freeze({ minimum: 0, maximum: Number.POSITIVE_INFINITY })
 });
 export const defaultFlowColliderSettings = Object.freeze({
   schema: "aerobeat/flow_collider_settings",
@@ -176,8 +176,10 @@ export function wristBombSphereContactsFlowTarget(event, wrist, settings) {
 }
 
 /**
- * 0.0.61 (GATE 1): the saber capsule is the SOLE flow hit detector. It is a
- * 2D capsule on the z=0 judge plane: origin at the measured wrist sample,
+ * Legacy wrist/direction-only 0.0.61 geometry helper (not the authoritative
+ * Flow scoring path, which requires a resolved equipment pose and the current
+ * solid-blade radius plus Flow Scale). This is a 2D capsule on the z=0 judge
+ * plane: origin at the measured wrist sample,
  * axis along `direction` (unit vector, judge up-positive space), half-extent
  * `saberGeometry.length` along the axis, radius `saberGeometry.radius` around
  * it. A note is contacted when the capsule intersects the note's 1x1 cell box
