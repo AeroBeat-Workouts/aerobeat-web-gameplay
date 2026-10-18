@@ -73,9 +73,30 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
     send(missed,2000.001,[3,1],[3,1],[3,2]);assert.deepEqual(missed.getJudgements().map(j=>j.result),["miss"]);
     const late=ready([event],settings({colliderDepthBackward:depth}));send(late,1999,[1,1],[3,1],[3,2]);assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"]);
   }
-  const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:4}));
+  const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:5}));
   send(larger,2000.001,[3,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0);
   send(larger,2200,[1,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["hit"]);
+  for (const depth of [0, 0.00001, 0.5, 5]) {
+    const front = ready([event], settings({ colliderDepthForward: depth }));
+    const face = 1000 - 180 * depth;
+    if (face > 0) {
+      send(front, face - 0.001, [1, 1], [3, 1], [3, 2]);
+      assert.equal(front.getJudgements().length, 0, `forward ${depth} cannot hit before its scored face`);
+    }
+    send(front, Math.max(face, 3), [1, 1], [3, 1], [3, 2]);
+    assert.deepEqual(front.getJudgements().map(j => j.result), ["hit"], `forward ${depth} scores at or after its inclusive face`);
+  }
+  const farFront = ready([event], settings({ colliderDepthForward: 9999999 }));
+  send(farFront, 3, [1, 1], [3, 1], [3, 2]);
+  assert.deepEqual(farFront.getJudgements().map(j => j.result), ["hit"], "huge forward depth scores at first playable timestamp");
+  for (const depth of [0, 0.00001, 0.5, 5]) {
+    const rear = ready([event], settings({ colliderDepthBackward: depth }));
+    const deadline = Math.max(2000, 1000 + 180 * depth);
+    send(rear, deadline, [3, 1], [3, 1], [3, 2]);
+    assert.equal(rear.getJudgements().length, 0, `rear ${depth} remains pending at inclusive Play deadline`);
+    send(rear, deadline + 0.001, [3, 1], [3, 1], [3, 2]);
+    assert.deepEqual(rear.getJudgements().map(j => j.result), ["miss"], `rear ${depth} misses only after scored deadline`);
+  }
 }
 
 // --- Settings contract -------------------------------------------------------
@@ -88,7 +109,15 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.equal(defaultBoxingColliderSettings.directionToleranceDegrees, 45, "default tolerance stays 45");
   assert.equal(exact.colliderVisible,false,"boxing visibility defaults off");
   assert.equal(createBoxingColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field boxing volume accepted");
-  for (const [key, invalid] of [["colliderScale", 0], ["colliderScale", 9999999], ["colliderDepthForward", 0], ["colliderDepthForward", 9999999], ["colliderDepthBackward", 0], ["colliderDepthBackward", 9999999]]) assert.throws(() => createBoxingColliderSettings(settings({ [key]: invalid })), /Boxing Collider/u, `Flow control relaxation cannot change Boxing ${key} bound`);
+  for (const invalid of [0, 0.24999, 4.00001, 9999999, -1, NaN, Infinity]) assert.throws(() => createBoxingColliderSettings(settings({ colliderScale: invalid })), /Boxing Collider/u, `Boxing scale retains .25..4 for ${invalid}`);
+  for (const key of ["colliderDepthForward", "colliderDepthBackward"]) {
+    for (const depth of [0, 0.00001, 0.5, 5, 9999999]) {
+      const accepted = createBoxingColliderSettings(settings({ [key]: depth }));
+      assert.equal(accepted[key], depth, `${key} retains finite nonnegative ${depth}`);
+      assert.notEqual(boxingColliderSettingsIdentity(accepted), boxingColliderSettingsIdentity(settings()), `${key} ${depth} has a distinct scored identity`);
+    }
+    for (const invalid of [-1, NaN, Infinity, -Infinity]) assert.throws(() => createBoxingColliderSettings(settings({ [key]: invalid })), /Boxing Collider/u, `${key} rejects ${invalid}`);
+  }
   assert.throws(()=>createBoxingColliderSettings(settings({colliderVisible:0})),/visibility/u);
   assert.equal(boxingColliderSettingsIdentity(settings({colliderVisible:true})),boxingColliderSettingsIdentity(settings({colliderVisible:false})),"visibility does not partition scoring");
   assert.equal(boxingColliderSettingsIdentity(settings()), boxingColliderSettingsIdentity(createBoxingColliderSettings()));

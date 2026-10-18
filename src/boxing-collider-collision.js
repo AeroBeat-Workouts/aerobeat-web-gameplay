@@ -88,13 +88,16 @@ export function createBoxingColliderSettings(value = defaultBoxingColliderSettin
   const colliderVisible = record.colliderVisible ?? false;
   const colliderScale = boundedSetting(record.colliderScale ?? 1, { minimum: 0.25, maximum: 4 }, "collider scale");
   const wristBombColliderScale = boundedSetting(record.wristBombColliderScale ?? 1, flowColliderSettingsBounds.wristBombColliderScale, "wrist bomb collider scale");
-  const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, { minimum: 1, maximum: 4 }, "forward depth");
-  const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, { minimum: 1, maximum: 4 }, "backward depth");
+  const colliderDepthForward = nonnegativeDepth(record.colliderDepthForward ?? 1, "forward depth");
+  const colliderDepthBackward = nonnegativeDepth(record.colliderDepthBackward ?? 1, "backward depth");
   return Object.freeze({ schema: "aerobeat/flow_collider_settings", version: 1, algorithm: "swept_athlete_plane_v1", colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, topRowReachWU: setup.topRowReachWU, bottomRowReachWU: setup.bottomRowReachWU, guardCountMode: setup.guardCountMode, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }) });
 }
 
 /** @param {unknown} value @param {Readonly<{minimum:number,maximum:number}>} bounds @param {string} label */
 function boundedSetting(value, bounds, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < bounds.minimum || value > bounds.maximum) throw new RangeError(`Boxing Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
+
+/** @param {unknown} value @param {string} label */
+function nonnegativeDepth(value, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new RangeError(`Boxing Collider ${label} must be finite and nonnegative`); return Object.is(value, -0) ? 0 : value; }
 
 /**
  * Normalized reach + guard-mode setup with defaults applied, rejecting any
