@@ -116,6 +116,7 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
  */
 export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, timingWindowMs, volume = {}) {
+  if (volume.scale === 0) return false;
   const bounds = resolveTargetColliderBounds("boxing", target, { x: 0.5, y: 0.5 }, timingWindowMs, volume);
   if (!isPointInsideColliderBounds({ x: target.x, y: target.y, z: (songTimeMs - target.centerTimestampMs) * 0.006 }, bounds)) return false;
   const obb = resolveGloveObb(pose);
@@ -515,7 +516,7 @@ function saberNearCell(capsule, box, margin) {
  * @param {number | null} [afterWindowMs] Play note deadline; null retains the original volume.
  */
 export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}, afterWindowMs = null) {
-  if (history.length === 0) return null;
+  if (volume.scale === 0 || history.length === 0) return null;
   const center = Number(target.centerTimestampMs);
   const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
   const windowEnd = afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1);

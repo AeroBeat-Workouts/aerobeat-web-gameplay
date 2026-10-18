@@ -86,7 +86,7 @@ export function createBoxingColliderSettings(value = defaultBoxingColliderSettin
   const timingWindowMs = boundedSetting(record.timingWindowMs, flowColliderSettingsBounds.timingWindowMs, "timing window");
   if (record.colliderVisible !== undefined && typeof record.colliderVisible !== "boolean") throw new TypeError("Boxing Collider visibility must be boolean");
   const colliderVisible = record.colliderVisible ?? false;
-  const colliderScale = boundedSetting(record.colliderScale ?? 1, { minimum: 0.25, maximum: 4 }, "collider scale");
+  const colliderScale = nonnegativeDepth(record.colliderScale ?? 1, "collider scale");
   const wristBombColliderScale = boundedSetting(record.wristBombColliderScale ?? 1, flowColliderSettingsBounds.wristBombColliderScale, "wrist bomb collider scale");
   const colliderDepthForward = nonnegativeDepth(record.colliderDepthForward ?? 1, "forward depth");
   const colliderDepthBackward = nonnegativeDepth(record.colliderDepthBackward ?? 1, "backward depth");

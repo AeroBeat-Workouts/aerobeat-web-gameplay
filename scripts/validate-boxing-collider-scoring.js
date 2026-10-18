@@ -16,6 +16,7 @@ import {
   boxingColliderTargetCenter
 } from "../src/index.js";
 import { targetCenterForPlacement } from "../src/flow-collider-collision.js";
+import { resolvedGloveObbContactsBoxingTarget, sweptGloveObbContactsBoxingTarget } from "../src/equipment-pose-collision.js";
 import { boxingColliderRowY } from "@aerobeat/web-contracts";
 
 const HASH = "a".repeat(64);
@@ -109,7 +110,15 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.equal(defaultBoxingColliderSettings.directionToleranceDegrees, 45, "default tolerance stays 45");
   assert.equal(exact.colliderVisible,false,"boxing visibility defaults off");
   assert.equal(createBoxingColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field boxing volume accepted");
-  for (const invalid of [0, 0.24999, 4.00001, 9999999, -1, NaN, Infinity]) assert.throws(() => createBoxingColliderSettings(settings({ colliderScale: invalid })), /Boxing Collider/u, `Boxing scale retains .25..4 for ${invalid}`);
+  for (const scale of [0, 0.00001, 0.24999, 4.00001, 9999999]) {
+    const accepted = createBoxingColliderSettings(settings({ colliderScale: scale }));
+    assert.equal(accepted.colliderScale, scale, `Boxing scale ${scale} retains finite nonnegative value`);
+    assert.notEqual(boxingColliderSettingsIdentity(accepted), boxingColliderSettingsIdentity(settings()), `Boxing scale ${scale} partitions scored identity`);
+  }
+  for (const invalid of [-1, NaN, Infinity, -Infinity]) assert.throws(() => createBoxingColliderSettings(settings({ colliderScale: invalid })), /Boxing Collider/u, `Boxing scale rejects ${invalid}`);
+  const zeroTarget = { x: 0, y: 1, centerTimestampMs: 1000 };
+  assert.equal(resolvedGloveObbContactsBoxingTarget(zeroTarget, null, 1000, 180, { scale: 0 }), false, 'zero Boxer scale cannot score even on a target-centred glove');
+  assert.equal(sweptGloveObbContactsBoxingTarget(zeroTarget, [{ t: 1000, pose: null }], 180, { scale: 0 }), null, 'zero Boxer scale cannot score a swept glove');
   for (const key of ["colliderDepthForward", "colliderDepthBackward"]) {
     for (const depth of [0, 0.00001, 0.5, 5, 9999999]) {
       const accepted = createBoxingColliderSettings(settings({ [key]: depth }));
