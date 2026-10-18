@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
+import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isColliderSettings, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
 import { saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
@@ -79,6 +79,11 @@ assert.equal(colliderDefaultDepthWu, 1.08, "shared contracts default face is 180
 const sharedBounds = resolveColliderBounds({ mode: "flow", center: { x: 1, y: 1, z: 0 }, halfWidth: .5, halfHeight: .5, settings: { ...colliderSettingsDefaults.flow, colliderScale: 2, colliderDepthForward: 2, colliderDepthBackward: 1 }, timingWindowMs: 180, speedWuPerMs: .006 });
 assert.deepEqual(sharedBounds, { minX: 0, maxX: 2, minY: 0, maxY: 2, minZ: -2.16, maxZ: 1.08 }, "contracts still resolve legacy world-Z bounds; these do not define Flow saber reach");
 assert.equal(isPointInsideColliderBounds({ x: 1, y: 1, z: -2.16 }, sharedBounds), true, "contract world-Z front face inclusive");
+const zeroRearContractSettings = { ...colliderSettingsDefaults.flow, colliderDepthBackward: 0 };
+assert.equal(isColliderSettings(zeroRearContractSettings), true, "contract boundary accepts a Flow rear-zero setting without a gameplay clamp");
+const zeroRearContractBounds = resolveColliderBounds({ mode: "flow", center: { x: 1, y: 1, z: 0 }, halfWidth: 0.5, halfHeight: 0.5, settings: zeroRearContractSettings, timingWindowMs: 180, speedWuPerMs: 0.006 });
+assert.equal(zeroRearContractBounds.maxZ, 0, "contract resolves a genuine rear-zero face, not a hidden one-factor fallback");
+assert.equal(isPointInsideColliderBounds({ x: 1, y: 1, z: 0 }, zeroRearContractBounds), true, "the zero face itself remains inclusive");
 for (const [mode, contact, target] of [["flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent], ["boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]]) {
   const equipment = pose("left_wrist", mode, { x: 1, y: 1, z: 0 });
   const widthMs = 250;
