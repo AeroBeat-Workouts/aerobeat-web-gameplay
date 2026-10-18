@@ -374,10 +374,10 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 }
 
 // Scored Play notes stay eligible until the full note is beyond the camera.
-// The forward face and the configured later deadline remain unchanged.
+// Saber reach changes actual contact, never admission or the note deadline.
 {
   const event = beat("depth-note",1000,"note",{hand:"left",placement:5});
-  for (const depth of [1,2,3]) {
+  for (const depth of [0,1,2,3,4]) {
     const pending=ready([event],settings({colliderDepthBackward:depth}));
     for(const at of [1540,1999,2000]) {send(pending,at,at,[-.5,1],[3,1],[3,2]);assert.equal(pending.getJudgements().length,0,`Play note remains pending at ${at}`);}
     send(pending,2000.001,2000.001,[-.5,1],[3,1],[3,2]);
@@ -387,11 +387,13 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
     assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"],"late Play contact remains hittable");
   }
   const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:4}));
-  send(larger,2000.001,2000.001,[-.5,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0,"configured +1200ms remains later than floor");
-  send(larger,2200,2200,[1,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["hit"]);
+  send(larger,2000,2000,[-.5,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0,"rear four keeps the inclusive +1000ms Play deadline");
+  send(larger,2000.001,2000.001,[-.5,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["miss"],"rear four cannot postpone Play Miss");
   const forward=ready([event],settings({colliderDepthForward:2}));
   send(forward,640,640,[1,1],[3,1],[3,2]);
-  assert.deepEqual(forward.getJudgements().map(j=>j.result),["hit"],"forward extension admits future -Z beat");
+  assert.deepEqual(forward.getJudgements(),[],"longer forward blade cannot admit an early note");
+  send(forward,820,820,[1,1],[3,1],[3,2]);
+  assert.deepEqual(forward.getJudgements().map(j=>j.result),["hit"],"standard inclusive front timing still permits contact");
 }
 
 // Public collider state exposes only opaque tuning identity and semantic hazard data, never physical evidence/history.

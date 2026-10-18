@@ -1361,18 +1361,17 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const hand = event.hand === "right" ? "right" : "left";
       const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
       if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
-      // Time-based (swept) hit test: the contract-resolved transformed 3D
-      // capsule is the sole Flow hit volume, swept across the beat's full
-      // timing window using the bounded per-role pose history. Depth is
-      // automatic for any t inside the window; the earliest XY crossing
-      // registers the hit and carries which half of the window it fell in
+      // Time-based (swept) hit test: the resolved rotating saber reach
+      // is the sole Flow hit volume, swept across the independent note
+      // timing window using the bounded per-role pose history. The earliest
+      // XY crossing registers the hit and carries which half it fell in
       // (front = early, back = late). Projection into judge XY naturally
       // preserves local-axis roll and shortens under out-of-plane tilt; no
       // renderer/GLB bounds or fixed fallback apply.
       const volume = colliderVolumeSettings(eventSettings);
       const windowMs = Number(eventSettings.timingWindowMs);
       const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
-      const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs, volume.depthBackward) : null;
+      const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
       const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs);
       if (swept === null) continue;
       // A qualified near is only a private candidate: real capsule contact
@@ -1478,7 +1477,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const event of events) {
       if (!productionEventEligible(event)) continue;
       const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
-      const late = event.type === "note" && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs, Number(settings.colliderDepthBackward)) : colliderBackFaceTimestampMs(center, windowMs, event.type === "bomb" ? 1 : Number(settings.colliderDepthBackward));
+      const late = event.type === "note" && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
       if (event.type === "note" && !judgedIds.has(eventId) && timelinePositionMs > late) recordJudgementAt(event, "miss", pendingFlowNearIds.has(eventId) ? Object.freeze(["near_timing"]) : colliderMissDiagnostics(event), null, false, null);
       else if ((event.type === "arc" || event.type === "burst") && !judgedIds.has(eventId) && timelinePositionMs >= Number(event.centerTimestampMs)) recordJudgement(event, "ignored", Object.freeze([]), null, false);
       else if (event.type === "bomb" && timelinePositionMs > late && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === eventId)) {

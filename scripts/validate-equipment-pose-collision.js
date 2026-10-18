@@ -50,8 +50,8 @@ assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 8
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180.001), false, "Boxing outside timing boundary misses");
 
 // Future beats arrive from -Z, cross zero at the center, then exit through +Z.
-// Independent multipliers extend only their corresponding face; default 1 keeps
-// approximately the prior 180ms either-side window without a separate bad area.
+// Flow saber reach never changes that note timing slab; Boxing retains its
+// independent depth multipliers.
 for (const [mode, contact, target] of [
   ["Flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent],
   ["Boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]
@@ -61,28 +61,29 @@ for (const [mode, contact, target] of [
   assert.equal(contact(target, equipment, 820, 180), true, `${mode}: inclusive front face hits`);
   assert.equal(contact(target, equipment, 1180, 180), true, `${mode}: inclusive back face hits`);
   assert.equal(contact(target, equipment, 1180.001, 180), false, `${mode}: behind back face cannot hit`);
-  assert.equal(contact(target, equipment, 640, 180, { depthForward: 2 }), true, `${mode}: depth+ reaches future -Z`);
+  assert.equal(contact(target, equipment, 640, 180, { depthForward: 2 }), mode === "Boxing", `${mode}: extra forward reach changes only Boxing timing`);
   assert.equal(contact(target, equipment, 1181, 180, { depthForward: 2 }), false, `${mode}: depth+ cannot extend past +Z`);
   assert.equal(contact(target, equipment, 640, 180, { depthBackward: 2 }), false, `${mode}: depth- cannot extend future -Z`);
-  assert.equal(contact(target, equipment, 1360, 180, { depthBackward: 2 }), true, `${mode}: depth- extends past +Z`);
+  assert.equal(contact(target, equipment, 1360, 180, { depthBackward: 2 }), mode === "Boxing", `${mode}: extra rear reach changes only Boxing timing`);
   assert.equal(contact(target, equipment, 1360.001, 180, { depthBackward: 2 }), false, `${mode}: beyond extended back face misses`);
   const distant = pose("left_wrist", mode.toLowerCase(), { x: mode === "Flow" ? 1.8 : 1.9, y: 1, z: 0 });
   assert.equal(contact(target, distant, 1000, 180), false, `${mode}: default XY target outside`);
   assert.equal(contact(target, distant, 1000, 180, { scale: 2 }), true, `${mode}: scale expands XY contact`);
 }
-assert.equal(beatInsideColliderDepth(1000, 640, 180, 2, 1), true, "negative Z is future and forward depth extends it");
-assert.equal(colliderBackFaceTimestampMs(1000, 180, 2), 1360, "back face uses only the backward multiplier");
-assert.equal(effectivePlayNoteAfterWindowMs(1000,180,3),2000,"Play note floor exceeds default +540ms");
-assert.equal(effectivePlayNoteAfterWindowMs(1000,300,4),2200,"deeper configured deadline is retained");
+assert.equal(beatInsideColliderDepth(1000, 640, 180), false, "a future note remains ineligible beyond its timing window");
+assert.equal(beatInsideColliderDepth(1000, 820, 180), true, "Flow front face stays inclusive");
+assert.equal(colliderBackFaceTimestampMs(1000, 180), 1180, "Flow note late bound uses only the timing window");
+assert.equal(effectivePlayNoteAfterWindowMs(1000,180),2000,"Play note floor exceeds its normal late bound");
+assert.equal(effectivePlayNoteAfterWindowMs(1000,300),2000,"larger note timing window still respects Play floor");
 assert.equal(colliderDefaultDepthWu, 1.08, "shared contracts default face is 180ms × .006 WU/ms");
 const sharedBounds = resolveColliderBounds({ mode: "flow", center: { x: 1, y: 1, z: 0 }, halfWidth: .5, halfHeight: .5, settings: { ...colliderSettingsDefaults.flow, colliderScale: 2, colliderDepthForward: 2, colliderDepthBackward: 1 }, timingWindowMs: 180, speedWuPerMs: .006 });
-assert.deepEqual(sharedBounds, { minX: 0, maxX: 2, minY: 0, maxY: 2, minZ: -2.16, maxZ: 1.08 }, "gameplay and renderer resolve one contracted volume");
-assert.equal(isPointInsideColliderBounds({ x: 1, y: 1, z: -2.16 }, sharedBounds), true, "contracted front face inclusive");
+assert.deepEqual(sharedBounds, { minX: 0, maxX: 2, minY: 0, maxY: 2, minZ: -2.16, maxZ: 1.08 }, "contracts still resolve legacy world-Z bounds; these do not define Flow saber reach");
+assert.equal(isPointInsideColliderBounds({ x: 1, y: 1, z: -2.16 }, sharedBounds), true, "contract world-Z front face inclusive");
 for (const [mode, contact, target] of [["flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent], ["boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]]) {
   const equipment = pose("left_wrist", mode, { x: 1, y: 1, z: 0 });
   const widthMs = 250;
   const customized = { depthForward: 2, depthBackward: 1 };
-  assert.equal(contact(target, equipment, 500, widthMs, customized), true, `${mode}: custom window × depth+ front face`);
+  assert.equal(contact(target, equipment, 500, widthMs, customized), mode === "boxing", `${mode}: custom forward depth extends only Boxing's time face`);
   assert.equal(contact(target, equipment, 499.999, widthMs, customized), false, `${mode}: custom front face outside`);
   assert.equal(contact(target, equipment, 1250, widthMs, customized), true, `${mode}: custom backward face remains at +250ms`);
   assert.equal(contact(target, equipment, 1250.001, widthMs, customized), false, `${mode}: custom back face outside`);
@@ -119,7 +120,17 @@ for (const [label, anchorX, orientationZ] of [
     assert.equal(swept?.hitDepthHalf, t < 1000 ? "front" : "back", `${label} ${t}: temporal diagnostic remains honest`);
   }
 }
-// Reach factors change the pose-axis capsule, not merely the target's timing slab.
+// Reach factors change the pose-axis capsule, not the Flow note timing slab.
+const temporalBlade = pose("left_wrist", "flow", { x: 1, y: 1, z: 0 });
+for (const volume of [{ depthForward: 0.25, depthBackward: 0 }, { depthForward: 1, depthBackward: 1 }, { depthForward: 4, depthBackward: 4 }]) {
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, temporalBlade, 820, 180, volume), true, "early boundary remains inclusive regardless of reach");
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, temporalBlade, 819.999, 180, volume), false, "longer blade cannot admit an earlier note");
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, temporalBlade, 1180, 180, volume), true, "rear zero still permits inclusive late hits");
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, temporalBlade, 1180.001, 180, volume), false, "longer rear cannot delay the note deadline");
+  assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1180, pose: temporalBlade }], 180, volume)?.firstContactMs, 1180, "swept rear-zero late contact stays hittable");
+  assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1180.001, pose: temporalBlade }], 180, volume), null, "swept longer blade cannot extend timing");
+}
+assert.equal(effectivePlayNoteAfterWindowMs(1000, 300), 2000, "Play note deadline is independent of blade length");
 // A unit front ends at the contracted visible tip; rear zero is exactly the hilt.
 assert.equal(saberGeometry.length, 0.75, "the test measures visible local +X reach");
 for (const [label, angle, anchor] of [["hand-up", 90, { x: 1, y: -0.48, z: 0 }], ["hand-down", -90, { x: 1, y: 2.48, z: 0 }]]) {
@@ -129,13 +140,17 @@ for (const [label, angle, anchor] of [["hand-up", 90, { x: 1, y: -0.48, z: 0 }],
   assert.equal(at({ depthForward: 1, depthBackward: 0 }), false, `${label}: visible unit tip ends short of target`);
   assert.equal(at({ depthForward: 1.5, depthBackward: 0 }), true, `${label}: longer forward blade reaches target`);
   assert.equal(swept({ depthForward: 1, depthBackward: 0 })?.nearMiss, true, `${label}: shorter tip is near but not a hit`);
+  assert.equal(slice(blade, angle > 0 ? "up" : "down", { depthForward: 1, depthBackward: 0 }), null, `${label}: short noncontact has no slice hint`);
   assert.equal(swept({ depthForward: 1.5, depthBackward: 0 })?.firstContactMs, 1000, `${label}: longer tip scores swept contact`);
+  assert.ok(slice(blade, angle > 0 ? "up" : "down", { depthForward: 1.5, depthBackward: 0 }) !== null, `${label}: extended contact supplies a slice hint`);
 }
 const rearPose = pose("left_wrist", "flow", { x: 1.7, y: 1, z: 0 });
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, rearPose, 1000, 180, { depthForward: 1, depthBackward: 0 }), false, "rear zero starts at hilt, without hidden backward blade");
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, rearPose, 1000, 180, { depthForward: 1, depthBackward: 1 }), true, "positive rear reaches behind hilt");
 assert.deepEqual(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: rearPose }], 180, { depthForward: 1, depthBackward: 0 }), { nearMiss: true, firstNearMs: 1000 }, "rear zero retains Almost near evidence rather than a false hit");
 assert.equal(sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: rearPose }], 180, { depthForward: 1, depthBackward: 1 })?.firstContactMs, 1000, "positive rear turns that near into real contact");
+assert.equal(slice(rearPose, "right", { depthForward: 1, depthBackward: 0 }), null, "hilt-only near has no misleading slice hint");
+assert.ok(slice(rearPose, "right", { depthForward: 1, depthBackward: 1 }) !== null, "rearward scoring contact has a slice hint on that same capsule");
 const frontPose = pose("left_wrist", "flow", { x: -0.05, y: 1, z: 0 });
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, frontPose, 1000, 180, { depthForward: 0.25, depthBackward: 0 }), false, "shortened forward reach cannot touch beyond its tip");
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, frontPose, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "unit forward reaches visible tip at 0.75 times pose scale");

@@ -17,36 +17,35 @@ export const equipmentPoseAnchorEpsilonWu = 1e-6;
  * A beat approaches from future -Z, crosses the equipment judge plane at its
  * center timestamp, then exits through the past +Z face. Contracts owns the
  * world-Z volume: offset milliseconds multiplied by 0.006 world units/ms.
- * Reach below one keeps the existing timing slab unchanged, not a zero-width
- * deadline. Inclusive faces remain hittable; only strict back-face crossing misses.
+ * Flow note timing uses the independent base window regardless of saber reach.
+ * Inclusive faces remain hittable; only strict back-face crossing misses.
  * @param {number} centerTimestampMs
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
- * @param {number} [depthForward]
- * @param {number} [depthBackward]
  */
-export function beatInsideColliderDepth(centerTimestampMs, songTimeMs, timingWindowMs, depthForward = 1, depthBackward = 1) {
-  const bounds = resolveColliderBounds({ mode: "flow", center: { x: 0, y: 0, z: 0 }, halfWidth: 1, halfHeight: 1, settings: { ...colliderSettingsDefaults.flow, colliderDepthForward: Math.max(1, depthForward), colliderDepthBackward: Math.max(1, depthBackward) }, timingWindowMs, speedWuPerMs: 0.006 });
+export function beatInsideColliderDepth(centerTimestampMs, songTimeMs, timingWindowMs) {
+  const bounds = resolveColliderBounds({ mode: "flow", center: { x: 0, y: 0, z: 0 }, halfWidth: 1, halfHeight: 1, settings: colliderSettingsDefaults.flow, timingWindowMs, speedWuPerMs: 0.006 });
   return isPointInsideColliderBounds({ x: 0, y: 0, z: (songTimeMs - centerTimestampMs) * 0.006 }, bounds);
 }
 
-/** @param {number} centerTimestampMs @param {number} timingWindowMs @param {number} [depthBackward] */
+/** @param {number} centerTimestampMs @param {number} timingWindowMs @param {number} [depthBackward] Boxing-only timing factor; Flow calls without it. */
 export function colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, depthBackward = 1) {
-  return centerTimestampMs + timingWindowMs * Math.max(1, depthBackward);
+  return centerTimestampMs + timingWindowMs * depthBackward;
 }
 
 /**
  * Play-only note deadline: the complete pinned note must pass the
  * canonical athlete camera (Z=5, pitched down 5 degrees) before a full miss.
  * At 0.006 WU/ms, +1000ms places its center at Z=6, conservatively past
- * the pinned shape's -0.15 Z extent at maximum 2x scale. Larger configured
- * backward depths remain authoritative. This is not a public collider bound;
+ * the pinned shape's -0.15 Z extent at maximum 2x scale. Flow saber reach
+ * does not change its note deadline; Boxing retains its depth timing factor.
+ * This is not a public collider bound;
  * bombs, guards, and checkpoints retain their original windows.
  * @param {number} centerTimestampMs
  * @param {number} timingWindowMs
- * @param {number} depthBackward
+ * @param {number} [depthBackward] Boxing-only timing factor; Flow omits it.
  */
-export function effectivePlayNoteAfterWindowMs(centerTimestampMs, timingWindowMs, depthBackward) {
+export function effectivePlayNoteAfterWindowMs(centerTimestampMs, timingWindowMs, depthBackward = 1) {
   return Math.max(colliderBackFaceTimestampMs(centerTimestampMs, timingWindowMs, depthBackward), centerTimestampMs + 1000);
 }
 
@@ -137,7 +136,7 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  */
 function resolveTargetColliderBounds(mode, center, halfSize, timingWindowMs, volume) {
-  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: volume.scale ?? 1, colliderDepthForward: mode === "flow" ? Math.max(1, volume.depthForward ?? 1) : volume.depthForward ?? 1, colliderDepthBackward: mode === "flow" ? Math.max(1, volume.depthBackward ?? 1) : volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
+  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: volume.scale ?? 1, colliderDepthForward: mode === "flow" ? 1 : volume.depthForward ?? 1, colliderDepthBackward: mode === "flow" ? 1 : volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
 }
 
 /** @param {Point2} start @param {Point2} end @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */
@@ -205,10 +204,10 @@ function convexPolygonsContact(left, right) {
  *
  * A hit is no longer a single snapshot in time: the equipment is swept
  * through every song-time inside the beat's timing window
- * `[center - window*max(1,depthForward), afterWindowMs ?? center + window*max(1,depthBackward)]` and the
+ * `[center - window, afterWindowMs ?? center + window]` and the
  * beat's XY cell box is tested at each sampled and interpolated pose. The
- * depth condition is automatic — a beat's Z is `(t - center) * 0.006`, which
- * lies inside the collider Z-range exactly when t lies inside that window.
+ * Flow note timing is independent of reach: a beat's Z is
+ * `(t - center) * 0.006` inside the base timing slab.
  * Because the test integrates over the whole window, a late hit that the
  * old single-snapshot test tunnels through (sparse low-FPS samples that jump
  * from before the window to after it) is caught by the interpolation across
@@ -333,8 +332,8 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   if (history.length === 0) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
-  const windowStart = center - timingWindowMs * Math.max(1, volume.depthForward ?? 1);
-  const windowEnd = afterWindowMs ?? center + timingWindowMs * Math.max(1, volume.depthBackward ?? 1);
+  const windowStart = center - timingWindowMs;
+  const windowEnd = afterWindowMs ?? center + timingWindowMs;
   const contacts = [];
   /** @type {number[]} */ const sampleTimes = [];
   for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
@@ -410,9 +409,10 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
  * INTERNAL presentation hint, not judgement or snapshot authority. Call only
  * with the exact successful swept result for this event/history/window; a
  * near-miss, absent result, or non-finite contact time has no slice. The judge
- * tests an XY-projected capsule against a cell rectangle inside a time-depth
- * slab, NOT a continuous 3D solid collision. Resolve the full 3D pose at the
- * first sampled contact time, then choose the point on its projected blade
+ * tests the reach-adjusted, XY-projected capsule against a cell rectangle
+ * inside the independent note-timing slab, NOT a continuous 3D solid collision.
+ * Resolve the full 3D pose at the first sampled contact time, then choose the
+ * point on its projected blade
  * axis closest to the cell center among axis points within one capsule radius
  * of the rectangle. Ties choose the smaller axis parameter (start before end).
  * This point is a deterministic locus of the projected overlap, not a physical
@@ -434,7 +434,7 @@ export function internalFlowFirstContactSliceT(event, history, timingWindowMs, v
   if (!Number.isFinite(t) || !history.length || contact?.hitDepthHalf !== (t < Number(event.centerTimestampMs) ? "front" : "back")) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
-  if (t < center - timingWindowMs * Math.max(1, volume.depthForward ?? 1) || t > (afterWindowMs ?? center + timingWindowMs * Math.max(1, volume.depthBackward ?? 1))) return null;
+  if (t < center - timingWindowMs || t > (afterWindowMs ?? center + timingWindowMs)) return null;
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
   const capsule = resolveFlowSaberReach(resolvePoseAt(history, t), volume);
   const start = capsule.start; const end = capsule.end;
