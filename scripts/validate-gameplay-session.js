@@ -206,6 +206,28 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.equal(isGameplaySessionSnapshot(coordinator.getSnapshot().session), true);
 }
 
+// Genuine Test note misses must wait until the conservative offscreen deadline;
+// only notes/punches change, never Flow bombs or Boxing guard checkpoints.
+for (const [label, selected, note] of [
+  ["flow", variant("flow_colliders_v1", null), event("offscreen-flow", 1000, "note", { hand: "left", placement: 5 })],
+  ["boxing", variant("boxing_collider_v1", null), event("offscreen-boxing", 1000, "straight_left", { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } })]
+]) {
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `visual-offscreen-${label}` });
+  readyVisualTest(coordinator, [note], selected);
+  const interaction = visualTestInteraction(1, 500);
+  const send = (ms) => {
+    const sample = setAnchorPosition(setAnchorPosition(evidence(`offscreen-${label}-${ms}`, ms, []), "left_wrist", 3.4, 0), "right_wrist", 3.4, 0);
+    coordinator.advance({ timestampMs: ms, clock: clock(ms, true), input: productionInput(ms, sample), equipmentPoses: equipmentPosesForEvidence(sample, label), interaction });
+  };
+  for (const ms of [500, 1180, 1181, 1541, 1999, 2000]) {
+    send(ms);
+    assert.deepEqual(coordinator.getJudgements(), [], `${label} Test note stays pending through inclusive center+1000 at ${ms}`);
+  }
+  send(2001);
+  assert.deepEqual(coordinator.getJudgements().map(({ eventId, result, sessionPurpose, committedTimelinePositionMs }) => [eventId, result, sessionPurpose, committedTimelinePositionMs]), [[`offscreen-${label}`, "miss", "visual_test", 2001]], `${label} Test note misses strictly after offscreen deadline`);
+  assert.deepEqual(coordinator.getScorePartitions().map(({ ranked, localOnly, hits, misses }) => [ranked, localOnly, hits, misses]), [[false, true, 0, 1]], `${label} production Test remains unranked`);
+}
+
 // Visual Test production judgement is an exact, explicit, future-only authority; absence retains zero outcomes.
 {
   const flow = variant("flow_colliders_v1", null);
@@ -229,19 +251,22 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, missFrame), equipmentPoses: equipmentPosesForEvidence(missFrame, "flow"), interaction: visualTestInteraction(1, 850) });
   const finalHit = setAnchorPosition(evidence("visual-flow-final", 1600, []), "left_wrist", 1, 1);
   coordinator.advance({ timestampMs: 1600, clock: clock(1600, true), input: productionInput(1600, finalHit), equipmentPoses: equipmentPosesForEvidence(finalHit, "flow"), interaction: visualTestInteraction(1, 850) });
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-miss", "miss"], ["flow-after-miss", "hit"]]);
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-after-miss", "hit"]], "Flow Test miss remains pending while visible");
+  const laterFlow = setAnchorPosition(setAnchorPosition(evidence("visual-flow-offscreen", 2301, []), "left_wrist", 3.4, 2), "right_wrist", 3.4, 0);
+  coordinator.advance({ timestampMs: 2301, clock: clock(2301, true), input: productionInput(2301, laterFlow), equipmentPoses: equipmentPosesForEvidence(laterFlow, "flow"), interaction: visualTestInteraction(1, 850) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["flow-left-a", "hit"], ["flow-left-b", "hit"], ["flow-after-miss", "hit"], ["flow-miss", "miss"]]);
   // 4-tier scoring: the three swept hits keep the combo alive (x1, x2).
   // The flow-miss (right wrist at 3.4,0 — far from placement-6 cell [1.5,2.5]x[0.5,1.5])
   // is a full "miss" (no near-miss: hand was not close to the cell), so the
-  // combo breaks. flow-after-miss restarts the combo at x1.
-  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo, score: entry.score })), [{ ranked: false, localOnly: true, hits: 3, misses: 1, combo: 1, maxCombo: 2, score: 400 }]);
+  // combo breaks only after the late Test deadline, after the last hit.
+  assert.deepEqual(coordinator.getScorePartitions().map((entry) => ({ ranked: entry.ranked, localOnly: entry.localOnly, hits: entry.hits, misses: entry.misses, combo: entry.combo, maxCombo: entry.maxCombo, score: entry.score })), [{ ranked: false, localOnly: true, hits: 3, misses: 1, combo: 0, maxCombo: 3, score: 500 }]);
   // 0.0.96: the resolved tier is carried on the judgement record so the
   // renderer's target.tier can pick the correct feedback label.
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.tier]), [
     ["flow-left-a", "great"],
     ["flow-left-b", "great"],
-    ["flow-miss", "miss"],
-    ["flow-after-miss", "great"]
+    ["flow-after-miss", "great"],
+    ["flow-miss", "miss"]
   ], "judgement records carry the resolved 4-tier scoring tier");
 }
 
@@ -283,6 +308,9 @@ function readyPlaying(coordinator, events, selected = variant()) {
   coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, boxingExit), equipmentPoses: equipmentPosesForEvidence(boxingExit, "boxing"), interaction: visualTestInteraction(1, 900) });
   const boxingLate = setAnchorPosition(evidence("boxing-late", 1481, []), "left_wrist", 3.5, 0.5);
   coordinator.advance({ timestampMs: 1481, clock: clock(1481, true), input: productionInput(1481, boxingLate), equipmentPoses: equipmentPosesForEvidence(boxingLate, "boxing"), interaction: visualTestInteraction(1, 900) });
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result]), [["boxing-left", "hit"], ["boxing-right", "hit"]], "Boxer Test miss remains pending after base timing");
+  const boxingOffscreen = setAnchorPosition(evidence("boxing-offscreen", 2301, []), "left_wrist", 3.5, 0.5);
+  coordinator.advance({ timestampMs: 2301, clock: clock(2301, true), input: productionInput(2301, boxingOffscreen), equipmentPoses: equipmentPosesForEvidence(boxingOffscreen, "boxing"), interaction: visualTestInteraction(1, 900) });
   assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.sessionPurpose]), [["boxing-left", "hit", "visual_test"], ["boxing-right", "hit", "visual_test"], ["boxing-miss", "miss", "visual_test"]]);
   // 4-tier scoring: both swept chord hits land in the front half (great);
   // the true far-miss (left wrist at 3.5, targetCell 5 — far from the target)
@@ -290,7 +318,7 @@ function readyPlaying(coordinator, events, selected = variant()) {
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.ranked, entry.localOnly, entry.hits, entry.misses, entry.combo, entry.maxCombo, entry.score]), [[false, true, 2, 1, 0, 2, 300]]);
 }
 
-// A narrow Flow noncontact remains pending until the existing Miss boundary;
+// A narrow Flow noncontact remains pending until Test's offscreen Miss boundary;
 // later genuine capsule contact can supersede it with Great and a slice hint.
 // Placement 5 cell box: center (1.0, 1.0), half 0.5 -> [0.5,1.5]x[0.5,1.5].
 // Saber: length 0.75, radius 0.18. Wrist at judge (1.7, 1.0) -> capsule start
@@ -312,19 +340,22 @@ function readyPlaying(coordinator, events, selected = variant()) {
   const atLate = setAnchorPosition(evidence("near-miss-late", 1180, []), "left_wrist", 1.7, 1);
   coordinator.advance({ timestampMs: 1180, clock: clock(1180, true), input: productionInput(1180, atLate), equipmentPoses: equipmentPosesForEvidence(atLate, "flow"), interaction: visualTestInteraction(1, 900) });
   assert.deepEqual(coordinator.getJudgements(), [], "inclusive late bound still allows a real hit");
-  // Only after the existing strict late boundary does pending near become Almost.
-  const after = setAnchorPosition(evidence("near-miss-after", 1300, []), "left_wrist", 1.7, 1);
-  coordinator.advance({ timestampMs: 1300, clock: clock(1300, true), input: productionInput(1300, after), equipmentPoses: equipmentPosesForEvidence(after, "flow"), interaction: visualTestInteraction(1, 900) });
+  // At the old base deadline the near stays pending while the note is visible.
+  const beforeExit = setAnchorPosition(evidence("near-miss-before-exit", 1300, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 1300, clock: clock(1300, true), input: productionInput(1300, beforeExit), equipmentPoses: equipmentPosesForEvidence(beforeExit, "flow"), interaction: visualTestInteraction(1, 900) });
+  assert.deepEqual(coordinator.getJudgements(), [], "near remains pending until Test note is offscreen");
+  const after = setAnchorPosition(evidence("near-miss-after", 2001, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 2001, clock: clock(2001, true), input: productionInput(2001, after), equipmentPoses: equipmentPosesForEvidence(after, "flow"), interaction: visualTestInteraction(1, 900) });
   const judgements = coordinator.getJudgements();
   assert.equal(judgements.length, 1, "one judgement for the near-miss beat");
   assert.equal(judgements[0].eventId, "near-miss-beat");
   assert.equal(judgements[0].result, "miss", "near-miss resolves as a miss result");
   assert.deepEqual(judgements[0].diagnostics, ["near_timing"], "near-miss carries the near_timing diagnostic");
   assert.equal(judgements[0].tier, "almost", "final noncontact awards Almost without inventing blade contact");
-  assert.equal(judgements[0].committedTimelinePositionMs, 1300);
+  assert.equal(judgements[0].committedTimelinePositionMs, 2001);
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 0, 50, 1, 1]], "Almost awards 50 base points and keeps combo alive");
-  const repeat = setAnchorPosition(evidence("near-miss-repeat", 1400, []), "left_wrist", 1.7, 1);
-  coordinator.advance({ timestampMs: 1400, clock: clock(1400, true), input: productionInput(1400, repeat), equipmentPoses: equipmentPosesForEvidence(repeat, "flow"), interaction: visualTestInteraction(1, 900) });
+  const repeat = setAnchorPosition(evidence("near-miss-repeat", 2100, []), "left_wrist", 1.7, 1);
+  coordinator.advance({ timestampMs: 2100, clock: clock(2100, true), input: productionInput(2100, repeat), equipmentPoses: equipmentPosesForEvidence(repeat, "flow"), interaction: visualTestInteraction(1, 900) });
   assert.equal(coordinator.getJudgements().length, 1, "expired near cannot be judged twice");
 }
 
@@ -368,11 +399,11 @@ for (const [label, wristX, timeMs] of [
 {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "flow-near-then-far" });
   readyVisualTest(coordinator, [event("near", 1000, "note", { hand: "left", placement: 5 }), event("far", 1500, "note", { hand: "right", placement: 6 })], variant("flow_colliders_v1", null), { ...defaultFlowColliderSettings, colliderDepthBackward: 0 });
-  for (const [frame, timeMs, leftX] of [["seed", 800, 1.7], ["near", 1000, 1.7], ["far", 1700, 3.4]]) {
+  for (const [frame, timeMs, leftX] of [["seed", 800, 1.7], ["near", 1000, 1.7], ["far", 1700, 3.4], ["near-offscreen", 2001, 3.4], ["far-offscreen", 2501, 3.4]]) {
     const sample = setAnchorPosition(setAnchorPosition(evidence(`near-far-${frame}`, timeMs, []), "left_wrist", leftX, 1), "right_wrist", 3.4, 0);
     coordinator.advance({ timestampMs: timeMs, clock: clock(timeMs, true), input: productionInput(timeMs, sample), equipmentPoses: equipmentPosesForEvidence(sample, "flow"), interaction: visualTestInteraction(1, 800) });
   }
-  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.tier, entry.diagnostics]), [["near", "miss", "almost", ["near_timing"]], ["far", "miss", "miss", ["wrong_collider"]]], "near noncontact becomes Almost only at finalization; far remains Miss");
+  assert.deepEqual(coordinator.getJudgements().map((entry) => [entry.eventId, entry.result, entry.tier, entry.diagnostics]), [["near", "miss", "almost", ["near_timing"]], ["far", "miss", "miss", ["wrong_collider"]]], "near noncontact becomes Almost only after offscreen finalization; far remains Miss");
   assert.deepEqual(coordinator.getScorePartitions().map((entry) => [entry.hits, entry.misses, entry.score, entry.combo, entry.maxCombo]), [[1, 1, 50, 0, 1]], "Almost gives 50 and preserves combo until far Miss breaks it");
 }
 

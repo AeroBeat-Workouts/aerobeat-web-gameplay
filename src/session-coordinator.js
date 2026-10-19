@@ -1477,7 +1477,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const event of events) {
       if (!productionEventEligible(event)) continue;
       const eventId = String(event.eventId); const settings = flowColliderSettingsForEvent(event); const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
-      const late = event.type === "note" && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
+      const late = event.type === "note" ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
       if (event.type === "note" && !judgedIds.has(eventId) && timelinePositionMs > late) recordJudgementAt(event, "miss", pendingFlowNearIds.has(eventId) ? Object.freeze(["near_timing"]) : colliderMissDiagnostics(event), null, false, null);
       else if ((event.type === "arc" || event.type === "burst") && !judgedIds.has(eventId) && timelinePositionMs >= Number(event.centerTimestampMs)) recordJudgement(event, "ignored", Object.freeze([]), null, false);
       else if (event.type === "bomb" && timelinePositionMs > late && !hazardOutcomes.some((outcome) => outcome.kind === "bomb" && outcome.eventId === eventId)) {
@@ -1663,7 +1663,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const action = expectedAction(event);
       if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
       const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
-      const late = PUNCH_ACTIONS.includes(action) && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
+      const late = PUNCH_ACTIONS.includes(action) ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
       if (action === "guard" && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
         if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);
