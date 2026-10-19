@@ -61,42 +61,37 @@ function send(c, songMs, left, right, nose, frameId, options = {}) {
 }
 const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]);
 
-// Scored Play punches share the fully-out-of-view +1000ms note deadline;
-// forward timing and deeper configured after-windows retain their authority.
+// Scored Play punches keep the independent ±base hit eligibility and
+// fully-out-of-view +1000ms miss deadline regardless of cylinder depth.
 {
   const event = beat("depth-punch", 1000, "straight_left", { placement: 5 });
   const early = ready([event], settings({ colliderDepthForward: 2 }));
   send(early, 640, [1, 1], [3, 1], [3, 2]);
-  assert.deepEqual(early.getJudgements().map(j => j.result), ["hit"], "forward -Z face admits early punch");
+  assert.equal(early.getJudgements().length, 0, "depth does not widen independent early timing");
+  send(early, 900, [1, 1], [3, 1], [3, 2]);
+  assert.deepEqual(early.getJudgements().map(j => j.result), ["hit"], "front/back cylinder contacts inside base timing");
   for (const depth of [1, 2, 3]) {
     const missed = ready([event], settings({ colliderDepthBackward: depth }));
     for(const at of [1540,1999,2000]) {send(missed,at,[3,1],[3,1],[3,2]);assert.equal(missed.getJudgements().length,0,`Play punch pending at ${at}`);}
     send(missed,2000.001,[3,1],[3,1],[3,2]);assert.deepEqual(missed.getJudgements().map(j=>j.result),["miss"]);
-    const late=ready([event],settings({colliderDepthBackward:depth}));send(late,1999,[1,1],[3,1],[3,2]);assert.deepEqual(late.getJudgements().map(j=>j.result),["hit"]);
+    const late=ready([event],settings({colliderDepthBackward:depth}));send(late,1999,[1,1],[3,1],[3,2]);assert.equal(late.getJudgements().length,0,"late visible note stays pending, but does not score outside its base timing window");
   }
   const larger=ready([event],settings({timingWindowMs:300,colliderDepthBackward:5}));
-  send(larger,2000.001,[3,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0);
-  send(larger,2200,[1,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["hit"]);
-  for (const depth of [0, 0.00001, 0.5, 5]) {
+  send(larger,2000,[3,1],[3,1],[3,2]);assert.equal(larger.getJudgements().length,0);
+  send(larger,2000.001,[3,1],[3,1],[3,2]);assert.deepEqual(larger.getJudgements().map(j=>j.result),["miss"],"depth does not postpone Play miss beyond its view deadline");
+  for (const depth of [0, 0.00001, 0.5, 5, 9999999]) {
     const front = ready([event], settings({ colliderDepthForward: depth }));
-    const face = 1000 - 180 * depth;
-    if (face > 0) {
-      send(front, face - 0.001, [1, 1], [3, 1], [3, 2]);
-      assert.equal(front.getJudgements().length, 0, `forward ${depth} cannot hit before its scored face`);
-    }
-    send(front, Math.max(face, 3), [1, 1], [3, 1], [3, 2]);
-    assert.deepEqual(front.getJudgements().map(j => j.result), ["hit"], `forward ${depth} scores at or after its inclusive face`);
+    send(front, 819, [1, 1], [3, 1], [3, 2]);
+    assert.equal(front.getJudgements().length, 0, `forward ${depth} cannot score before the independent base window`);
+    send(front, 1000, [1, 1], [3, 1], [3, 2]);
+    assert.deepEqual(front.getJudgements().map(j => j.result), ["hit"], `forward ${depth} scores the note at its center`);
   }
-  const farFront = ready([event], settings({ colliderDepthForward: 9999999 }));
-  send(farFront, 3, [1, 1], [3, 1], [3, 2]);
-  assert.deepEqual(farFront.getJudgements().map(j => j.result), ["hit"], "huge forward depth scores at first playable timestamp");
   for (const depth of [0, 0.00001, 0.5, 5]) {
     const rear = ready([event], settings({ colliderDepthBackward: depth }));
-    const deadline = Math.max(2000, 1000 + 180 * depth);
-    send(rear, deadline, [3, 1], [3, 1], [3, 2]);
-    assert.equal(rear.getJudgements().length, 0, `rear ${depth} remains pending at inclusive Play deadline`);
-    send(rear, deadline + 0.001, [3, 1], [3, 1], [3, 2]);
-    assert.deepEqual(rear.getJudgements().map(j => j.result), ["miss"], `rear ${depth} misses only after scored deadline`);
+    send(rear, 2000, [3, 1], [3, 1], [3, 2]);
+    assert.equal(rear.getJudgements().length, 0, `rear ${depth} remains pending at Play deadline`);
+    send(rear, 2000.001, [3, 1], [3, 1], [3, 2]);
+    assert.deepEqual(rear.getJudgements().map(j => j.result), ["miss"], `rear ${depth} cannot postpone Play miss`);
   }
 }
 

@@ -1579,14 +1579,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
         const placement = Number(event.spatialTarget.targetCell);
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
-        // Time-based (swept) hit test: the exact contract-resolved 3D glove
-        // OBB is projected to its XY convex hull and SAT-tested against the
-        // target at every pose sampled and interpolated inside the beat's
-        // timing window; no enclosing AABB fallback.
+        // Swept test: the shared flat-ended glove cylinder intersects the
+        // authored XY note rectangle at its moving song-time Z. Depth controls
+        // cylinder length only; the timing window is independent.
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
         const volume = colliderVolumeSettings(boxingColliderSettings);
         const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
-        const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs, volume.depthBackward) : null;
+        const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
         const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs);
 
         if (swept === null) continue;
@@ -1664,7 +1663,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const action = expectedAction(event);
       if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
       const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
-      const late = PUNCH_ACTIONS.includes(action) && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs, Number(settings.colliderDepthBackward)) : colliderBackFaceTimestampMs(center, windowMs, Number(settings.colliderDepthBackward));
+      const late = PUNCH_ACTIONS.includes(action) && sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
       if (action === "guard" && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
         if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);

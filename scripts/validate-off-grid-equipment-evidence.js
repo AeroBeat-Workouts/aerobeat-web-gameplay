@@ -67,8 +67,8 @@ const equipmentPoses = (sample, mode = "flow") => ["left_wrist", "right_wrist"].
   const boxingCases = [
     ["left", 0, 1, -0.500001, 1, -0.5 - gloveGeometry.x - 0.000001, 1],
     ["right", 3, 1, 3.500001, 1, 3.5 + gloveGeometry.x + 0.000001, 1],
-    ["top", 1, 2, 1, 2.500001, 1, 2.5 + gloveGeometry.y + 0.000001],
-    ["bottom", 1, 0, 1, -0.500001, 1, -0.5 - gloveGeometry.y - 0.000001]
+    ["top", 1, 2, 1, 2.500001, 1, 2.5 + gloveGeometry.x + 0.000001],
+    ["bottom", 1, 0, 1, -0.500001, 1, -0.5 - gloveGeometry.x - 0.000001]
   ];
   for (const [side, targetX, targetY, hitX, hitY, missX, missY] of boxingCases) {
     const target = { centerTimestampMs: 1000, x: targetX, y: targetY };

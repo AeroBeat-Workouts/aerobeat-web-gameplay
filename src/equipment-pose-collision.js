@@ -1,6 +1,6 @@
 // @ts-check
 
-import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveObb, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
+import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveCylinder, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
 import { flowSolidBladeRadiusWu } from "@aerobeat/web-contracts/equipment-contracts";
 import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collision.js";
 
@@ -10,7 +10,7 @@ import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collisio
 /** @typedef {"front" | "back"} HitDepthHalf */
 
 /** Settled contracts revision whose resolved-pose semantics this judge consumes. */
-export const equipmentPoseContractsCommit = "51c2b42805f5aa008386dc8bc779cfad8542af34";
+export const equipmentPoseContractsCommit = "9544415ee5e42deaa4de99967c961d158d6720d7";
 /** Tight XY agreement required between a resolved pose anchor and measured wrist. */
 export const equipmentPoseAnchorEpsilonWu = 1e-6;
 
@@ -94,7 +94,7 @@ function resolveFlowSaberReach(pose, volume) {
  */
 export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, timingWindowMs, volume = {}) {
   const box = flowNoteCellBox(event);
-  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
+  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
   if (!isPointInsideColliderBounds({ x: box.centerX, y: box.centerY, z: (songTimeMs - Number(event.centerTimestampMs)) * 0.006 }, bounds)) return false;
   const capsule = resolveFlowSaberReach(pose, volume);
   if (volume.scale === 0) return false;
@@ -107,8 +107,8 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
 }
 
 /**
- * Project the exact transformed 3D glove OBB to its XY convex hull, then use SAT
- * against the target rectangle. Touching is collision; no enclosing AABB is used.
+ * Intersect the flat-ended rotating 3D glove cylinder with the authored note
+ * rectangle at its moving Z. Timing eligibility is independent of cylinder depth.
  * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
  * @param {unknown} pose
  * @param {number} songTimeMs
@@ -117,39 +117,65 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
  */
 export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, timingWindowMs, volume = {}) {
   if (volume.scale === 0) return false;
-  const bounds = resolveTargetColliderBounds("boxing", target, { x: 0.5, y: 0.5 }, timingWindowMs, volume);
-  if (!isPointInsideColliderBounds({ x: target.x, y: target.y, z: (songTimeMs - target.centerTimestampMs) * 0.006 }, bounds)) return false;
-  const obb = resolveGloveObb(pose);
-  const corners = [];
-  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
-    corners.push(Object.freeze({
-      x: obb.center.x + sx * obb.axes.x.x * obb.halfExtents.x + sy * obb.axes.y.x * obb.halfExtents.y + sz * obb.axes.z.x * obb.halfExtents.z,
-      y: obb.center.y + sx * obb.axes.x.y * obb.halfExtents.x + sy * obb.axes.y.y * obb.halfExtents.y + sz * obb.axes.z.y * obb.halfExtents.z
-    }));
+  return boxingContactAtEligibleTime(target, pose, songTimeMs, timingWindowMs, volume, null);
+}
+
+/** Play's later visibility deadline extends only eligibility, never glove depth. */
+function boxingContactAtEligibleTime(target, pose, songTimeMs, timingWindowMs, volume, afterWindowMs) {
+  if (songTimeMs < target.centerTimestampMs - timingWindowMs || songTimeMs > (afterWindowMs ?? target.centerTimestampMs + timingWindowMs)) return false;
+  const cylinder = resolveGloveCylinder(pose, volume);
+  const z = (songTimeMs - target.centerTimestampMs) * 0.006;
+  if (!Number.isFinite(z)) throw new TypeError("boxing_target_geometry_nonfinite");
+  return cylinderContactsNoteRectangle(cylinder, target, z);
+}
+
+/**
+ * Minimum distance from the finite cylinder AXIS to the note's XY rectangle
+ * in its Z plane. A point at the nearest axis parameter is compared with the
+ * radius; clamping the parameter to [0,1] gives genuinely flat end caps.
+ * The squared XY point-to-box distance plus Z separation is convex in t;
+ * ternary minimization covers tilted and axis-parallel poses alike.
+ * @param {Readonly<{start:{x:number,y:number,z:number},end:{x:number,y:number,z:number},radius:number}>} cylinder
+ * @param {Readonly<{x:number,y:number}>} target
+ * @param {number} z
+ */
+function cylinderContactsNoteRectangle(cylinder, target, z) {
+  const dx = cylinder.end.x - cylinder.start.x;
+  const dy = cylinder.end.y - cylinder.start.y;
+  const dz = cylinder.end.z - cylinder.start.z;
+  const minX = target.x - 0.5; const maxX = target.x + 0.5;
+  const minY = target.y - 0.5; const maxY = target.y + 0.5;
+  const distanceSquared = (t) => {
+    const px = cylinder.start.x + dx * t;
+    const py = cylinder.start.y + dy * t;
+    const pz = cylinder.start.z + dz * t;
+    const gapX = Math.max(minX - px, 0, px - maxX);
+    const gapY = Math.max(minY - py, 0, py - maxY);
+    const gapZ = pz - z;
+    return gapX * gapX + gapY * gapY + gapZ * gapZ;
+  };
+  let low = 0; let high = 1;
+  for (let index = 0; index < 80; index += 1) {
+    const a = low + (high - low) / 3;
+    const b = high - (high - low) / 3;
+    if (distanceSquared(a) <= distanceSquared(b)) high = b; else low = a;
   }
-  const hull = convexHull(corners);
-  const rectangle = Object.freeze([
-    Object.freeze({ x: bounds.minX, y: bounds.minY }),
-    Object.freeze({ x: bounds.maxX, y: bounds.minY }),
-    Object.freeze({ x: bounds.maxX, y: bounds.maxY }),
-    Object.freeze({ x: bounds.minX, y: bounds.maxY })
-  ]);
-  return convexPolygonsContact(hull, rectangle);
+  const distance = Math.min(distanceSquared(0), distanceSquared(1), distanceSquared((low + high) / 2));
+  if (!Number.isFinite(distance) || !Number.isFinite(cylinder.radius * cylinder.radius)) throw new TypeError("boxing_target_geometry_nonfinite");
+  return Math.sqrt(distance) <= cylinder.radius + Number.EPSILON;
 }
 
 /**
  * Use the shared contracts bounds for timing and the fixed base note cell in
  * Flow; its saber controls only resize the blade, never the target or slab.
- * Boxing keeps its historical target scale/depth. Wireframe visibility never
- * alters either mode's scoring.
- * @param {"flow"|"boxing"} mode
+ * Boxer scoring uses its own fixed authored target and shared cylinder.
+ * @param {"flow"} mode
  * @param {Point2} center
  * @param {Point2} halfSize
  * @param {number} timingWindowMs
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  */
-function resolveTargetColliderBounds(mode, center, halfSize, timingWindowMs, volume) {
-  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: { ...colliderSettingsDefaults[mode], colliderScale: mode === "flow" ? 1 : volume.scale ?? 1, colliderDepthForward: mode === "flow" ? 1 : volume.depthForward ?? 1, colliderDepthBackward: mode === "flow" ? 1 : volume.depthBackward ?? 1 }, timingWindowMs, speedWuPerMs: 0.006 });
+function resolveTargetColliderBounds(mode, center, halfSize, timingWindowMs) {
+  return resolveColliderBounds({ mode, center: { x: center.x, y: center.y, z: 0 }, halfWidth: halfSize.x, halfHeight: halfSize.y, settings: colliderSettingsDefaults[mode], timingWindowMs, speedWuPerMs: 0.006 });
 }
 
 /** @param {Point2} start @param {Point2} end @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */
@@ -181,35 +207,6 @@ function segmentsContact(a, b, c, d) {
   if (Math.abs(cdA) <= epsilon && onSegment(a, c, d)) return true;
   if (Math.abs(cdB) <= epsilon && onSegment(b, c, d)) return true;
   return ((abC > epsilon && abD < -epsilon) || (abC < -epsilon && abD > epsilon)) && ((cdA > epsilon && cdB < -epsilon) || (cdA < -epsilon && cdB > epsilon));
-}
-
-/** @param {readonly Point2[]} points @returns {readonly Point2[]} */
-function convexHull(points) {
-  const ordered = [...points].sort((left, right) => left.x - right.x || left.y - right.y);
-  const unique = ordered.filter((point, index) => index === 0 || point.x !== ordered[index - 1].x || point.y !== ordered[index - 1].y);
-  if (unique.length <= 2) return Object.freeze(unique);
-  const cross = (origin, left, right) => (left.x - origin.x) * (right.y - origin.y) - (left.y - origin.y) * (right.x - origin.x);
-  const half = (source) => { const result = []; for (const point of source) { while (result.length >= 2 && cross(result[result.length - 2], result[result.length - 1], point) <= 0) result.pop(); result.push(point); } return result; };
-  const lower = half(unique); const upper = half([...unique].reverse());
-  lower.pop(); upper.pop();
-  return Object.freeze([...lower, ...upper]);
-}
-
-/** @param {readonly Point2[]} left @param {readonly Point2[]} right */
-function convexPolygonsContact(left, right) {
-  if (left.length === 0 || right.length === 0) return false;
-  const axes = [];
-  for (const polygon of [left, right]) for (let index = 0; index < polygon.length; index += 1) {
-    const start = polygon[index]; const end = polygon[(index + 1) % polygon.length];
-    const dx = end.x - start.x; const dy = end.y - start.y;
-    if (Math.hypot(dx, dy) > Number.EPSILON) axes.push(Object.freeze({ x: -dy, y: dx }));
-  }
-  for (const axis of axes) {
-    const project = (polygon) => { let min = Number.POSITIVE_INFINITY; let max = Number.NEGATIVE_INFINITY; for (const point of polygon) { const value = point.x * axis.x + point.y * axis.y; min = Math.min(min, value); max = Math.max(max, value); } return { min, max }; };
-    const a = project(left); const b = project(right);
-    if (a.max < b.min || b.max < a.min) return false;
-  }
-  return true;
 }
 
 /* ------------------------------------------------------------------------
@@ -290,9 +287,9 @@ export function lerpResolvedEquipmentPose(start, target, progress) {
   });
 }
 
-/** @param {DataRecord} event @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume @param {number} timingWindowMs */
+/** @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box @param {unknown} pose @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume @param {number} timingWindowMs */
 function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
-  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
+  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
   const capsule = resolveFlowSaberReach(pose, volume);
   if (volume.scale === 0) return false;
   return segmentContactsRectangle(
@@ -301,27 +298,6 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
     bounds,
     capsule.radius
   );
-}
-
-/** @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target @param {ResolvedPose} pose @param {number} timingWindowMs @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume */
-function boxingSweptContactAtPose(target, pose, timingWindowMs, volume) {
-  const bounds = resolveTargetColliderBounds("boxing", target, { x: 0.5, y: 0.5 }, timingWindowMs, volume);
-  const obb = resolveGloveObb(pose);
-  const corners = [];
-  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
-    corners.push(Object.freeze({
-      x: obb.center.x + sx * obb.axes.x.x * obb.halfExtents.x + sy * obb.axes.y.x * obb.halfExtents.y + sz * obb.axes.z.x * obb.halfExtents.z,
-      y: obb.center.y + sx * obb.axes.x.y * obb.halfExtents.x + sy * obb.axes.y.y * obb.halfExtents.y + sz * obb.axes.z.y * obb.halfExtents.z
-    }));
-  }
-  const hull = convexHull(corners);
-  const rectangle = Object.freeze([
-    Object.freeze({ x: bounds.minX, y: bounds.minY }),
-    Object.freeze({ x: bounds.maxX, y: bounds.minY }),
-    Object.freeze({ x: bounds.maxX, y: bounds.maxY }),
-    Object.freeze({ x: bounds.minX, y: bounds.maxY })
-  ]);
-  return convexPolygonsContact(hull, rectangle);
 }
 
 /**
@@ -340,7 +316,7 @@ function boxingSweptContactAtPose(target, pose, timingWindowMs, volume) {
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
- * @param {number | null} [afterWindowMs] Play note deadline; null retains the original volume.
+ * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  */
 export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null) {
   if (history.length === 0) return null;
@@ -449,7 +425,7 @@ export function internalFlowFirstContactSliceT(event, history, timingWindowMs, v
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
   if (t < center - timingWindowMs || t > (afterWindowMs ?? center + timingWindowMs)) return null;
-  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs, volume);
+  const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
   const capsule = resolveFlowSaberReach(resolvePoseAt(history, t), volume);
   const start = capsule.start; const end = capsule.end;
   if (volume.scale === 0 || !segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
@@ -506,29 +482,33 @@ function saberNearCell(capsule, box, margin) {
 /**
  * Swept hit test for one boxing target against a bounded ascending
  * resolved-pose history. Same semantics as
- * {@link sweptSaberContactsFlowTarget}; the glove OBB XY convex hull is
- * tested at each sampled and interpolated pose.
+ * {@link sweptSaberContactsFlowTarget}; the exact rotated 3D glove cylinder
+ * is tested against the moving note rectangle at every sampled time.
  *
  * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
- * @param {number | null} [afterWindowMs] Play note deadline; null retains the original volume.
+ * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  */
 export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}, afterWindowMs = null) {
   if (volume.scale === 0 || history.length === 0) return null;
   const center = Number(target.centerTimestampMs);
-  const windowStart = center - timingWindowMs * (volume.depthForward ?? 1);
-  const windowEnd = afterWindowMs ?? center + timingWindowMs * (volume.depthBackward ?? 1);
+  const windowStart = center - timingWindowMs;
+  const windowEnd = afterWindowMs ?? center + timingWindowMs;
   const contacts = [];
   /** @type {number[]} */ const sampleTimes = [];
   for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
   const probe = (t) => {
     if (t < windowStart || t > windowEnd) return;
     const pose = resolvePoseAt(history, t);
-    if (boxingSweptContactAtPose(target, pose, timingWindowMs, volume)) contacts.push(t);
+    if (boxingContactAtEligibleTime(target, pose, t, timingWindowMs, volume, afterWindowMs)) contacts.push(t);
   };
   for (const t of sampleTimes) probe(t);
+  // Moving Z can intersect the flat caps between measured frames even when
+  // the pose is stationary. Probe the center and eligible timing boundaries.
+  const firstTime = history[0].t; const lastTime = history[history.length - 1].t;
+  for (const boundary of [windowStart, center, windowEnd]) if (boundary >= firstTime && boundary <= lastTime) probe(boundary);
   for (let index = 0; index < history.length - 1; index += 1) {
     const from = history[index]; const to = history[index + 1];
     const spanStart = Math.max(windowStart, from.t);
@@ -539,7 +519,7 @@ export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowM
       const t = from.t + (to.t - from.t) * (step / steps);
       if (t < windowStart || t > windowEnd) continue;
       const pose = resolvePoseAt(history, t);
-      if (boxingSweptContactAtPose(target, pose, timingWindowMs, volume)) { contacts.push(t); break; }
+      if (boxingContactAtEligibleTime(target, pose, t, timingWindowMs, volume, afterWindowMs)) { contacts.push(t); break; }
     }
   }
   if (contacts.length === 0) return null;

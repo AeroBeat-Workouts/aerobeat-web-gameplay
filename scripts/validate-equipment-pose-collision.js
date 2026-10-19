@@ -15,7 +15,7 @@ const boxingTarget = { centerTimestampMs: 1000, x: 1, y: 1 };
 const flowContact = (entry, songTimeMs = 1000) => resolvedSaberCapsuleContactsFlowTarget(flowEvent, entry, songTimeMs, 180);
 const boxingContact = (entry, songTimeMs = 1000) => resolvedGloveObbContactsBoxingTarget(boxingTarget, entry, songTimeMs, 180);
 
-assert.equal(equipmentPoseContractsCommit, "51c2b42805f5aa008386dc8bc779cfad8542af34", "pose semantics stay pinned to latest contracts main");
+assert.equal(equipmentPoseContractsCommit, "9544415ee5e42deaa4de99967c961d158d6720d7", "pose semantics stay pinned to latest contracts main");
 assert.equal(equipmentPoseAnchorEpsilonWu, 1e-6, "the strict measured-anchor epsilon is documented and stable");
 
 // Flow uses the exact transformed capsule projection for both roles and canonical scales.
@@ -34,42 +34,54 @@ assert.equal(flowContact(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { scal
 assert.equal(flowContact(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }), 820), true, "Flow early timing boundary is inclusive");
 assert.equal(flowContact(pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }), 1180.001), false, "Flow outside timing boundary misses");
 
-// Boxing uses exact projected OBB convex hull/SAT, including transformed Z extent.
+// Boxing must scale its glove, not the target: the old target-scale OBB path
+// incorrectly misses this contact at Scale .5 and accepts it at Scale 2.
+const scaleEdge = pose("left_wrist", "boxing", { x: 1.65, y: 1, z: 0 });
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, scaleEdge, 1000, 180, { scale: .5 }), true, "Scale .5 glove still reaches the fixed note edge");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, scaleEdge, 1000, 180, { scale: 1 }), true, "Scale 1 glove radius contacts fixed note rectangle");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, scaleEdge, 1000, 180, { scale: 2 }), true, "Scale 2 increases glove radius");
+
+// The 3D cylinder tests the note at its moving Z; XY rotation around local Z
+// leaves its circular cross-section unchanged, while X/Y tilts move its axis.
 for (const role of ["left_wrist", "right_wrist"]) {
   for (const scale of [0.75, 1, 2]) assert.equal(boxingContact(pose(role, "boxing", { x: 1, y: 1, z: 0 }, { scale })), true, `${role} scale ${scale} center contact`);
 }
-assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.84, y: 1, z: 0 })), true, "glove projected hull exact touch counts");
-assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.840001, y: 1, z: 0 })), false, "glove projected hull just miss stays outside");
-assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.78, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), true, "Z swing rotates glove XY half extents");
-assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.780001, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), false, "rotated glove exact projected edge remains sharp");
-assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1.79, z: 0 }, { orientation: orientation(90, 0, 0) })), true, "X roll projects glove Z extent and offset into judge Y");
-assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.79, y: 1, z: 0 }, { orientation: orientation(0, 90, 0) })), true, "Y tilt projects glove Z extent and offset into judge X");
+assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.84, y: 1, z: 0 })), true, "cylinder radius exact XY touch counts");
+assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.840001, y: 1, z: 0 })), false, "outside radius misses");
+assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.84, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), true, "local Z roll leaves circular cross-section unchanged");
+assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.840001, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), false, "rolled cylinder retains precise XY edge");
+const pitchedX = pose("left_wrist", "boxing", { x: 1, y: 1.8, z: 0 }, { orientation: orientation(90, 0, 0) });
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "collapsed axis has no hidden length");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "rotated front reaches toward target Y");
+const pitchedY = pose("left_wrist", "boxing", { x: 1.8, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "Y-tilted zero length stays outside target");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "Y-tilted front follows local Z");
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.2, y: 1.1, z: 0 }, { scale: 0.75, orientation: orientation(25, 35, 65) })), true, "combined glove quaternion resolves deterministically");
-assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.9, y: 1.9, z: 0 }, { orientation: orientation(0, 0, 45) })), false, "rotated-hull corner misses even though its enclosing AABB overlaps the target");
-assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 820), true, "Boxing early timing boundary is inclusive");
-assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180.001), false, "Boxing outside timing boundary misses");
+assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.9, y: 1.9, z: 0 }, { orientation: orientation(0, 0, 45) })), false, "circular corner misses outside true radius");
+assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 820), false, "moving note Z=-1.08 is beyond front cap");
+assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180), false, "moving note Z=+1.08 is beyond back cap");
+assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180.001), false, "outside independent timing boundary misses");
 
-// Future beats arrive from -Z, cross zero at the center, then exit through +Z.
-// Flow saber reach never changes that note timing slab; Boxing retains its
-// independent depth multipliers.
-for (const [mode, contact, target] of [
-  ["Flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent],
-  ["Boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]
-]) {
-  const equipment = pose("left_wrist", mode.toLowerCase(), { x: 1, y: 1, z: 0 });
-  assert.equal(contact(target, equipment, 819, 180), false, `${mode}: beyond front face cannot hit`);
-  assert.equal(contact(target, equipment, 820, 180), true, `${mode}: inclusive front face hits`);
-  assert.equal(contact(target, equipment, 1180, 180), true, `${mode}: inclusive back face hits`);
-  assert.equal(contact(target, equipment, 1180.001, 180), false, `${mode}: behind back face cannot hit`);
-  assert.equal(contact(target, equipment, 640, 180, { depthForward: 2 }), mode === "Boxing", `${mode}: extra forward reach changes only Boxing timing`);
-  assert.equal(contact(target, equipment, 1181, 180, { depthForward: 2 }), false, `${mode}: depth+ cannot extend past +Z`);
-  assert.equal(contact(target, equipment, 640, 180, { depthBackward: 2 }), false, `${mode}: depth- cannot extend future -Z`);
-  assert.equal(contact(target, equipment, 1360, 180, { depthBackward: 2 }), mode === "Boxing", `${mode}: extra rear reach changes only Boxing timing`);
-  assert.equal(contact(target, equipment, 1360.001, 180, { depthBackward: 2 }), false, `${mode}: beyond extended back face misses`);
-  const distant = pose("left_wrist", mode.toLowerCase(), { x: mode === "Flow" ? 1.54 : 1.9, y: 1, z: 0 });
-  assert.equal(contact(target, distant, 1000, 180), false, `${mode}: default XY target outside`);
-  assert.equal(contact(target, distant, 1000, 180, { scale: 2 }), true, `${mode}: scale expands the scored Flow blade or Boxing target, respectively`);
+// Flow remains XY-projected with its own timing slab. Boxing intersects a
+// moving XY note face in 3D, with independent ±base timing eligibility.
+const flowAt = pose("left_wrist", "flow", { x: 1, y: 1, z: 0 });
+assert.equal(flowContact(flowAt, 819), false);
+assert.equal(flowContact(flowAt, 820), true);
+assert.equal(flowContact(flowAt, 1180), true);
+assert.equal(flowContact(flowAt, 1180.001), false);
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, flowAt, 640, 180, { depthForward: 2 }), false);
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pose("left_wrist", "flow", { x: 1.54, y: 1, z: 0 }), 1000, 180, { scale: 2 }), true);
+const boxerAt = pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 });
+for (const volume of [{ depthForward: 0, depthBackward: 0 }, { depthForward: 2, depthBackward: 3 }]) {
+  assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 819, 180, volume), false, "depth cannot admit before base timing");
+  assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1181, 180, volume), false, "depth cannot admit after base timing");
 }
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 890, 180, { depthForward: 1, depthBackward: 1 }), true, "extended rear reaches early moving Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 890, 180, { depthForward: 1, depthBackward: 0 }), false, "rear zero cannot reach early note");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1130, 180, { depthForward: 1, depthBackward: 0 }), false, "unit front cannot reach late note Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1130, 180, { depthForward: 2, depthBackward: 0 }), true, "positive front reaches later moving Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pose("left_wrist", "boxing", { x: 1.9, y: 1, z: 0 }), 1000, 180), false);
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pose("left_wrist", "boxing", { x: 1.9, y: 1, z: 0 }), 1000, 180, { scale: 2 }), true, "scale grows cylinder not authored rectangle");
 assert.equal(beatInsideColliderDepth(1000, 640, 180), false, "a future note remains ineligible beyond its timing window");
 assert.equal(beatInsideColliderDepth(1000, 820, 180), true, "Flow front face stays inclusive");
 assert.equal(colliderBackFaceTimestampMs(1000, 180), 1180, "Flow note late bound uses only the timing window");
@@ -84,15 +96,9 @@ assert.equal(isColliderSettings(zeroRearContractSettings), true, "contract bound
 const zeroRearContractBounds = resolveColliderBounds({ mode: "flow", center: { x: 1, y: 1, z: 0 }, halfWidth: 0.5, halfHeight: 0.5, settings: zeroRearContractSettings, timingWindowMs: 180, speedWuPerMs: 0.006 });
 assert.equal(zeroRearContractBounds.maxZ, 0, "contract resolves a genuine rear-zero face, not a hidden one-factor fallback");
 assert.equal(isPointInsideColliderBounds({ x: 1, y: 1, z: 0 }, zeroRearContractBounds), true, "the zero face itself remains inclusive");
-for (const [mode, contact, target] of [["flow", resolvedSaberCapsuleContactsFlowTarget, flowEvent], ["boxing", resolvedGloveObbContactsBoxingTarget, boxingTarget]]) {
-  const equipment = pose("left_wrist", mode, { x: 1, y: 1, z: 0 });
-  const widthMs = 250;
-  const customized = { depthForward: 2, depthBackward: 1 };
-  assert.equal(contact(target, equipment, 500, widthMs, customized), mode === "boxing", `${mode}: custom forward depth extends only Boxing's time face`);
-  assert.equal(contact(target, equipment, 499.999, widthMs, customized), false, `${mode}: custom front face outside`);
-  assert.equal(contact(target, equipment, 1250, widthMs, customized), true, `${mode}: custom backward face remains at +250ms`);
-  assert.equal(contact(target, equipment, 1250.001, widthMs, customized), false, `${mode}: custom back face outside`);
-}
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, flowAt, 750, 250, { depthForward: 2 }), true, "Flow inclusive independent timing persists");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 750, 250, { depthForward: 2 }), false, "Boxing longer cylinder still cannot reach distant early Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1250.001, 250, { depthBackward: 3 }), false, "Boxing depth cannot extend independent timing");
 
 // The private visual slice uses the exact swept hit and the resolved contact-time
 // blade, never a stale wrist or the latest pose. These also cover axis glyphs.
