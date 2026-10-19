@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegreesToQuaternion, isColliderSettings, isPointInsideColliderBounds, resolveColliderBounds } from "@aerobeat/web-contracts";
 import { flowSolidBladeRadiusWu, saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
-import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
+import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, sweptGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
 const HASH = "c".repeat(64);
 const identity = { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: HASH };
@@ -61,6 +61,24 @@ assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.9, y: 1.9, z: 0 
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 820), false, "moving note Z=-1.08 is beyond front cap");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180), false, "moving note Z=+1.08 is beyond back cap");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 1180.001), false, "outside independent timing boundary misses");
+// The authored target is a zero-thickness XY rectangle moving along song Z.
+// A flat cap, unlike a capsule, cannot score any on-axis point just past it.
+const flatCap = pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 });
+const flatVolume = { scale: 1, depthForward: 1, depthBackward: 0 };
+for (const [label, z, expected] of [
+  ["rear just outside", -.291, false], ["rear exactly on cap", -.29, true], ["rear just inside", -.289, true],
+  ["front just inside", .389, true], ["front exactly on cap", .39, true], ["front just outside", .391, false]
+]) {
+  assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, flatCap, 1000 + z / .006, 180, flatVolume), expected, `${label}: no hemispherical cap extension`);
+}
+assert.equal(sweptGloveObbContactsBoxingTarget(boxingTarget, [{ t: 1000 + .391 / .006, pose: flatCap }], 180, flatVolume), null, "swept history cannot score just past the flat front cap");
+assert.equal(sweptGloveObbContactsBoxingTarget(boxingTarget, [{ t: 1000 + .389 / .006, pose: flatCap }], 180, flatVolume)?.hitDepthHalf, "back", "swept history scores just inside the front cap");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, flatCap, 1000 + .391 / .006, 180, { ...flatVolume, scale: 9999999 }), false, "even huge finite radius cannot extend the flat cap axially");
+// Tilt lets an in-plane note touch the curved side, but its nearest point
+// must lie between actual caps, not within a hemisphere beyond the front.
+const tiltedFlatCap = pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }, { orientation: orientation(0, 45, 0) });
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, tiltedFlatCap, 1000 + .26 / .006, 180, flatVolume), true, "tilted side reaches an in-range note plane");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, tiltedFlatCap, 1000 + .277 / .006, 180, flatVolume), false, "tilted flat front cannot extend beyond its maximum world Z");
 
 // Flow remains XY-projected with its own timing slab. Boxing intersects a
 // moving XY note face in 3D, with independent ±base timing eligibility.

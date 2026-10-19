@@ -1691,10 +1691,10 @@ for (const [label, wristX, timeMs] of [
     assert.equal(c.getJudgements().length, 0, "held position before the window opens does not score");
     sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
     assert.equal(c.getSnapshot().session.state, "playing", "session stays playing during the freeze");
-    // The independent base window opens at 820ms, and the full cylinder
-    // overlaps the moving note face there; commit still occurs at the current
-    // frozen publication (850ms), once for this event.
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -180]], "frozen on-target fist scores a hit at the current song position");
+    // The independent base window opens at 820ms, but the moving note first
+    // enters the cylinder's flat rear cap in the 24-step held interpolation at
+    // 839.58ms (step 23), then commits at the frozen publication (850ms).
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -160.41666666666663]], "frozen on-target fist scores a hit at the current song position");
     sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
     sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
     assert.equal(c.getSnapshot().session.state, "playing", "session stays playing across later frozen ticks");

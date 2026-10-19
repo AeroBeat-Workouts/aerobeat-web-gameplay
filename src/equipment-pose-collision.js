@@ -130,11 +130,11 @@ function boxingContactAtEligibleTime(target, pose, songTimeMs, timingWindowMs, v
 }
 
 /**
- * Minimum distance from the finite cylinder AXIS to the note's XY rectangle
- * in its Z plane. A point at the nearest axis parameter is compared with the
- * radius; clamping the parameter to [0,1] gives genuinely flat end caps.
- * The squared XY point-to-box distance plus Z separation is convex in t;
- * ternary minimization covers tilted and axis-parallel poses alike.
+ * Intersect a flat-capped cylinder with the note's zero-thickness XY rectangle
+ * at song Z. Its exact solid test separates the axial cap interval from the
+ * perpendicular radius, so an axis-distance capsule cannot extend the caps.
+ * The clipped axis projection, authored rectangle corners and edges supply
+ * witnesses even when the cylinder is pitched or rolls in the note plane.
  * @param {Readonly<{start:{x:number,y:number,z:number},end:{x:number,y:number,z:number},radius:number}>} cylinder
  * @param {Readonly<{x:number,y:number}>} target
  * @param {number} z
@@ -143,26 +143,57 @@ function cylinderContactsNoteRectangle(cylinder, target, z) {
   const dx = cylinder.end.x - cylinder.start.x;
   const dy = cylinder.end.y - cylinder.start.y;
   const dz = cylinder.end.z - cylinder.start.z;
+  const length = Math.hypot(dx, dy, dz);
+  const radius = cylinder.radius;
   const minX = target.x - 0.5; const maxX = target.x + 0.5;
   const minY = target.y - 0.5; const maxY = target.y + 0.5;
-  const distanceSquared = (t) => {
-    const px = cylinder.start.x + dx * t;
-    const py = cylinder.start.y + dy * t;
-    const pz = cylinder.start.z + dz * t;
-    const gapX = Math.max(minX - px, 0, px - maxX);
-    const gapY = Math.max(minY - py, 0, py - maxY);
-    const gapZ = pz - z;
-    return gapX * gapX + gapY * gapY + gapZ * gapZ;
+  if (![minX, maxX, minY, maxY, z, length, radius, radius * radius].every(Number.isFinite)) throw new TypeError("boxing_target_geometry_nonfinite");
+  const axis = cylinder.axis;
+  // For each XY point on the target plane, compute its axial coordinate
+  // relative to the back cap. The caps bound that coordinate, while the
+  // perpendicular distance from the axis must be at most the cylinder radius.
+  const pointInside = (x, y) => {
+    const vx = x - cylinder.start.x; const vy = y - cylinder.start.y; const vz = z - cylinder.start.z;
+    const axial = vx * axis.x + vy * axis.y + vz * axis.z;
+    const radialSquared = vx * vx + vy * vy + vz * vz - axial * axial;
+    if (![vx, vy, vz, axial, radialSquared].every(Number.isFinite)) throw new TypeError("boxing_target_geometry_nonfinite");
+    return axial >= -Number.EPSILON && axial <= length + Number.EPSILON && radialSquared <= radius * radius + Number.EPSILON;
   };
-  let low = 0; let high = 1;
-  for (let index = 0; index < 80; index += 1) {
-    const a = low + (high - low) / 3;
-    const b = high - (high - low) / 3;
-    if (distanceSquared(a) <= distanceSquared(b)) high = b; else low = a;
+  // For a convex cylinder, intersection with a rectangle in one plane is
+  // witnessed by its nearest XY point to the axis at a permitted axial range,
+  // or by the target edge/corner where a cap/rim first enters the rectangle.
+  const at = (x, y) => pointInside(Math.max(minX, Math.min(maxX, x)), Math.max(minY, Math.min(maxY, y)));
+  for (const candidate of [cylinder.start, cylinder.end]) if (at(candidate.x, candidate.y)) return true;
+  // With a tilted axis, the plane's closest point on the axis is a separate
+  // interior witness: both projected endpoints can lie beyond opposite edges.
+  if (dz !== 0) {
+    const crossing = (z - cylinder.start.z) / dz;
+    if (crossing >= 0 && crossing <= 1 && at(cylinder.start.x + dx * crossing, cylinder.start.y + dy * crossing)) return true;
   }
-  const distance = Math.min(distanceSquared(0), distanceSquared(1), distanceSquared((low + high) / 2));
-  if (!Number.isFinite(distance) || !Number.isFinite(cylinder.radius * cylinder.radius)) throw new TypeError("boxing_target_geometry_nonfinite");
-  return Math.sqrt(distance) <= cylinder.radius + Number.EPSILON;
+  for (const x of [minX, maxX]) for (const y of [minY, maxY]) if (pointInside(x, y)) return true;
+  const intersectEdge = (fixed, low, high, vertical) => {
+    let left = low; let right = high;
+    const projection = (value) => vertical ? (fixed - cylinder.start.x) * axis.x + (value - cylinder.start.y) * axis.y + (z - cylinder.start.z) * axis.z : (value - cylinder.start.x) * axis.x + (fixed - cylinder.start.y) * axis.y + (z - cylinder.start.z) * axis.z;
+    for (const cap of [0, length]) {
+      const slope = vertical ? axis.y : axis.x;
+      if (slope !== 0) {
+        const crossing = low + (cap - projection(low)) / slope;
+        if (crossing >= low && crossing <= high && (vertical ? pointInside(fixed, crossing) : pointInside(crossing, fixed))) return true;
+      }
+    }
+    for (let iteration = 0; iteration < 80; iteration += 1) {
+      const a = left + (right - left) / 3; const b = right - (right - left) / 3;
+      const radial = (value) => {
+        const x = vertical ? fixed : value; const y = vertical ? value : fixed;
+        const vx = x - cylinder.start.x; const vy = y - cylinder.start.y; const vz = z - cylinder.start.z;
+        const axial = projection(value);
+        return vx * vx + vy * vy + vz * vz - axial * axial;
+      };
+      if (radial(a) <= radial(b)) right = b; else left = a;
+    }
+    return vertical ? pointInside(fixed, (left + right) / 2) : pointInside((left + right) / 2, fixed);
+  };
+  return intersectEdge(minX, minY, maxY, true) || intersectEdge(maxX, minY, maxY, true) || intersectEdge(minY, minX, maxX, false) || intersectEdge(maxY, minX, maxX, false);
 }
 
 /**
