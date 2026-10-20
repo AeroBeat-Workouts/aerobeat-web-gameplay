@@ -17,6 +17,7 @@ import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometr
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
+import { createKneeColliderSettings, defaultKneeColliderSettings, kneeColliderSettingsIdentity, kneePadContactsBoxingTarget, measuredKneeSample } from "./knee-collider-collision.js";
 import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
@@ -48,6 +49,9 @@ const FLOW_COLLIDER_RULESET = "flow_colliders_v1";
 const FLOW_GRID_RULESET = "flow_grid_v2";
 /** The 0.0.52 collider-scored boxing ruleset; beats are swept 2.5D contacts at reach rows. */
 const BOXING_COLLIDER_RULESET = "boxing_collider_v1";
+const BOXING_KNEE_RULESET = "boxing_collider_knee_v1";
+/** @param {unknown} id */
+function isBoxingColliderRuleset(id) { return id === BOXING_COLLIDER_RULESET || id === BOXING_KNEE_RULESET; }
 
 /** @type {readonly string[]} */
 const CHECKPOINT_ACTIONS = Object.freeze(["guard", "squat", "weave_left", "weave_right"]);
@@ -73,6 +77,7 @@ const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "no_obstac
  * @property {DataRecord} [scoringSettings]
  * @property {DataRecord} [flowColliderSettings]
  * @property {DataRecord} [boxingColliderSettings]
+ * @property {DataRecord} [kneeColliderSettings] Knee-only score settings; rejected by all other rulesets.
  * @property {boolean} [obstaclesEnabled]
  * @property {readonly DataRecord[]} [shadowVariants]
  */
@@ -101,6 +106,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let scoringSettings = /** @type {DataRecord} */ (defaultScoringSettings());
   let flowColliderSettings = /** @type {DataRecord} */ (defaultFlowColliderSettings);
   let boxingColliderSettings = /** @type {DataRecord} */ (defaultBoxingColliderSettings);
+  let kneeColliderSettings = /** @type {DataRecord} */ (defaultKneeColliderSettings);
+  let lastKneeFrame = /** @type {Readonly<{sourceFrameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string}> | null} */ (null);
   let events = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   let contentGeneration = 0;
   let eventTruth = new WeakMap();
@@ -198,6 +205,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   const service = Object.freeze({
     configureContent,
+    configureKneeColliderSettings,
     requestStart,
     pause,
     resume,
@@ -237,11 +245,12 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextScoringSettings = source.scoringSettings === undefined ? defaultScoringSettings() : normalizeScoringSettings(source.scoringSettings);
     const nextFlowColliderSettings = normalizeFlowColliderSettings(source.flowColliderSettings, nextVariant);
     const nextBoxingColliderSettings = normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
+    const nextKneeColliderSettings = normalizeKneeColliderSettings(source.kneeColliderSettings, nextVariant);
     if (source.obstaclesEnabled !== undefined && typeof source.obstaclesEnabled !== "boolean") throw gameplayError("content_configuration_invalid", "Obstacles enabled must be boolean");
     const nextObstaclesEnabled = source.obstaclesEnabled !== false;
     const nextShadowVariants = source.shadowVariants === undefined ? Object.freeze([]) : normalizeShadowVariants(source.shadowVariants);
     const nextContentGeneration = contentGeneration + 1;
-    const nextEventTruth = bindEventTruth(nextEvents, nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings);
+    const nextEventTruth = bindEventTruth(nextEvents, nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings, nextKneeColliderSettings);
     packageId = nextPackageId;
     variant = nextVariant;
     contentGeneration = nextContentGeneration;
@@ -251,6 +260,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
     boxingColliderSettings = nextBoxingColliderSettings;
+    kneeColliderSettings = nextKneeColliderSettings;
     obstaclesEnabled = nextObstaclesEnabled;
     shadowVariants = nextShadowVariants;
     clearRunTruth();
@@ -270,6 +280,18 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     generation += 1;
     publish(null);
     return snapshot;
+  }
+
+  /** Between-run presentation/tuning seam. Score-affecting changes are forbidden during a run. @param {unknown} value */
+  function configureKneeColliderSettings(value) {
+    assertConfigured();
+    if (variant?.rulesetId !== BOXING_KNEE_RULESET || (state !== "idle" && state !== "calibrating" && state !== "completed")) throw gameplayError("knee_collider_settings_locked", "Knee settings require a configured knee variant between runs");
+    const settings = normalizeKneeColliderSettings(value, variant);
+    kneeColliderSettings = settings;
+    // Existing event truth must use the same run settings when the next run starts.
+    eventTruth = bindEventTruth(events, /** @type {string} */ (packageId), contentGeneration, variant, profileIdentity, scoringSettings, flowColliderSettings, boxingColliderSettings, kneeColliderSettings);
+    publish(null);
+    return settings;
   }
 
   /**
@@ -422,8 +444,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
             evaluateFlowColliderNotesAndBombs();
             evaluateFlowObstacles();
             applyPendingColliderHazards();
-          } else if (variant?.rulesetId === BOXING_COLLIDER_RULESET) {
+          } else if (isBoxingColliderRuleset(variant?.rulesetId)) {
             evaluateBoxingColliderNotes();
+            if (variant?.rulesetId === BOXING_KNEE_RULESET) evaluateBoxingKneeNotes();
             // B12 (0.0.58): boxing obstacle checkpoints (squat / weave_left /
             // weave_right) carry the SAME normalized nose geometry as Flow
             // obstacles; evaluate the nose–obstacle collision on the identical
@@ -589,8 +612,10 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const nextScoringSettings = source.scoringSettings === undefined ? scoringSettings : normalizeScoringSettings(source.scoringSettings);
     const nextFlowColliderSettings = source.flowColliderSettings === undefined && nextVariant.rulesetId === FLOW_COLLIDER_RULESET ? flowColliderSettings : normalizeFlowColliderSettings(source.flowColliderSettings, nextVariant);
     if (nextVariant.rulesetId === FLOW_COLLIDER_RULESET && flowColliderSettingsIdentity(nextFlowColliderSettings) !== flowColliderSettingsIdentity(flowColliderSettings)) throw gameplayError("flow_collider_settings_locked", "Flow Collider settings are locked for the complete run");
-    const nextBoxingColliderSettings = source.boxingColliderSettings === undefined && nextVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
-    if (nextVariant.rulesetId === BOXING_COLLIDER_RULESET && boxingColliderSettingsIdentity(nextBoxingColliderSettings) !== boxingColliderSettingsIdentity(boxingColliderSettings)) throw gameplayError("boxing_collider_settings_locked", "Boxing Collider reach and guard settings are locked for the complete run");
+    const nextBoxingColliderSettings = source.boxingColliderSettings === undefined && isBoxingColliderRuleset(nextVariant.rulesetId) && isBoxingColliderRuleset(variant?.rulesetId) ? boxingColliderSettings : normalizeBoxingColliderSettings(source.boxingColliderSettings, nextVariant);
+    if (isBoxingColliderRuleset(nextVariant.rulesetId) && isBoxingColliderRuleset(variant?.rulesetId) && boxingColliderSettingsIdentity(nextBoxingColliderSettings) !== boxingColliderSettingsIdentity(boxingColliderSettings)) throw gameplayError("boxing_collider_settings_locked", "Boxing Collider reach and guard settings are locked for the complete run");
+    const nextKneeColliderSettings = source.kneeColliderSettings === undefined && nextVariant.rulesetId === BOXING_KNEE_RULESET && variant?.rulesetId === BOXING_KNEE_RULESET ? kneeColliderSettings : normalizeKneeColliderSettings(source.kneeColliderSettings, nextVariant);
+    if (nextVariant.rulesetId === BOXING_KNEE_RULESET && variant?.rulesetId === BOXING_KNEE_RULESET && kneeColliderSettingsIdentity(nextKneeColliderSettings) !== kneeColliderSettingsIdentity(kneeColliderSettings)) throw gameplayError("knee_collider_settings_locked", "Knee Collider settings are locked for the complete run");
     if (source.obstaclesEnabled !== undefined && typeof source.obstaclesEnabled !== "boolean") throw gameplayError("content_configuration_invalid", "Obstacles enabled must be boolean");
     const nextObstaclesEnabled = source.obstaclesEnabled === undefined ? obstaclesEnabled : source.obstaclesEnabled;
     const nextShadowVariants = source.shadowVariants === undefined ? shadowVariants : normalizeShadowVariants(source.shadowVariants);
@@ -598,7 +623,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // incompatible with the new mode's evaluation path. Do not preserve them;
     // re-resolve the full beat content for the new mode. Same-mode variant swaps
     // (difficulty/modifier changes) still preserve past/judged/active events.
-    const modeChanged = variant !== null && variant.mode !== nextVariant.mode;
+    const modeChanged = variant !== null && (variant.mode !== nextVariant.mode || isBoxingColliderRuleset(variant.rulesetId) && isBoxingColliderRuleset(nextVariant.rulesetId) && variant.rulesetId !== nextVariant.rulesetId);
     const preserve = new Map(events.filter((event) => shouldPreserveEvent(event) && (!modeChanged || event.variantId === nextVariant.variantId)).map((event) => [String(event.eventId), event]));
     const lineage = new Set([...preserve.values()].flatMap((event) => lineageIds(event)));
     const merged = [...preserve.values()];
@@ -620,7 +645,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (!truth) throw gameplayError("event_truth_missing", "Preserved events require immutable content-generation truth");
       nextEventTruth.set(event, truth);
     }
-    for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings));
+    for (const event of acceptedNextEvents) nextEventTruth.set(event, makeEventTruth(nextPackageId, nextContentGeneration, nextVariant, nextProfileIdentity, nextScoringSettings, nextFlowColliderSettings, nextBoxingColliderSettings, nextKneeColliderSettings));
     events = Object.freeze(merged);
     const retainedJudgedIds = new Set(merged.filter((event) => judgedIds.has(String(event.eventId))).map((event) => String(event.eventId)));
     for (const eventId of flowSliceByEventId.keys()) if (!retainedJudgedIds.has(eventId)) flowSliceByEventId.delete(eventId);
@@ -634,6 +659,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     scoringSettings = nextScoringSettings;
     flowColliderSettings = nextFlowColliderSettings;
     boxingColliderSettings = nextBoxingColliderSettings;
+    kneeColliderSettings = nextKneeColliderSettings;
     obstaclesEnabled = nextObstaclesEnabled;
     shadowVariants = nextShadowVariants;
     generation += 1;
@@ -709,7 +735,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     cancelCountdown();
     latestEvidence = null;
     lastInput = null;
-    pendingFlowNearIds.clear(); clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
+    pendingFlowNearIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
     visualTestInteraction = null;
     frameEquipmentPoses = new Map();
     flowSliceByEventId.clear();
@@ -729,7 +755,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function validateVisualTestInteractionFrame(interaction, normalizedInput, clock, enteredState) {
     if (interaction === null) return false;
     if (sessionPurpose !== "visual_test") throw gameplayError("visual_test_interaction_invalid", "Visual Test interaction authority requires the visual_test purpose");
-    if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && variant?.rulesetId !== BOXING_COLLIDER_RULESET) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a collider ruleset");
+    if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && !isBoxingColliderRuleset(variant?.rulesetId)) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a collider ruleset");
     if (enteredState !== "playing" || !clock.playing) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a playing timeline");
     if (normalizedInput === null || normalizedInput.candidate === null) throw gameplayError("visual_test_interaction_invalid", "Visual Test production judgement requires a strict input evidence snapshot");
     if (visualTestInteraction !== null && interaction.epoch === visualTestInteraction.epoch) {
@@ -771,7 +797,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * @returns {ReadonlyMap<string, AeroResolvedEquipmentPose>}
    */
   function validateEquipmentPoseFrame(value, normalizedInput, clock, nextTimestampMs, enteredState, interaction, nextLease) {
-    const colliderRuleset = variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET;
+    const colliderRuleset = variant?.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(variant?.rulesetId);
     if (!colliderRuleset) {
       if (value !== undefined) throw gameplayError("equipment_poses_invalid", "Equipment poses are accepted only by collider rulesets");
       return new Map();
@@ -817,7 +843,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   /** @param {ReadonlyMap<string, AeroResolvedEquipmentPose>} poses */
   function activateEquipmentPoses(poses) {
-    if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && variant?.rulesetId !== BOXING_COLLIDER_RULESET) { frameEquipmentPoses = new Map(); return; }
+    if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && !isBoxingColliderRuleset(variant?.rulesetId)) { frameEquipmentPoses = new Map(); return; }
     if (poses.size !== 2) throw gameplayError("equipment_poses_invalid", "Collider evaluation requires exact equipment poses");
     frameEquipmentPoses = poses;
     if (equipmentConfigIdentityValue === null) equipmentConfigIdentityValue = /** @type {AeroResolvedEquipmentPose} */ (poses.get("left_wrist")).configIdentity.value;
@@ -1112,7 +1138,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * still close out on every no-sample early-return path.
    */
   function evaluateBoxingObstacles() {
-    if (!variant || variant.mode !== "boxing" || variant.rulesetId !== BOXING_COLLIDER_RULESET || !obstaclesEnabled || !productionJudgementEnabled()) return;
+    if (!variant || variant.mode !== "boxing" || !isBoxingColliderRuleset(variant.rulesetId) || !obstaclesEnabled || !productionJudgementEnabled()) return;
     const obstacles = events.filter((event) => productionEventEligible(event) && (event.type === "squat" || event.type === "weave_left" || event.type === "weave_right") && !obstacleOutcomes.some((outcome) => outcome.eventId === event.eventId));
     if (obstacles.length === 0) return;
     /** @type {NoseSample | null} */
@@ -1231,7 +1257,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const tracker = obstacleStates.get(eventId) ?? { coverage: Object.freeze([]), contact: Object.freeze([]), firstContactTimelinePositionMs: null, contactEpisodeId: null, evidenceFrameId: null, calibrationId: null, consequenceApplied: false };
       const result = tracker.contact.length > 0 ? "contact" : coversInterval(tracker.coverage, Number(obstacle.intervalStartTimestampMs), Number(obstacle.intervalEndTimestampMs)) ? "avoided" : "unevaluated_tracking";
       const contactDurationMs = tracker.contact.reduce((total, interval) => total + interval.endMs - interval.startMs, 0);
-      obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: BOXING_COLLIDER_RULESET, result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
+      obstacleOutcomes.push(Object.freeze({ schema: "aerobeat/obstacle_outcome", version: 1, eventId, rulesetId: variant?.rulesetId, result, intervalStartTimestampMs: Number(obstacle.intervalStartTimestampMs), intervalEndTimestampMs: Number(obstacle.intervalEndTimestampMs), committedTimelinePositionMs: timelinePositionMs, firstContactTimelinePositionMs: tracker.firstContactTimelinePositionMs, contactDurationMs, contactEpisodeId: tracker.contactEpisodeId, evidenceFrameId: result === "contact" ? tracker.evidenceFrameId : null, calibrationId: result === "contact" ? tracker.calibrationId : null, consequenceApplied: tracker.consequenceApplied }));
       occupiedObstacleIds.delete(eventId);
       obstacleStates.delete(eventId);
       if (occupiedObstacleIds.size === 0) releaseHazardContact(timelinePositionMs);
@@ -1259,7 +1285,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    */
   function releaseHazardContact(releaseTickMs) {
     if (hazardContactSinceMs === null || hazardContactReleasedAtMs !== null || sessionPurpose !== "play") return;
-    if (!(variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET)) return;
+    if (!(variant?.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(variant?.rulesetId))) return;
     hazardContactReleasedAtMs = releaseTickMs;
   }
 
@@ -1272,14 +1298,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       while (index < ordered.length && ordered[index].timelineMs === timelineMs) group.push(ordered[index++]);
       const entrants = group.filter((entry) => entry.kind === "enter" && !occupiedObstacleIds.has(entry.eventId));
       if (occupiedObstacleIds.size === 0 && entrants.length > 0) {
-        if ((variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET) && sessionPurpose === "play") { hazardContactSinceMs = timelineMs; hazardContactReleasedAtMs = null; }
+        if ((variant?.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(variant?.rulesetId)) && sessionPurpose === "play") { hazardContactSinceMs = timelineMs; hazardContactReleasedAtMs = null; }
         obstacleEpisodeOrdinal += 1; const episodeId = `${sessionId}:g${generation}:obstacle:${obstacleEpisodeOrdinal}`;
         const winner = [...entrants].sort((left, right) => compareCodePoints(left.eventId, right.eventId))[0];
         for (const entry of entrants) { const tracker = obstacleStates.get(entry.eventId); if (tracker && tracker.contactEpisodeId === null) tracker.contactEpisodeId = episodeId; }
         // B12 (0.0.58): boxing head collisions are presentation-only — no
         // score consequence (no combo break), so the outcome carries
         // consequenceApplied false and applyObstacleConsequence is skipped.
-        if (variant?.rulesetId !== BOXING_COLLIDER_RULESET) { const tracker = obstacleStates.get(winner.eventId); if (tracker) tracker.consequenceApplied = true; applyObstacleConsequence(); }
+        if (!isBoxingColliderRuleset(variant?.rulesetId)) { const tracker = obstacleStates.get(winner.eventId); if (tracker) tracker.consequenceApplied = true; applyObstacleConsequence(); }
       }
       for (const entry of entrants) occupiedObstacleIds.add(entry.eventId);
       for (const entry of group) if (entry.kind === "exit") occupiedObstacleIds.delete(entry.eventId);
@@ -1507,8 +1533,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
-    pendingFlowNearIds.clear(); clearColliderSamples(); previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
-    if (requireRecoveryBaselines && (variant?.rulesetId === FLOW_COLLIDER_RULESET || variant?.rulesetId === BOXING_COLLIDER_RULESET)) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
+    pendingFlowNearIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
+    if (requireRecoveryBaselines && (variant?.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(variant?.rulesetId))) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
   }
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right */
   function satisfyWristRecoveryBaselines(left, right) { if (left !== null) leftWristBaselineRequired = false; if (right !== null) rightWristBaselineRequired = false; }
@@ -1528,7 +1554,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * the nose guard; straight 100ms hold semantics do not apply.
    */
   function evaluateBoxingColliderNotes() {
-    if (!variant || variant.rulesetId !== BOXING_COLLIDER_RULESET || !latestEvidence || !lastInput) { finalizeBoxingColliderEvents(); return; }
+    if (!variant || !isBoxingColliderRuleset(variant.rulesetId) || !latestEvidence || !lastInput) { finalizeBoxingColliderEvents(); return; }
     // Gesture mode evaluates pure normalized landmarks on every fresh
     // evidence frame; the collider-sample/recovery plumbing below is
     // collision-mode only and must not veto a pose Count. Late-window misses
@@ -1621,6 +1647,34 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     finalizeBoxingColliderEvents();
   }
 
+  /** Measured-only knee contact, independent of wrist and frozen-frame histories. */
+  function evaluateBoxingKneeNotes() {
+    if (!latestEvidence || !lastInput || latestEvidence.provenance !== "measured" || latestEvidence.calibrationId !== calibrationId || !latestEvidence.kneePose) return;
+    const left = measuredKneeSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "left", timelinePositionMs, timestampMs, maximumColliderSampleFreshnessMs);
+    const right = measuredKneeSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right", timelinePositionMs, timestampMs, maximumColliderSampleFreshnessMs);
+    const sample = left ?? right;
+    if (!sample) return;
+    const frame = Object.freeze({ sourceFrameId: sample.sourceFrameId, measurementTimestampMs: sample.measurementTimestampMs, calibrationId: sample.calibrationId, sourceIdentity: sample.sourceIdentity });
+    if (lastKneeFrame && (frame.sourceFrameId === lastKneeFrame.sourceFrameId || frame.measurementTimestampMs <= lastKneeFrame.measurementTimestampMs || frame.calibrationId !== lastKneeFrame.calibrationId || frame.sourceIdentity !== lastKneeFrame.sourceIdentity)) return;
+    lastKneeFrame = frame;
+    const reach = { topRowReachWU: Number(boxingColliderSettings.topRowReachWU), bottomRowReachWU: Number(boxingColliderSettings.bottomRowReachWU) };
+    /** @type {Set<string>} */ const usedSides = new Set();
+    for (const event of events) {
+      if (!productionEventEligible(event) || judgedIds.has(String(event.eventId)) || !isKneeAction(expectedAction(event))) continue;
+      const side = expectedAction(event) === "knee_right" ? "right" : "left";
+      if (usedSides.has(side)) continue;
+      const knee = side === "left" ? left : right;
+      if (!knee || knee.calibrationId !== calibrationId) continue;
+      const settings = kneeColliderSettingsForEvent(event);
+      const windowMs = Number(event.timingWindowMs);
+      if (timestampMs - knee.measurementTimestampMs >= Number(event.evidenceFreshnessMs)) continue;
+      const target = { centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(Number(event.spatialTarget.targetCell), reach) };
+      if (!kneePadContactsBoxingTarget(target, knee, settings, windowMs)) continue;
+      usedSides.add(side);
+      recordJudgementAt(event, "hit", Object.freeze([]), latestEvidence, false, knee.songTimeMs);
+    }
+  }
+
   /**
    * Gesture-mode guard evaluation on one fresh evidence frame: the Godot
    * guard-gesture port over normalized landmarks, windowed by each guard's
@@ -1654,7 +1708,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function finalizeBoxingColliderEvents() {
-    if (!variant || variant.rulesetId !== BOXING_COLLIDER_RULESET) return;
+    if (!variant || !isBoxingColliderRuleset(variant.rulesetId)) return;
     for (const event of events) {
       if (!productionEventEligible(event)) continue;
       const eventId = String(event.eventId);
@@ -1662,8 +1716,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const settings = boxingColliderSettingsForEvent(event);
       const action = expectedAction(event);
       if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
-      const center = Number(event.centerTimestampMs); const windowMs = Number(settings.timingWindowMs);
-      const late = PUNCH_ACTIONS.includes(action) ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
+      const center = Number(event.centerTimestampMs); const windowMs = variant.rulesetId === BOXING_KNEE_RULESET && isKneeAction(action) ? Number(event.timingWindowMs) : Number(settings.timingWindowMs);
+      const late = PUNCH_ACTIONS.includes(action) || (variant.rulesetId === BOXING_KNEE_RULESET && isKneeAction(action)) ? effectivePlayNoteAfterWindowMs(center, windowMs) : colliderBackFaceTimestampMs(center, windowMs);
       if (action === "guard" && typeof event.checkpoint?.timingWindowMs === "number" && Number(event.checkpoint.timingWindowMs) > 0) {
         const guardWindowMs = Number(event.checkpoint.timingWindowMs);
         if (timelinePositionMs > Number(event.centerTimestampMs) + guardWindowMs) recordJudgementAt(event, "miss", boxingColliderMissDiagnostics(event), null, false, null);
@@ -1793,7 +1847,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       judgedIds.add(String(event.eventId));
       pendingFlowNearIds.delete(String(event.eventId));
       if (hitDepthHalf !== null) hitDepthHalfByEventId.set(String(event.eventId), hitDepthHalf);
-      if (eventVariant.rulesetId === BOXING_COLLIDER_RULESET) updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event));
+      if (isBoxingColliderRuleset(eventVariant.rulesetId)) updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event));
       else updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
     }
   }
@@ -1822,8 +1876,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings]
    */
   function updateScore(tier, scoreVariant, scoreProfile, settings, colliderSettings) {
-    const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
-    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue);
+    const resolvedColliderSettings = isBoxingColliderRuleset(scoreVariant.rulesetId) ? boxingColliderSettings : colliderSettings;
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue, kneeColliderSettings);
     const current = scorePartition(scoreVariant, scoreProfile, settings, resolvedColliderSettings);
     const next = { ...current };
     if (tier === "miss") { next.misses += 1; next.combo = 0; }
@@ -1839,14 +1893,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   /** @param {DataRecord} scoreVariant @param {DataRecord} scoreProfile @param {DataRecord} settings @param {DataRecord} [colliderSettings] */
   function scorePartition(scoreVariant, scoreProfile, settings, colliderSettings = flowColliderSettings) {
-    const resolvedColliderSettings = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettings : colliderSettings;
-    const colliderRuleset = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET || scoreVariant.rulesetId === BOXING_COLLIDER_RULESET;
+    const resolvedColliderSettings = isBoxingColliderRuleset(scoreVariant.rulesetId) ? boxingColliderSettings : colliderSettings;
+    const colliderRuleset = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(scoreVariant.rulesetId);
     if (colliderRuleset && equipmentConfigIdentityValue === null) throw gameplayError("equipment_config_identity_missing", "Collider score partitions require locked equipment config identity");
-    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue);
+    const key = scorePartitionKey(scoreVariant, scoreProfile, settings, resolvedColliderSettings, equipmentConfigIdentityValue, kneeColliderSettings);
     const colliderIdentity = scoreVariant.rulesetId === FLOW_COLLIDER_RULESET ? flowColliderSettingsIdentity(resolvedColliderSettings) : null;
-    const boxingIdentity = scoreVariant.rulesetId === BOXING_COLLIDER_RULESET ? boxingColliderSettingsIdentity(resolvedColliderSettings) : null;
+    const boxingIdentity = isBoxingColliderRuleset(scoreVariant.rulesetId) ? boxingColliderSettingsIdentity(resolvedColliderSettings) : null;
+    const kneeIdentity = scoreVariant.rulesetId === BOXING_KNEE_RULESET ? kneeColliderSettingsIdentity(kneeColliderSettings) : null;
     const equipmentIdentity = !colliderRuleset || equipmentConfigIdentityValue === null ? null : Object.freeze({ schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: equipmentConfigIdentityValue });
-    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ...(equipmentIdentity === null ? {} : { equipmentConfigIdentity: equipmentIdentity }), ...(colliderIdentity === null ? {} : { flowColliderSettingsIdentity: colliderIdentity, bombContacts: 0 }), ...(boxingIdentity === null ? {} : { boxingColliderSettingsIdentity: boxingIdentity }), ranked: colliderRuleset ? false : scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
+    return partitions.get(key) ?? Object.freeze({ partitionId: key, variantId: scoreVariant.variantId, chartId: scoreVariant.chartId, rulesetId: scoreVariant.rulesetId, recipeId: scoreVariant.recipeId, modifierIds: scoreVariant.modifierIds, mapHash: scoreVariant.mapHash, scoreIdentityHash: scoreVariant.scoreIdentityHash, profileId: scoreProfile.profileId, profileVersion: scoreProfile.profileVersion, profileHash: scoreProfile.contentHash, profileClass: scoreProfile.class, regenerationRequired: scoreProfile.regenerationRequired, scoringSettings: settings, scoringSettingsIdentity: scoreSettingsIdentity(settings), ...(equipmentIdentity === null ? {} : { equipmentConfigIdentity: equipmentIdentity }), ...(colliderIdentity === null ? {} : { flowColliderSettingsIdentity: colliderIdentity, bombContacts: 0 }), ...(boxingIdentity === null ? {} : { boxingColliderSettingsIdentity: boxingIdentity }), ...(kneeIdentity === null ? {} : { kneeColliderSettingsIdentity: kneeIdentity }), ranked: colliderRuleset ? false : scoreVariant.ranked === true, localOnly: true, hits: 0, misses: 0, ignored: 0, obstacleContacts: 0, score: 0, maxCombo: 0, combo: 0 });
   }
 
   /** @param {DataRecord} event @returns {readonly string[]} */
@@ -1888,7 +1943,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); pendingFlowNearIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); flowSliceByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); pendingFlowNearIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); flowSliceByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); lastKneeFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */
@@ -1908,6 +1963,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** @param {DataRecord} event @returns {DataRecord} */
   function flowColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).flowColliderSettings ?? defaultFlowColliderSettings); }
   function boxingColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).boxingColliderSettings ?? defaultBoxingColliderSettings); }
+  /** @param {DataRecord} event */
+  function kneeColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).kneeColliderSettings ?? defaultKneeColliderSettings); }
   /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
   function normalizeContentConfigurationPurpose(value) {
     if (value === undefined) return "play";
@@ -1927,15 +1984,15 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function advanceTimestamp(value) { const next = requireNonNegativeNumber(value, "timestamp_invalid"); if (next < timestampMs) throw gameplayError("timestamp_rollback", "Gameplay timestamps must not roll back"); timestampMs = next; }
 }
 
-/** @param {readonly DataRecord[]} sourceEvents @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings @param {DataRecord} [sourceBoxingColliderSettings] */
-function bindEventTruth(sourceEvents, contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings) {
+/** @param {readonly DataRecord[]} sourceEvents @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings @param {DataRecord} [sourceBoxingColliderSettings] @param {DataRecord} [sourceKneeColliderSettings] */
+function bindEventTruth(sourceEvents, contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings, sourceKneeColliderSettings) {
   const result = new WeakMap();
-  const truth = makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings);
+  const truth = makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings, sourceKneeColliderSettings);
   for (const event of sourceEvents) result.set(event, truth);
   return result;
 }
-/** @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings @param {DataRecord} [sourceBoxingColliderSettings] */
-function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings, flowColliderSettings: sourceFlowColliderSettings, boxingColliderSettings: sourceBoxingColliderSettings }); }
+/** @param {string} contentPackageId @param {number} generation @param {DataRecord} sourceVariant @param {DataRecord} sourceProfile @param {DataRecord} sourceScoringSettings @param {DataRecord} sourceFlowColliderSettings @param {DataRecord} [sourceBoxingColliderSettings] @param {DataRecord} [sourceKneeColliderSettings] */
+function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfile, sourceScoringSettings, sourceFlowColliderSettings, sourceBoxingColliderSettings, sourceKneeColliderSettings) { return Object.freeze({ contentPackageId, contentGeneration: generation, variant: sourceVariant, profileIdentity: sourceProfile, scoringSettings: sourceScoringSettings, flowColliderSettings: sourceFlowColliderSettings, boxingColliderSettings: sourceBoxingColliderSettings, kneeColliderSettings: sourceKneeColliderSettings }); }
 
 /** @param {GameplayCoordinatorOptions} options */
 function normalizeOptions(options) {
@@ -1996,7 +2053,7 @@ function normalizeVariant(value) {
   const mode = record.mode === "flow" ? "flow" : record.mode === "boxing" ? "boxing" : (() => { throw gameplayError("mode_invalid", "Variant mode is unsupported"); })();
   const recipeId = record.recipeId === null ? null : requireString(record.recipeId, "recipe_invalid");
   if (mode === "flow" && (![FLOW_COLLIDER_RULESET, FLOW_GRID_RULESET].includes(rulesetId) || recipeId !== null)) throw gameplayError("variant_identity_invalid", "Flow variants require a supported Flow ruleset and no conversion recipe");
-  if (mode === "boxing" && rulesetId !== BOXING_COLLIDER_RULESET && ((rulesetId.startsWith("flow_grid_") || rulesetId === FLOW_COLLIDER_RULESET) || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
+  if (mode === "boxing" && !isBoxingColliderRuleset(rulesetId) && ((rulesetId.startsWith("flow_grid_") || rulesetId === FLOW_COLLIDER_RULESET) || recipeId === null || !conversionRecipeIds.includes(/** @type {never} */ (recipeId)))) throw gameplayError("variant_identity_invalid", "Boxing variants require a supported Boxing ruleset and conversion recipe");
   const modifierIds = requireStringArray(record.modifierIds ?? [], "modifier_ids_invalid", 32);
   if (modifierIds.includes("no_obstacles") && modifierIds.includes("obstacle_visual_only")) throw gameplayError("modifier_ids_invalid", "Obstacle accessibility modes conflict");
   if (new Set(modifierIds).size !== modifierIds.length || [...modifierIds].sort(compareCodePoints).some((entry, index) => entry !== modifierIds[index]) || modifierIds.some((entry) => !SUPPORTED_MODIFIERS.includes(entry))) throw gameplayError("modifier_ids_invalid", "Modifier identity must be supported, sorted and unique");
@@ -2054,11 +2111,16 @@ function validateEventForVariant(event, selectedVariant) {
     } else validateFlowNonNote(event, type);
   } else {
     const action = expectedAction(event);
-    if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
+    if (![...PUNCH_ACTIONS, ...CHECKPOINT_ACTIONS, ...(selectedVariant.rulesetId === BOXING_KNEE_RULESET ? ["knee_left", "knee_right"] : [])].includes(action)) throw gameplayError("event_type_invalid", "Boxing event type is unsupported");
+    if (isKneeAction(action)) {
+      const target = requireRecord(event.spatialTarget, "knee_target_invalid");
+      if (target.targetCell !== (action === "knee_left" ? 9 : 10) || !Array.isArray(target.acceptedSubcells) || target.acceptedSubcells.length === 0 || target.acceptedSubcells.length > 48 || target.acceptedSubcells.some((cell) => !Number.isInteger(cell) || cell < 0 || cell > 47)) throw gameplayError("knee_target_invalid", "Knee beats require a same-side lowest-row target");
+      if (typeof event.timingWindowMs !== "number" || !Number.isFinite(event.timingWindowMs) || event.timingWindowMs <= 0 || event.timingWindowMs > 300 || typeof event.evidenceFreshnessMs !== "number" || !Number.isFinite(event.evidenceFreshnessMs) || event.evidenceFreshnessMs <= 0 || event.evidenceFreshnessMs > maximumColliderSampleFreshnessMs) throw gameplayError("knee_timing_invalid", "Knee beats require bounded timing and freshness");
+    }
     if (action === "squat" || action === "weave_left" || action === "weave_right") validateBoxingObstacle(event);
     if (event.modifier === "crossed_guard" || (Array.isArray(event.runtimeModifiers) && event.runtimeModifiers.includes("crossed_guard"))) throw gameplayError("event_modifier_invalid", "Boxing event uses an unsupported modifier");
     if (action === "guard") validateGuardTarget(event);
-    if (selectedVariant.rulesetId === BOXING_COLLIDER_RULESET) {
+    if (isBoxingColliderRuleset(selectedVariant.rulesetId)) {
       if (PUNCH_ACTIONS.includes(action)) { const target = requireRecord(event.spatialTarget, "spatial_target_invalid"); requireGridCell(target.targetCell, "spatial_target_invalid"); }
       else if (action !== "guard" && event.checkpoint !== undefined) {
         const checkpoint = requireRecord(event.checkpoint, "checkpoint_invalid");
@@ -2188,12 +2250,22 @@ function normalizeFlowColliderSettings(value, selectedVariant) {
 
 /** @param {unknown} value @param {DataRecord} selectedVariant @returns {DataRecord} */
 function normalizeBoxingColliderSettings(value, selectedVariant) {
-  if (selectedVariant.rulesetId !== BOXING_COLLIDER_RULESET) {
+  if (!isBoxingColliderRuleset(selectedVariant.rulesetId)) {
     if (value !== undefined) throw gameplayError("boxing_collider_settings_invalid", "Boxing Collider settings require the Boxing Colliders ruleset");
     return defaultBoxingColliderSettings;
   }
   try { return createBoxingColliderSettings(value); }
   catch (error) { throw gameplayError("boxing_collider_settings_invalid", error instanceof Error ? error.message : "Boxing Collider settings are invalid"); }
+}
+
+/** @param {unknown} value @param {DataRecord} selectedVariant @returns {DataRecord} */
+function normalizeKneeColliderSettings(value, selectedVariant) {
+  if (selectedVariant.rulesetId !== BOXING_KNEE_RULESET) {
+    if (value !== undefined) throw gameplayError("knee_collider_settings_invalid", "Knee settings require the distinct knee ruleset");
+    return defaultKneeColliderSettings;
+  }
+  try { return createKneeColliderSettings(value); }
+  catch (error) { throw gameplayError("knee_collider_settings_invalid", error instanceof Error ? error.message : "Knee settings are invalid"); }
 }
 
 /** @param {unknown} value @returns {readonly DataRecord[]} */
@@ -2316,6 +2388,8 @@ function makeJudgement(event, selectedVariant, result, diagnostics, evidence, ev
   return /** @type {AeroGameplayJudgement} */ (Object.freeze({ schema: "aerobeat/gameplay_judgement", version: 2, sessionPurpose, eventId: String(event.eventId), rulesetId, recipeId, result, beatCenterTimestampMs: center, committedTimelinePositionMs, evidenceTimestampMs: evidence ? evidence.measurementTimestampMs : null, timingOffsetMs: evidenceTimelineMs === null ? null : evidenceTimelineMs - center, diagnostics: Object.freeze(/** @type {import("@aerobeat/web-contracts").AeroJudgementDiagnosticCode[]} */ ([...diagnostics])), shadow, tier }));
 }
 
+/** @param {string} action */
+function isKneeAction(action) { return action === "knee_left" || action === "knee_right"; }
 /** @param {DataRecord} event */
 function expectedAction(event) { return typeof event.type === "string" ? event.type : "note"; }
 /** @param {DataRecord} event */
@@ -2332,8 +2406,8 @@ function defaultScoringSettings() { return Object.freeze({ comboBonusPerHit: 0, 
 function scoreSettingsIdentity(settings) { return `scoring-v1:${JSON.stringify(settings.hitPoints)},${JSON.stringify(settings.missPenalty)},${JSON.stringify(settings.comboBonusPerHit)}`; }
 /** @param {number} value */
 function finiteScore(value) { if (!Number.isFinite(value) || value < 0) throw gameplayError("score_value_invalid", "Score arithmetic must remain finite and non-negative"); return Object.is(value, -0) ? 0 : value; }
-/** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings @param {DataRecord} [colliderSettings] @param {string | null} [equipmentIdentity] */
-function scorePartitionKey(variant, profile, settings, colliderSettings = defaultFlowColliderSettings, equipmentIdentity = null) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; const colliderRuleset = variant.rulesetId === FLOW_COLLIDER_RULESET || variant.rulesetId === BOXING_COLLIDER_RULESET; return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings), ...(colliderRuleset ? [`equipment-config-sha256:${equipmentIdentity ?? "missing"}`] : []), ...(variant.rulesetId === FLOW_COLLIDER_RULESET ? [flowColliderSettingsIdentity(colliderSettings)] : variant.rulesetId === BOXING_COLLIDER_RULESET ? [boxingColliderSettingsIdentity(colliderSettings)] : [])].join("|"); }
+/** @param {DataRecord} variant @param {DataRecord} profile @param {DataRecord} settings @param {DataRecord} [colliderSettings] @param {string | null} [equipmentIdentity] @param {DataRecord} [kneeSettings] */
+function scorePartitionKey(variant, profile, settings, colliderSettings = defaultFlowColliderSettings, equipmentIdentity = null, kneeSettings = defaultKneeColliderSettings) { const mapHash = isPlainRecord(variant.mapHash) && typeof variant.mapHash.value === "string" ? variant.mapHash.value : "unhashed"; const scoreHash = isPlainRecord(variant.scoreIdentityHash) && typeof variant.scoreIdentityHash.value === "string" ? variant.scoreIdentityHash.value : "unhashed"; const colliderRuleset = variant.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(variant.rulesetId); return [variant.variantId, variant.chartId, variant.mode, variant.rulesetId, variant.recipeId ?? "none", [...variant.modifierIds].join(","), variant.ranked ? "ranked" : "unranked", mapHash, scoreHash, profile.profileId, profile.profileVersion, profile.contentHash, profile.class, profile.regenerationRequired ? "regenerate" : "live", scoreSettingsIdentity(settings), ...(colliderRuleset ? [`equipment-config-sha256:${equipmentIdentity ?? "missing"}`] : []), ...(variant.rulesetId === FLOW_COLLIDER_RULESET ? [flowColliderSettingsIdentity(colliderSettings)] : variant.rulesetId === BOXING_COLLIDER_RULESET ? [boxingColliderSettingsIdentity(colliderSettings)] : variant.rulesetId === BOXING_KNEE_RULESET ? [boxingColliderSettingsIdentity(colliderSettings), kneeColliderSettingsIdentity(kneeSettings)] : [])].join("|"); }
 /** @param {DataRecord} variant */
 function publicVariant(variant) { return Object.freeze({ variantId: variant.variantId, chartId: variant.chartId, mode: variant.mode, rulesetId: variant.rulesetId, recipeId: variant.recipeId, modifierIds: variant.modifierIds, ranked: variant.ranked, localOnly: variant.localOnly, mapHash: variant.mapHash, scoreIdentityHash: variant.scoreIdentityHash, provenance: variant.provenance }); }
 /** @param {"three" | "two" | "one" | "complete" | "cancelled"} state @param {AeroCountdownReason | null} reason @param {number | null} value @param {number} timestampMs @param {string | null} calibrationId */
