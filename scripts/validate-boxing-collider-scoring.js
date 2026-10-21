@@ -84,7 +84,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
     send(front, 819, [1, 1], [3, 1], [3, 2]);
     assert.equal(front.getJudgements().length, 0, `forward ${depth} cannot score before the independent base window`);
     send(front, 1000, [1, 1], [3, 1], [3, 2]);
-    assert.deepEqual(front.getJudgements().map(j => j.result), ["hit"], `forward ${depth} scores the note at its center`);
+    assert.deepEqual(front.getJudgements().map(j => j.result), depth >= 1 ? ["hit"] : [], `forward ${depth} only reaches the incoming center after its negative-Z cap crosses the hit plane`);
   }
   for (const depth of [0, 0.00001, 0.5, 5]) {
     const rear = ready([event], settings({ colliderDepthBackward: depth }));

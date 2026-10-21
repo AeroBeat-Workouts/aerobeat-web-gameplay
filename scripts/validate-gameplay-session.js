@@ -5,6 +5,7 @@ import { isCountdownSnapshot, isGameplayJudgement, isGameplaySessionSnapshot, is
 import { createPlaybackClock } from "../../aerobeat-web-audio/src/index.js";
 import { internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget } from "../src/equipment-pose-collision.js";
 import { defaultFlowColliderSettings } from "../src/flow-collider-collision.js";
+import { defaultBoxingColliderSettings } from "../src/boxing-collider-collision.js";
 import {
   aeroGameplaySessionCapabilities,
   createAeroGameplaySessionCoordinator
@@ -1662,7 +1663,9 @@ for (const [label, wristX, timeMs] of [
   const fInput = (latestEvidence) => ({ sourceIdentity: "camera-a", calibration: { calibrationId: "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: false, freshCalibrationRequired: false }, countdownFrozen: false, latestEvidence, straightQualifications: [] });
   const readyB = (label, events, selected) => {
     const c = createAeroGameplaySessionCoordinator({ sessionId: `frozen-${label}-${++frozenSeq}`, countdownStepMs: 1 });
-    c.configureContent(config(events, selected));
+    // Freeze tests pin the original cylinder interval [−.97,+.39] explicitly;
+    // the incoming-forward depth correction changes the generic +1/+1 fixture.
+    c.configureContent({ ...config(events, selected), ...(selected.rulesetId === "boxing_collider_v1" ? { boxingColliderSettings: { ...defaultBoxingColliderSettings, colliderDepthForward: 2, colliderDepthBackward: 0 } } : {}) });
     c.advance({ timestampMs: 0, clock: clock(0, false), input: fInput(null) });
     assert.equal(c.requestStart(0).accepted, true);
     c.advance({ timestampMs: 1, clock: clock(0, false) });

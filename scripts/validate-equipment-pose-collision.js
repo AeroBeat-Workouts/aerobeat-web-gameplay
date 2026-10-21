@@ -50,12 +50,12 @@ assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.84, y: 1, z: 0 })
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.840001, y: 1, z: 0 })), false, "outside radius misses");
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.84, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), true, "local Z roll leaves circular cross-section unchanged");
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.840001, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), false, "rolled cylinder retains precise XY edge");
-const pitchedX = pose("left_wrist", "boxing", { x: 1, y: 1.8, z: 0 }, { orientation: orientation(90, 0, 0) });
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "collapsed axis has no hidden length");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "rotated front reaches toward target Y");
-const pitchedY = pose("left_wrist", "boxing", { x: 1.8, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "Y-tilted zero length stays outside target");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 1, depthBackward: 0 }), true, "Y-tilted front follows local Z");
+const pitchedX = pose("left_wrist", "boxing", { x: 1, y: .2, z: 0 }, { orientation: orientation(90, 0, 0) });
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "collapsed rear cap has no hidden length");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 2, depthBackward: 0 }), true, "rotated front reaches toward target Y along local negative Z");
+const pitchedY = pose("left_wrist", "boxing", { x: .2, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "Y-tilted rear cap stays outside target");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 2, depthBackward: 0 }), true, "Y-tilted front follows local negative Z");
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.2, y: 1.1, z: 0 }, { scale: 0.75, orientation: orientation(25, 35, 65) })), true, "combined glove quaternion resolves deterministically");
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.9, y: 1.9, z: 0 }, { orientation: orientation(0, 0, 45) })), false, "circular corner misses outside true radius");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 820), false, "moving note Z=-1.08 is beyond front cap");
@@ -94,10 +94,10 @@ for (const volume of [{ depthForward: 0, depthBackward: 0 }, { depthForward: 2, 
   assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 819, 180, volume), false, "depth cannot admit before base timing");
   assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1181, 180, volume), false, "depth cannot admit after base timing");
 }
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 890, 180, { depthForward: 1, depthBackward: 1 }), true, "extended rear reaches early moving Z");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 890, 180, { depthForward: 1, depthBackward: 0 }), false, "rear zero cannot reach early note");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1130, 180, { depthForward: 1, depthBackward: 0 }), false, "unit front cannot reach late note Z");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1130, 180, { depthForward: 2, depthBackward: 0 }), true, "positive front reaches later moving Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 890, 180, { depthForward: 2, depthBackward: 0 }), true, "positive front reaches early incoming negative Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 890, 180, { depthForward: 1, depthBackward: 2 }), false, "rear expansion alone cannot reach early incoming note");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1130, 180, { depthForward: 1, depthBackward: 0 }), false, "rear zero cannot reach late spent positive Z");
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxerAt, 1130, 180, { depthForward: 1, depthBackward: 2 }), true, "positive rear reaches later spent moving Z");
 assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pose("left_wrist", "boxing", { x: 1.9, y: 1, z: 0 }), 1000, 180), false);
 assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pose("left_wrist", "boxing", { x: 1.9, y: 1, z: 0 }), 1000, 180, { scale: 2 }), true, "scale grows cylinder not authored rectangle");
 assert.equal(beatInsideColliderDepth(1000, 640, 180), false, "a future note remains ineligible beyond its timing window");
