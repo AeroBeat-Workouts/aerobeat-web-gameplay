@@ -1512,6 +1512,16 @@ for (const [label, wristX, timeMs] of [
   assert.equal(stopped.getSnapshot().session.timelinePositionMs, 0);
   assert.equal(stopped.getSnapshot().session.pauseReason, "audio_clock_not_playing");
 
+  const almostEnded = createAeroGameplaySessionCoordinator({ sessionId: "natural-audio-eof-rounding" });
+  readyPlaying(almostEnded, [event("future-near-eof", 5000, "hook_left")]);
+  const audioDuration = 207.40497916666666, audioEnd = 207.40497916666664;
+  almostEnded.advance({ timestampMs: 3100, clock: { contextTimeSeconds: audioEnd, positionSeconds: audioEnd, durationSeconds: audioDuration, progress: audioEnd / audioDuration, playing: false } });
+  assert.equal(almostEnded.getSnapshot().session.state, "completed", "one floating-point rounding step at natural EOF must finish Play");
+  const prematurelyStopped = createAeroGameplaySessionCoordinator({ sessionId: "early-stopped-clock" });
+  readyPlaying(prematurelyStopped, [event("future-early", 5000, "hook_left")]);
+  prematurelyStopped.advance({ timestampMs: 3100, clock: clock(207400, false, 207405) });
+  assert.equal(prematurelyStopped.getSnapshot().session.state, "paused_manual", "genuinely early audio stop must not complete Play");
+
   const lost = createAeroGameplaySessionCoordinator({ sessionId: "tracking-clock-freeze" });
   readyPlaying(lost, [event("future-lost", 5000, "hook_left")]);
   lost.advance({ timestampMs: 3100, clock: clock(500, true), input: input(3100, null, { paused: true, fresh: true }) });

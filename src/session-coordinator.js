@@ -2034,7 +2034,11 @@ function normalizeClock(value) {
   if (typeof record.playing !== "boolean") throw gameplayError("audio_clock_invalid", "Audio clock playing must be boolean");
   const positionMs = positionSeconds * 1000;
   if (!Number.isSafeInteger(positionMs) && (!Number.isFinite(positionMs) || positionMs > Number.MAX_SAFE_INTEGER)) throw gameplayError("audio_clock_invalid", "Audio clock position exceeds safe gameplay range");
-  const ended = record.playing === false && ((durationSeconds !== null && durationSeconds > 0 && positionSeconds >= durationSeconds) || record.progress === 1);
+  // Natural Web Audio EOF can report a position one floating-point rounding
+  // step below its declared duration (and progress just below one). This is
+  // numerical precision, not an early stopped clock or a scoring grace period.
+  const endRoundingTolerance = durationSeconds === null ? 0 : 4 * Number.EPSILON * Math.max(1, durationSeconds);
+  const ended = record.playing === false && ((durationSeconds !== null && durationSeconds > 0 && positionSeconds >= durationSeconds - endRoundingTolerance) || record.progress === 1);
   return Object.freeze({ positionMs, playing: record.playing, ended });
 }
 
