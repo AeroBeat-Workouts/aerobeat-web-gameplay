@@ -31,6 +31,14 @@ function send(game, wall, song, id, sides, extras) { const sample = evidence(son
 const result = game => game.getJudgements().map(j => [j.eventId, j.result]);
 
 const left = beat("knee-left", 1000, "knee_left", 9);
+{
+  const live = setup([beat("live-knee", 1000, "knee_left", 9)]);
+  send(live, 900, 900, "knee-old-height", { left: [1, 0] });
+  assert.deepEqual(result(live), [], "active knee misses old row-reach height");
+  live.setBoxingHeightTuning({ shoulderWorldY: 0, offsets: { straight: 0, hook: 0, uppercut: 0, guard: 0, knee: 0 } });
+  send(live, 1000, 1000, "knee-new-height", { left: [1, 0] });
+  assert.deepEqual(result(live), [["live-knee", "hit"]], "active knee immediately scores shoulder-relative height");
+}
 const right = beat("knee-right", 1200, "knee_right", 10);
 const game = setup([left, right]);
 send(game, 1000, 1000, "frame-1", { left: [1, .75], right: [8, 0] });

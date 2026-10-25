@@ -61,6 +61,47 @@ function send(c, songMs, left, right, nose, frameId, options = {}) {
 }
 const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]);
 
+// Already-active Boxer targets take the live shoulder-relative height on the
+// next frame, without moving authored cells or rewriting scored truth.
+{
+  const offsets = { straight: 0, hook: 0, uppercut: 0, guard: 0, knee: 0 };
+  const tuning = (change = {}) => ({ shoulderWorldY: 0, offsets: { ...offsets, ...change } });
+  const event = beat("live-straight", 1000, "straight_left", { placement: 5 });
+  const game = ready([event]);
+  send(game, 900, [1, 0], [3, 0], [3, 2]);
+  assert.equal(game.getJudgements().length, 0, "legacy row Y=1 misses measured shoulder Y=0");
+  const original = JSON.stringify(event);
+  game.setBoxingHeightTuning(tuning());
+  send(game, 1000, [1, 0], [3, 0], [3, 2]);
+  assert.deepEqual(game.getJudgements().map(j => j.result), ["hit"], "active punch uses new height immediately");
+  assert.equal(JSON.stringify(event), original, "authored envelope remains unchanged");
+  const scored = JSON.stringify(game.getJudgements());
+  const partitions = JSON.stringify(game.getScorePartitions());
+  game.setBoxingHeightTuning(tuning({ straight: 2 }));
+  assert.equal(JSON.stringify(game.getJudgements()), scored, "live tuning cannot rewrite scored history");
+  assert.equal(JSON.stringify(game.getScorePartitions()), partitions, "live tuning cannot repartition run-locked identity");
+  const sibling = ready([beat("live-hook", 1000, "hook_left", { placement: 5 })]);
+  sibling.setBoxingHeightTuning(tuning({ straight: 2 }));
+  send(sibling, 900, [0.5, 0], [3, 0], [3, 2]);
+  send(sibling, 1000, [1, 0], [3, 0], [3, 2]);
+  assert.deepEqual(sibling.getJudgements().map(j => j.result), ["hit"], "straight offset cannot move hook");
+  const noHook = ready([beat("shift-hook", 1000, "hook_left", { placement: 5 })]);
+  noHook.setBoxingHeightTuning(tuning({ hook: 2 }));
+  send(noHook, 1000, [1, 0], [3, 0], [3, 2]);
+  assert.equal(noHook.getJudgements().length, 0, "hook offset independently moves its target");
+  const guard = ready([beat("live-guard", 1000, "guard", { guardTarget: { leftCell: 4, rightCell: 6 } })]);
+  send(guard, 900, [0, 0], [2, 0], [3, 2]);
+  assert.equal(guard.getJudgements().length, 0, "guard pair misses old row");
+  guard.setBoxingHeightTuning(tuning());
+  send(guard, 1000, [0, 0], [2, 0], [3, 2]);
+  assert.deepEqual(guard.getJudgements().map(j => j.result), ["hit"], "both active guard shields share new Y");
+  const invalid = [tuning({ knee: 4.01 }), tuning({ uppercut: NaN }), { shoulderWorldY: 3, offsets }, { shoulderWorldY: 0, offsets: { ...offsets, extra: 1 } }, { shoulderWorldY: 0, offsets: { ...offsets, guard: undefined } }];
+  for (const value of invalid) assert.throws(() => sibling.setBoxingHeightTuning(value), { code: "boxing_height_tuning_invalid" });
+  const getter = { shoulderWorldY: 0, offsets: { ...offsets } };
+  Object.defineProperty(getter.offsets, "knee", { enumerable: true, get() { throw Error("getter invoked"); } });
+  assert.throws(() => sibling.setBoxingHeightTuning(getter), /accessors/);
+}
+
 // Scored Play punches keep the independent ±base hit eligibility and
 // fully-out-of-view +1000ms miss deadline regardless of cylinder depth.
 {

@@ -107,6 +107,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let flowColliderSettings = /** @type {DataRecord} */ (defaultFlowColliderSettings);
   let boxingColliderSettings = /** @type {DataRecord} */ (defaultBoxingColliderSettings);
   let kneeColliderSettings = /** @type {DataRecord} */ (defaultKneeColliderSettings);
+  /** Live presentation-aligned Boxer heights, separate from run-locked settings and authored events. */
+  let boxingHeightTuning = /** @type {Readonly<{shoulderWorldY:number, offsets:Readonly<Record<"straight"|"hook"|"uppercut"|"guard"|"knee",number>>}> | null} */ (null);
   let lastKneeFrame = /** @type {Readonly<{sourceFrameId:string,measurementTimestampMs:number,calibrationId:string,sourceIdentity:string}> | null} */ (null);
   let events = /** @type {readonly DataRecord[]} */ (Object.freeze([]));
   let contentGeneration = 0;
@@ -206,6 +208,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const service = Object.freeze({
     configureContent,
     configureKneeColliderSettings,
+    setBoxingHeightTuning,
     requestStart,
     pause,
     resume,
@@ -292,6 +295,35 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     eventTruth = bindEventTruth(events, /** @type {string} */ (packageId), contentGeneration, variant, profileIdentity, scoringSettings, flowColliderSettings, boxingColliderSettings, kneeColliderSettings);
     publish(null);
     return settings;
+  }
+
+  /**
+   * Replace live Boxer target heights atomically. The caller supplies the captured
+   * average T-pose shoulder in judge/world Y (2.5 - 3 * normalizedShoulderY).
+   * No scored event, collider identity, or historical outcome is rewritten.
+   * @param {unknown} value
+   */
+  function setBoxingHeightTuning(value) {
+    const record = requireRecord(value, "boxing_height_tuning_invalid");
+    if (Reflect.ownKeys(record).length !== 2 || !("shoulderWorldY" in record) || !("offsets" in record)) throw gameplayError("boxing_height_tuning_invalid", "Expected shoulderWorldY and offsets only");
+    const offsets = requireRecord(record.offsets, "boxing_height_tuning_invalid");
+    const families = /** @type {const} */ (["straight", "hook", "uppercut", "guard", "knee"]);
+    if (Reflect.ownKeys(offsets).length !== families.length || families.some((family) => !(family in offsets))) throw gameplayError("boxing_height_tuning_invalid", "Expected exactly five Boxing height offsets");
+    if (typeof record.shoulderWorldY !== "number" || !Number.isFinite(record.shoulderWorldY) || record.shoulderWorldY < -0.5 || record.shoulderWorldY > 2.5) throw gameplayError("boxing_height_tuning_invalid", "Shoulder world Y must be a projected normalized shoulder height");
+    /** @type {Record<"straight"|"hook"|"uppercut"|"guard"|"knee",number>} */
+    const normalized = /** @type {Record<"straight"|"hook"|"uppercut"|"guard"|"knee",number>} */ ({ straight: 0, hook: 0, uppercut: 0, guard: 0, knee: 0 });
+    for (const family of families) {
+      const offset = offsets[family];
+      if (typeof offset !== "number" || !Number.isFinite(offset) || offset < -4 || offset > 4 || !Number.isFinite(record.shoulderWorldY + offset)) throw gameplayError("boxing_height_tuning_invalid", "Boxing height offsets must be finite world units in -4..4");
+      normalized[family] = Object.is(offset, -0) ? 0 : offset;
+    }
+    boxingHeightTuning = Object.freeze({ shoulderWorldY: record.shoulderWorldY, offsets: Object.freeze(normalized) });
+  }
+
+  /** @param {number} placement @param {"straight"|"hook"|"uppercut"|"guard"|"knee"} family @param {Readonly<{topRowReachWU:number,bottomRowReachWU:number}>} reach */
+  function boxingTargetCenter(placement, family, reach) {
+    const center = boxingColliderTargetCenter(placement, reach);
+    return boxingHeightTuning === null ? center : Object.freeze({ x: center.x, y: boxingHeightTuning.shoulderWorldY + boxingHeightTuning.offsets[family] });
   }
 
   /**
@@ -1604,7 +1636,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
         const placement = Number(event.spatialTarget.targetCell);
-        const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(placement, reach) });
+        const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingTargetCenter(placement, /** @type {"straight"|"hook"|"uppercut"} */ (action.slice(0, action.indexOf("_"))), reach) });
         // Swept test: the shared flat-ended glove cylinder intersects the
         // authored XY note rectangle at its moving song-time Z. Depth controls
         // cylinder length only; the timing window is independent.
@@ -1621,8 +1653,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const target = /** @type {DataRecord | undefined} */ (event.guardTarget);
         if (!target) continue;
         const leftCell = Number(target.leftCell); const rightCell = Number(target.rightCell);
-        const leftTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(leftCell, reach) });
-        const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(rightCell, reach) });
+        const leftTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingTargetCenter(leftCell, "guard", reach) });
+        const rightTarget = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingTargetCenter(rightCell, "guard", reach) });
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
         const volume = colliderVolumeSettings(boxingColliderSettings);
         // Guard poses use each role's exact resolved glove hull, swept across
@@ -1668,7 +1700,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const settings = kneeColliderSettingsForEvent(event);
       const windowMs = Number(event.timingWindowMs);
       if (timestampMs - knee.measurementTimestampMs >= Number(event.evidenceFreshnessMs)) continue;
-      const target = { centerTimestampMs: Number(event.centerTimestampMs), ...boxingColliderTargetCenter(Number(event.spatialTarget.targetCell), reach) };
+      const target = { centerTimestampMs: Number(event.centerTimestampMs), ...boxingTargetCenter(Number(event.spatialTarget.targetCell), "knee", reach) };
       if (!kneePadContactsBoxingTarget(target, knee, settings, windowMs)) continue;
       usedSides.add(side);
       recordJudgementAt(event, "hit", Object.freeze([]), latestEvidence, false, knee.songTimeMs);
