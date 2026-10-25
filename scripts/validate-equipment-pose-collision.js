@@ -41,21 +41,28 @@ assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, scaleEdge, 1000,
 assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, scaleEdge, 1000, 180, { scale: 1 }), true, "Scale 1 glove radius contacts fixed note rectangle");
 assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, scaleEdge, 1000, 180, { scale: 2 }), true, "Scale 2 increases glove radius");
 
-// The 3D cylinder tests the note at its moving Z; XY rotation around local Z
-// leaves its circular cross-section unchanged, while X/Y tilts move its axis.
+// The 3D cylinder tests the note at its moving Z. Wrist orientation rotates
+// wearable art, never the scored cylinder's wrist-anchored world-Z axis.
 for (const role of ["left_wrist", "right_wrist"]) {
   for (const scale of [0.75, 1, 2]) assert.equal(boxingContact(pose(role, "boxing", { x: 1, y: 1, z: 0 }, { scale })), true, `${role} scale ${scale} center contact`);
 }
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.84, y: 1, z: 0 })), true, "cylinder radius exact XY touch counts");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1.840001, y: 1, z: 0 })), false, "outside radius misses");
-assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.84, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), true, "local Z roll leaves circular cross-section unchanged");
-assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.840001, y: 1, z: 0 }, { orientation: orientation(0, 0, 90) })), false, "rolled cylinder retains precise XY edge");
-const pitchedX = pose("left_wrist", "boxing", { x: 1, y: .2, z: 0 }, { orientation: orientation(90, 0, 0) });
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "collapsed rear cap has no hidden length");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedX, 1000, 180, { depthForward: 2, depthBackward: 0 }), true, "rotated front reaches toward target Y along local negative Z");
-const pitchedY = pose("left_wrist", "boxing", { x: .2, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 0, depthBackward: 0 }), false, "Y-tilted rear cap stays outside target");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, pitchedY, 1000, 180, { depthForward: 2, depthBackward: 0 }), true, "Y-tilted front follows local negative Z");
+const rotatedGloveCases = [
+  { label: "identity", orientation: orientation() },
+  { label: "X tilt", orientation: orientation(90, 0, 0) },
+  { label: "Y tilt", orientation: orientation(0, -90, 0) },
+  { label: "Z roll", orientation: orientation(0, 0, 90) },
+  { label: "combined", orientation: orientation(25, 35, 65) }
+];
+for (const { label, orientation: gloveOrientation } of rotatedGloveCases) {
+  for (const [x, expected] of [[1.84, true], [1.840001, false]]) {
+    const entry = pose("right_wrist", "boxing", { x, y: 1, z: 0 }, { orientation: gloveOrientation });
+    assert.equal(boxingContact(entry), expected, `${label}: wrist orientation cannot change XY edge contact`);
+  }
+  const offset = pose("left_wrist", "boxing", { x: 1, y: -.2, z: 0 }, { orientation: gloveOrientation });
+  assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, offset, 1000, 180, { depthForward: 2, depthBackward: 0 }), false, `${label}: front depth cannot rotate into target Y`);
+}
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.2, y: 1.1, z: 0 }, { scale: 0.75, orientation: orientation(25, 35, 65) })), true, "combined glove quaternion resolves deterministically");
 assert.equal(boxingContact(pose("right_wrist", "boxing", { x: 1.9, y: 1.9, z: 0 }, { orientation: orientation(0, 0, 45) })), false, "circular corner misses outside true radius");
 assert.equal(boxingContact(pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }), 820), false, "moving note Z=-1.08 is beyond front cap");
@@ -74,11 +81,17 @@ for (const [label, z, expected] of [
 assert.equal(sweptGloveObbContactsBoxingTarget(boxingTarget, [{ t: 1000 + .391 / .006, pose: flatCap }], 180, flatVolume), null, "swept history cannot score just past the flat front cap");
 assert.equal(sweptGloveObbContactsBoxingTarget(boxingTarget, [{ t: 1000 + .389 / .006, pose: flatCap }], 180, flatVolume)?.hitDepthHalf, "back", "swept history scores just inside the front cap");
 assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, flatCap, 1000 + .391 / .006, 180, { ...flatVolume, scale: 9999999 }), false, "even huge finite radius cannot extend the flat cap axially");
-// Tilt lets an in-plane note touch the curved side, but its nearest point
-// must lie between actual caps, not within a hemisphere beyond the front.
-const tiltedFlatCap = pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }, { orientation: orientation(0, 45, 0) });
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, tiltedFlatCap, 1000 + .26 / .006, 180, flatVolume), true, "tilted side reaches an in-range note plane");
-assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, tiltedFlatCap, 1000 + .277 / .006, 180, flatVolume), false, "tilted flat front cannot extend beyond its maximum world Z");
+// Both world-Z flat caps keep the same contact boundary under rotated art;
+// a tilted wearable cannot shorten or extend the scored cap reach.
+for (const { label, orientation: gloveOrientation } of rotatedGloveCases) {
+  const rotated = { ...flatCap, orientation: gloveOrientation };
+  for (const [z, expected] of [[-.291, false], [-.289, true], [.389, true], [.391, false]]) {
+    assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, rotated, 1000 + z / .006, 180, flatVolume), expected, `${label}: fixed-Z cap at ${z}`);
+  }
+  for (const [songTimeMs, expected] of [[890, true], [1130, false]]) {
+    assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, rotated, songTimeMs, 180, { depthForward: 2, depthBackward: 0 }), expected, `${label}: front reaches incoming -Z, not spent +Z`);
+  }
+}
 
 // Flow remains XY-projected with its own timing slab. Boxing intersects a
 // moving XY note face in 3D, with independent ±base timing eligibility.
