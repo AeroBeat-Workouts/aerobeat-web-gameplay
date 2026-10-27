@@ -453,8 +453,12 @@ for (const [label, wristX, timeMs] of [
   const duplicate = setAnchorPosition(evidence("life-seed", 1100, []), "left_wrist", 1, 1);
   coordinator.advance({ timestampMs: 1100, clock: clock(1100, true), input: productionInput(1100, duplicate), equipmentPoses: equipmentPosesForEvidence(duplicate, "flow"), interaction: visualTestInteraction(2, 1000) });
   assert.deepEqual(coordinator.getJudgements(), [], "duplicate identity cannot bridge the recovery baseline");
-  const stale = setAnchorPosition(evidence("life-stale", 900, []), "left_wrist", 1, 1);
-  assert.throws(() => coordinator.advance({ timestampMs: 1149, clock: clock(1149, true), input: productionInput(900, stale), equipmentPoses: equipmentPosesForEvidence(stale, "flow"), interaction: visualTestInteraction(2, 1000) }), /current valid measured wrist/u);
+  // A frame older than the judgement age bound still rejects transactionally:
+  // it can never bridge history or score retroactively. A frame INSIDE the
+  // bound is legitimate late evidence and is judged at its own song position;
+  // scripts/validate-latency-tolerant-scoring.js owns that behaviour.
+  const stale = setAnchorPosition(evidence("life-stale", 349, []), "left_wrist", 1, 1);
+  assert.throws(() => coordinator.advance({ timestampMs: 1149, clock: clock(1149, true), input: productionInput(349, stale), equipmentPoses: equipmentPosesForEvidence(stale, "flow"), interaction: visualTestInteraction(2, 1000) }), /current valid measured wrist/u);
   assert.deepEqual(coordinator.getJudgements(), [], "stale evidence rejects transactionally and cannot bridge history");
   const sourceSeed = setAnchorPosition(evidence("life-source-seed", 1150, []), "left_wrist", -0.5, 1);
   coordinator.advance({ timestampMs: 1150, clock: clock(1150, true), input: productionInput(1150, sourceSeed, { sourceIdentity: "source-b" }), equipmentPoses: equipmentPosesForEvidence(sourceSeed, "flow"), interaction: visualTestInteraction(2, 1000) });

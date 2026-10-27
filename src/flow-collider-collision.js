@@ -10,6 +10,20 @@ import { gloveGeometry, saberGeometry } from "@aerobeat/web-contracts/equipment-
 
 export const maximumColliderSampleFreshnessMs = 150;
 export const maximumColliderSampleGapMs = 150;
+/**
+ * Bounded age at which a measured frame may still be judged.
+ *
+ * Collider judgement is time-based: every sample carries `songTimeMs`, the song
+ * position its landmarks were measured at, and the swept judge tests it there.
+ * A frame therefore does not become useless when the pipeline is slow; it only
+ * becomes useless once the beat it belongs to has already left its Play
+ * deadline (centre + 1000 ms) before the frame arrives. Treating wall-clock age
+ * as a judgement gate made any pipeline slower than
+ * `maximumColliderSampleFreshnessMs` (150 ms) unable to score at all, which is
+ * exactly what a loaded CPU or a low-end phone produces. This bound is the
+ * honest limit: beyond it a beat can no longer be rescued by late data.
+ */
+export const maximumColliderJudgementAgeMs = 750;
 const WRIST_BOMB_RADIUS_WU = 0.12;
 export const flowColliderSettingsBounds = Object.freeze({
   colliderRadius: Object.freeze({ minimum: 0, maximum: 0.5 }),
@@ -89,15 +103,19 @@ const DIRECTIONS = Object.freeze({
  * Provider/raw/screen coordinates never enter this result.
  *
  * F4 (0.0.60): `provenance: "frozen"` frames (held last-measured positions
- * republished during a calibrated tracking freeze) are accepted. The 150 ms
- * freshness age check is EXEMPTED for frozen frames — the held timestamp is
- * allowed to age past it by design — and the held position is scored at the
- * current song position because it represents the athlete's current pose.
+ * republished during a calibrated tracking freeze) are accepted. The age bound
+ * is EXEMPTED for frozen frames — the held timestamp is allowed to age past it
+ * by design — and the held position is scored at the current song position
+ * because it represents the athlete's current pose.
  * Every other validation (exact anchor name, valid + confidence, finite
  * coordinates, calibration/timestamp equality) stays identical. Wrist
  * coordinates may be finite and off-grid because exact resolved equipment
  * geometry decides collider contact; nose coordinates remain grid-bounded for
  * body/obstacle semantics.
+ *
+ * A measured frame keeps its own song position in `songTimeMs` and is accepted
+ * up to `maximumColliderJudgementAgeMs`, so a slow pipeline delays the verdict
+ * instead of discarding the evidence.
  *
  * @param {DataRecord} evidence @param {DataRecord} input @param {WristName | "nose"} anchorName @param {number} timelinePositionMs @param {number} frameTimestampMs
  * @returns {ColliderSample | null}
@@ -116,9 +134,12 @@ export function measuredColliderSample(evidence, input, anchorName, timelinePosi
   const ageMs = frameTimestampMs - evidence.measurementTimestampMs;
   if (!Number.isFinite(ageMs) || ageMs < 0) return null;
   // Frozen frames hold the last measured position, so the held timestamp
-  // deliberately ages past the freshness window. Exempt it from the freshness
-  // check and score the held pose at the current song position.
-  if (!isFrozen && ageMs >= maximumColliderSampleFreshnessMs) return null;
+  // deliberately ages past any freshness bound. Exempt it from the age bound
+  // and score the held pose at the current song position. A measured frame is
+  // bounded by maximumColliderJudgementAgeMs instead: it is scored at the song
+  // position it was measured at, so pipeline latency delays the verdict without
+  // invalidating the evidence.
+  if (!isFrozen && ageMs > maximumColliderJudgementAgeMs) return null;
   const effectiveAgeMs = isFrozen ? 0 : ageMs;
   return Object.freeze({ songTimeMs: timelinePositionMs - effectiveAgeMs, measurementTimestampMs: evidence.measurementTimestampMs, sourceFrameId: evidence.measuredSourceFrameId, sourceIdentity: input.sourceIdentity, calibrationId: evidence.calibrationId, sx: 4 * x - 0.5, sy: 2.5 - 3 * y });
 }

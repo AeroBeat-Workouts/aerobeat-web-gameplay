@@ -54,7 +54,7 @@ assert.equal(game.getScorePartitions()[0].hits, 2);
 for (const [name, sides, wall, extra] of [
   ["wrong side", { right: [1, .75] }, 1000, {}],
   ["outside volume", { left: [1, 2] }, 1000, {}],
-  ["stale", { left: [1, .75] }, 1150, {}],
+  ["stale", { left: [1, .75] }, 1751, {}],
   ["no knee pose", {}, 1000, {}],
   ["frozen", { left: [1, .75] }, 1000, { provenance: "frozen", frozenTickId: 1, kneePose: undefined }]
 ]) {
@@ -62,7 +62,8 @@ for (const [name, sides, wall, extra] of [
   const sample = evidence(1000, `frame-${name}`, sides, extra);
   if (name === "frozen") delete sample.kneePose;
   if (name === "stale") {
-    // A valid old measured frame is not a current equipment pose either.
+    // A frame older than the judgement age bound is not usable equipment
+    // evidence at all; one inside the bound is legitimate late evidence.
     assert.throws(() => g.advance({ timestampMs: wall, clock: clock(1000, true), input: input(sample), equipmentPoses: poses(sample) }), /current valid measured wrist/);
     assert.deepEqual(result(g), [], name);
     continue;

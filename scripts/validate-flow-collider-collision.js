@@ -57,8 +57,13 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 {
   const sample=evidence("frame",1000,[1,1]); const wrapped={sourceIdentity:"camera-a"};
   assert.ok(measuredColliderSample(sample,wrapped,"left_wrist",1000,1000));
-  assert.ok(measuredColliderSample(sample,wrapped,"left_wrist",1149.999,1149.999));
-  assert.equal(measuredColliderSample(sample,wrapped,"left_wrist",1150,1150),null);
+  // The age bound is the judgement bound: a late frame stays evidence and keeps
+  // the song position it was measured at, so a slow pipeline delays the verdict
+  // instead of discarding it (scripts/validate-latency-tolerant-scoring.js).
+  const lateSample=measuredColliderSample(sample,wrapped,"left_wrist",1750,1750);
+  assert.ok(lateSample,"a frame exactly one judgement bound old is still usable evidence");
+  assert.equal(lateSample.songTimeMs,1000,"a late frame keeps its measured song position");
+  assert.equal(measuredColliderSample(sample,wrapped,"left_wrist",1751,1751),null);
   assert.equal(measuredColliderSample(sample,wrapped,"left_wrist",999,999),null);
   assert.equal(measuredColliderSample({...sample,provenance:"predicted"},wrapped,"left_wrist",1000,1000),null);
   assert.equal(measuredColliderSample(sample,{},"left_wrist",1000,1000),null);
@@ -280,7 +285,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   const c=ready([beat("wall-note",1000,"note",{hand:"left",placement:5}),wall("wall-a"),wall("wall-b")]);send(c,900,900,[-.5,1],[3,1],[0,1]);send(c,1000,1000,[1,1],[3,1],[2,1]);assert.equal(c.getScorePartitions()[0].hits,1);assert.equal(c.getScorePartitions()[0].combo,0);assert.equal(c.getScorePartitions()[0].obstacleContacts,1);send(c,1100,1100,[1,1],[3,1],[2,1]);assert.deepEqual(c.getHazardOutcomes().filter(o=>o.kind==="wall").map(o=>[o.eventId,o.result,o.consequenceApplied]),[["wall-a","contact",true],["wall-b","contact",false]]);
   const wristsOnly=ready([wall("wall-a")]);send(wristsOnly,900,900,[1,1],[1,1],[0,1]);send(wristsOnly,1000,1000,[1,1],[1,1],[0,1]);send(wristsOnly,1100,1100,[1,1],[1,1],[0,1]);assert.equal(wristsOnly.getHazardOutcomes()[0].result,"avoided");
   const freshNose=ready([wall("wall-a")]);const freshSample=evidence("fresh-nose",1000,[-.4,1],[3.4,1],[1,1]);freshNose.advance({timestampMs:1149.999,clock:clock(1149.999,true),input:input(1000,freshSample),equipmentPoses:equipmentPosesForEvidence(freshSample)});assert.equal(freshNose.getHazardOutcomes()[0].result,"contact","nose age below 150ms remains fresh");
-  const staleNose=ready([wall("wall-a")]);const staleSample=evidence("stale-nose",1000,[-.4,1],[3.4,1],[1,1]);assert.throws(()=>staleNose.advance({timestampMs:1150,clock:clock(1150,true),input:input(1000,staleSample),equipmentPoses:equipmentPosesForEvidence(staleSample)}),/current valid measured wrist/u,"an exactly-150ms-old active collider frame is rejected before stale nose contact");assert.notEqual(staleNose.getHazardOutcomes()[0]?.result,"contact","rejected stale frame cannot contact the wall");
+  const staleNose=ready([wall("wall-a")]);const staleSample=evidence("stale-nose",1000,[-.4,1],[3.4,1],[1,1]);assert.throws(()=>staleNose.advance({timestampMs:1751,clock:clock(1751,true),input:input(1000,staleSample),equipmentPoses:equipmentPosesForEvidence(staleSample)}),/current valid measured wrist/u,"an over-age active collider frame is rejected before stale nose contact");assert.notEqual(staleNose.getHazardOutcomes()[0]?.result,"contact","rejected stale frame cannot contact the wall");
 }
 
 // Complete dual-wrist passage avoids a bomb; a gap is explicitly unevaluated.

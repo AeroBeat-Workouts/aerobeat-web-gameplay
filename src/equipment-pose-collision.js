@@ -266,22 +266,36 @@ export const sweptPoseHistoryMarginMs = 200;
 /**
  * Retain a bounded, ascending per-role resolved-pose history.
  *
+ * Entries are stamped with the song position the pose was MEASURED at, not the
+ * playhead that happened to consume it. A slow pipeline therefore delays when a
+ * pose enters the history instead of shifting it forward on the timeline, so
+ * the swept judge keeps testing the swing against the beats it actually passed.
+ * A timestamp that is already present replaces its pose (idempotent republish),
+ * and an out-of-order entry is inserted in its correct place rather than
+ * discarding the neighbours.
+ *
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {ResolvedPose | null} pose
- * @param {number} timestampMs The measurement timestamp for this entry.
+ * @param {number} timestampMs The measurement song time for this entry.
  * @param {number} trimMs Total trim window (deepest legal window + margin).
  * @returns {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>}
  */
 export function pushPoseHistory(history, pose, timestampMs, trimMs) {
   if (pose === null) return Object.freeze([]);
-  const entry = Object.freeze({ t: timestampMs, pose });
-  const cutoff = timestampMs - trimMs;
-  // Copy into a fresh mutable array so the push never mutates a previous
-  // frozen history (which would throw).
+  if (!Number.isFinite(timestampMs)) return history;
+  const entry = () => Object.freeze({ t: timestampMs, pose });
   const kept = [];
-  for (const candidate of history) if (candidate.t > cutoff) kept.push(candidate);
-  kept.push(entry);
-  return Object.freeze(kept);
+  let inserted = false;
+  for (const candidate of history) {
+    if (candidate.t === timestampMs) { kept.push(entry()); inserted = true; continue; }
+    if (!inserted && candidate.t > timestampMs) { kept.push(entry()); inserted = true; }
+    kept.push(candidate);
+  }
+  if (!inserted) kept.push(entry());
+  const cutoff = kept[kept.length - 1].t - trimMs;
+  const trimmed = [];
+  for (const candidate of kept) if (candidate.t > cutoff) trimmed.push(candidate);
+  return Object.freeze(trimmed);
 }
 
 /** @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */

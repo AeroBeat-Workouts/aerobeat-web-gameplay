@@ -618,10 +618,13 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
 
 // --- Miss diagnostics: semantic codes only ------------------------------------------------------
 {
-  // The active collider boundary now rejects absent, stale, and calibration-
-  // mismatched evidence before scoring because exact equipment poses must resolve
-  // against two current measured wrists. Rejected calls remain transactional;
-  // a later current off-target frame still commits the intended miss.
+  // The active collider boundary rejects absent, over-age (beyond the judgement
+  // age bound), and calibration-mismatched evidence before scoring because exact
+  // equipment poses must resolve against two usable measured wrists. Frames
+  // inside the judgement bound are legitimate late evidence and are judged at
+  // their own song position (scripts/validate-latency-tolerant-scoring.js).
+  // Rejected calls remain transactional; a later current off-target frame still
+  // commits the intended miss.
   const noInput = ready([beat("diag-none", 1000, "straight_left", { placement: 5 })]);
   assert.throws(() => noInput.advance({ timestampMs: 1181, clock: clock(1181, true), input: input(1181, null), equipmentPoses: [] }), /exactly one left and one right wrist pose|current measured evidence/u);
   assert.equal(noInput.getJudgements().length, 0);
@@ -629,7 +632,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
   assert.deepEqual(judgementsAt(noInput), [["diag-none", "miss", ["wrong_collider"]]]);
   const stale = ready([beat("diag-stale", 1000, "straight_left", { placement: 5 })]);
   const staleSample = evidence("stale-frame", 1000, [1, 1], [3, 1], [3, 2]);
-  assert.throws(() => stale.advance({ timestampMs: 1150, clock: clock(1150, true), input: input(1150, staleSample), equipmentPoses: equipmentPosesForEvidence(staleSample) }), /current valid measured wrist/u);
+  assert.throws(() => stale.advance({ timestampMs: 1751, clock: clock(1751, true), input: input(1751, staleSample), equipmentPoses: equipmentPosesForEvidence(staleSample) }), /current valid measured wrist/u);
   assert.equal(stale.getJudgements().length, 0);
   send(stale, 2001, [-0.4, 1], [3, 1], [3, 2], "diag-stale-current");
   assert.deepEqual(judgementsAt(stale), [["diag-stale", "miss", ["wrong_collider"]]], "rejected stale evidence cannot mutate judgement truth");

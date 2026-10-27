@@ -15,7 +15,7 @@ import {
 } from "@aerobeat/web-contracts";
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
-import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
+import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderJudgementAgeMs, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
 import { createKneeColliderSettings, defaultKneeColliderSettings, kneeColliderSettingsIdentity, kneePadContactsBoxingTarget, measuredKneeSample } from "./knee-collider-collision.js";
 import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
@@ -1409,8 +1409,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // a sample inside the window it sweeps (a pose is the authority for the
     // song-time at which its frame was measured). The bounded trim keeps the
     // history covering the deepest legal window plus margin.
-    pushPoseHistoryForRole("left_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
-    pushPoseHistoryForRole("right_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
+    pushPoseHistoryForRole("left_wrist", left, 300 * 4 + sweptPoseHistoryMarginMs);
+    pushPoseHistoryForRole("right_wrist", right, 300 * 4 + sweptPoseHistoryMarginMs);
     /** @type {{event:DataRecord,contact:Readonly<{firstContactMs:number,hitDepthHalf:"front"|"back"}>,poseHistory:ReadonlyArray<Readonly<{t:number,pose:AeroResolvedEquipmentPose}>>,windowMs:number,volume:{scale:number,depthForward:number,depthBackward:number},afterWindowMs:number|null,hand:"left"|"right"}[]} */ const candidates = [];
     /** @type {string[]} */ const nearMisses = [];
     for (const event of events) {
@@ -1498,14 +1498,22 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * the history. Null (no valid pose this tick) clears the history so a
    * stale streak cannot produce a fake crossing.
    *
+   * The entry is stamped with the song position its frame was MEASURED at, not
+   * the playhead that consumed it. A slow tracking pipeline then delays the
+   * pose's arrival instead of shifting it forward on the timeline, which keeps
+   * the swept test aligned with the beats the equipment actually passed. When
+   * this hand has no usable sample this tick, nothing is pushed: the last real
+   * measurement stays the authority instead of a held pose inventing motion.
+   *
    * @param {"left_wrist" | "right_wrist"} role
-   * @param {number} measurementTimestampMs
+   * @param {ColliderSample | null} sample This hand's measured sample, if any.
    * @param {number} trimMs
    */
-  function pushPoseHistoryForRole(role, measurementTimestampMs, trimMs) {
+  function pushPoseHistoryForRole(role, sample, trimMs) {
     const pose = frameEquipmentPoses.get(role) ?? null;
-    if (role === "left_wrist") leftPoseHistory = pushPoseHistory(leftPoseHistory, pose === null ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), measurementTimestampMs, trimMs);
-    else rightPoseHistory = pushPoseHistory(rightPoseHistory, pose === null ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), measurementTimestampMs, trimMs);
+    const entryTimeMs = sample === null ? Number.NaN : sample.songTimeMs;
+    if (role === "left_wrist") leftPoseHistory = pushPoseHistory(leftPoseHistory, pose === null || !Number.isFinite(entryTimeMs) ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), entryTimeMs, trimMs);
+    else rightPoseHistory = pushPoseHistory(rightPoseHistory, pose === null || !Number.isFinite(entryTimeMs) ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), entryTimeMs, trimMs);
   }
 
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
@@ -1558,7 +1566,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!latestEvidence || !lastInput) return Object.freeze(["no_input"]);
     if (latestEvidence.calibrationId !== calibrationId) return Object.freeze(["calibration_mismatch"]);
     const age = timestampMs - latestEvidence.measurementTimestampMs;
-    if (age < 0 || age >= maximumColliderSampleFreshnessMs) return Object.freeze(["stale_input"]);
+    if (age < 0 || age > maximumColliderJudgementAgeMs) return Object.freeze(["stale_input"]);
     return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
   }
 
@@ -1623,8 +1631,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // BEFORE the candidate loop (same ordering invariant as the Flow
     // collider: the pose the test measures is itself a sample inside the
     // window it sweeps).
-    pushPoseHistoryForRole("left_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
-    pushPoseHistoryForRole("right_wrist", timelinePositionMs, 300 * 4 + sweptPoseHistoryMarginMs);
+    pushPoseHistoryForRole("left_wrist", left, 300 * 4 + sweptPoseHistoryMarginMs);
+    pushPoseHistoryForRole("right_wrist", right, 300 * 4 + sweptPoseHistoryMarginMs);
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean,hitDepthHalf:"front"|"back"}[]} */ const guardCandidates = [];
     for (const event of events) {
@@ -1682,8 +1690,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   /** Measured-only knee contact, independent of wrist and frozen-frame histories. */
   function evaluateBoxingKneeNotes() {
     if (!latestEvidence || !lastInput || latestEvidence.provenance !== "measured" || latestEvidence.calibrationId !== calibrationId || !latestEvidence.kneePose) return;
-    const left = measuredKneeSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "left", timelinePositionMs, timestampMs, maximumColliderSampleFreshnessMs);
-    const right = measuredKneeSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right", timelinePositionMs, timestampMs, maximumColliderSampleFreshnessMs);
+    const left = measuredKneeSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "left", timelinePositionMs, timestampMs, maximumColliderJudgementAgeMs);
+    const right = measuredKneeSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right", timelinePositionMs, timestampMs, maximumColliderJudgementAgeMs);
     const sample = left ?? right;
     if (!sample) return;
     const frame = Object.freeze({ sourceFrameId: sample.sourceFrameId, measurementTimestampMs: sample.measurementTimestampMs, calibrationId: sample.calibrationId, sourceIdentity: sample.sourceIdentity });
@@ -1732,7 +1740,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (!latestEvidence || !lastInput) return Object.freeze(["no_input"]);
     if (latestEvidence.calibrationId !== calibrationId) return Object.freeze(["calibration_mismatch"]);
     const age = timestampMs - latestEvidence.measurementTimestampMs;
-    if (age < 0 || age >= maximumColliderSampleFreshnessMs) return Object.freeze(["stale_input"]);
+    if (age < 0 || age > maximumColliderJudgementAgeMs) return Object.freeze(["stale_input"]);
     const settings = boxingColliderSettingsForEvent(event);
     const action = expectedAction(event);
     if (settings.enforceAuthoredDirection === true && (action === "uppercut_left" || action === "uppercut_right" || action === "hook_left" || action === "hook_right")) return Object.freeze(["wrong_direction"]);
