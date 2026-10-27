@@ -1,6 +1,6 @@
 # Latency-tolerant collider scoring for Flow and Boxing
 
-Status: approved by Derrick and landed in gameplay `ec30921`; signed candidate 0.0.147 built, public cutover still awaiting Derrick's authorization (2026-10-26).
+Status: done. Landed in gameplay `ec30921`, assembly `0321e1d`, and cut over to the public link as live 0.0.147 on 2026-10-26 after Derrick authorised it.
 Owner repo: `aerobeat-web-gameplay` (judgement). Release path: `aerobeat-web-assembly`.
 
 ## Why this exists
@@ -160,6 +160,13 @@ HTML `8d6f210e0074c3ec36298c9d8a9039f8ecd295a41e328684feaaa6c82f3d4932`, entry
 `assets/index-DG7k5hs4.js` `5deeb1e26010ea97919ba333b60618e9a52ab0533e78d2b1c50b07177c89f68d`).
 The shipped bundle passed real Play in Chromium, direct and cross-origin iframe (knee scoring:
 correct hits score, wrong side / missing leg / frozen frame stay pending, Test stays visual-only).
+
+Public cutover (2026-10-26, authorised by Derrick): a new systemd user unit `aerobeat-r147` serves
+the frozen snapshot on loopback 4210 and the Funnel target moved from 4209 to 4210. Public HTTPS
+HTML and entry JS match the frozen hashes exactly and report `0.0.147`. Public Chromium loaded it
+directly and in a true cross-origin iframe with ready renderer/environment, `cpu-wasm` provider and
+nonzero framebuffers, no unexpected page errors. Rollback: `systemctl --user stop aerobeat-r147`
+then `tailscale funnel --bg --https=443 --yes http://127.0.0.1:4209` (0.0.146 still served there).
 
 Accepted gap: the browser run proves the shipped bundle still plays and scores; it does not by
 itself replay a delayed pipeline. The latency behaviour is proven at the coordinator boundary in
