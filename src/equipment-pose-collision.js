@@ -1,7 +1,6 @@
 // @ts-check
 
-import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveCylinder, resolveSaberCapsule, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
-import { flowSolidBladeRadiusWu } from "@aerobeat/web-contracts/equipment-contracts";
+import { colliderSettingsDefaults, isPointInsideColliderBounds, resolveColliderBounds, resolveGloveColliderParts, resolveSaberColliderParts, equipmentEulerDegreesToQuaternion, multiplyEquipmentQuaternions, slerpEquipmentQuaternionShortest, createResolvedEquipmentPose } from "@aerobeat/web-contracts";
 import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collision.js";
 
 /** @typedef {Readonly<Record<string, unknown>>} DataRecord */
@@ -11,7 +10,7 @@ import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collisio
 /** @typedef {(pose: ResolvedPose, context: Readonly<{timestampMs:number,tangent:Readonly<{x:number,y:number,z:number}>}>) => ResolvedPose} ReprojectEquipmentPose */
 
 /** Settled contracts revision whose resolved-pose semantics this judge consumes. */
-export const equipmentPoseContractsCommit = "9544415ee5e42deaa4de99967c961d158d6720d7";
+export const equipmentPoseContractsCommit = "a1c1fbc2a51bdc2eb0c63dc3a2b46ae2dd4f2296";
 /** Tight XY agreement required between a resolved pose anchor and measured wrist. */
 export const equipmentPoseAnchorEpsilonWu = 1e-6;
 
@@ -52,59 +51,21 @@ export function effectivePlayNoteAfterWindowMs(centerTimestampMs, timingWindowMs
 }
 
 /**
- * Keep the contract's pose validation, axis and length. Reach endpoints
- * follow rotating local +X: rear zero is the hilt and front one reaches the
- * visible 0.75-WU tip times pose scale. Scored radius is the shared solid GLB
- * blade radius times pose scale times Flow collider scale, not legacy .18.
- * @param {unknown} pose
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
- */
-function resolveFlowSaberReach(pose, volume) {
-  const resolvedPose = createResolvedEquipmentPose(pose);
-  const capsule = resolveSaberCapsule(resolvedPose);
-  const length = Math.hypot(capsule.end.x - capsule.start.x, capsule.end.y - capsule.start.y, capsule.end.z - capsule.start.z); // 0.75 WU × pose scale
-  const rear = volume.depthBackward ?? 0;
-  const front = volume.depthForward ?? 1;
-  const scale = volume.scale ?? 1;
-  if (![rear, front, scale].every((value) => Number.isFinite(value) && value >= 0)) throw new TypeError("flow_saber_reach_invalid");
-  const rearLength = length * rear; const frontLength = length * front;
-  const radius = flowSolidBladeRadiusWu * resolvedPose.scale * scale;
-  if (![length, rearLength, frontLength, radius, rearLength + frontLength, radius * 2].every(Number.isFinite)) throw new TypeError("flow_saber_geometry_nonfinite");
-  const start = Object.freeze({
-    x: capsule.start.x - capsule.axis.x * rearLength,
-    y: capsule.start.y - capsule.axis.y * rearLength,
-    z: capsule.start.z - capsule.axis.z * rearLength
-  });
-  const end = Object.freeze({
-    x: capsule.start.x + capsule.axis.x * frontLength,
-    y: capsule.start.y + capsule.axis.y * frontLength,
-    z: capsule.start.z + capsule.axis.z * frontLength
-  });
-  if (![start.x, start.y, start.z, end.x, end.y, end.z, end.x - start.x, end.y - start.y, end.z - start.z].every(Number.isFinite)) throw new TypeError("flow_saber_geometry_nonfinite");
-  return Object.freeze({ start, end, radius });
-}
-
-/**
  * Test the pose-axis Flow saber reach after projection into judge XY.
  * Local-axis roll leaves projection unchanged; out-of-plane tilt shortens it.
  * @param {DataRecord} event
  * @param {unknown} pose
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} [volume]
  */
 export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, timingWindowMs, volume = {}) {
   const box = flowNoteCellBox(event);
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
   if (!isPointInsideColliderBounds({ x: box.centerX, y: box.centerY, z: (songTimeMs - Number(event.centerTimestampMs)) * 0.006 }, bounds)) return false;
-  const capsule = resolveFlowSaberReach(pose, volume);
+  const parts = resolveSaberColliderParts(pose, volume);
   if (volume.scale === 0) return false;
-  return segmentContactsRectangle(
-    Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
-    Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
-    bounds,
-    capsule.radius
-  );
+  return parts.some((capsule) => segmentContactsRectangle(capsule.start, capsule.end, bounds, capsule.radius));
 }
 
 /**
@@ -114,7 +75,7 @@ export function resolvedSaberCapsuleContactsFlowTarget(event, pose, songTimeMs, 
  * @param {unknown} pose
  * @param {number} songTimeMs
  * @param {number} timingWindowMs
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} [volume]
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} [volume]
  */
 export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, timingWindowMs, volume = {}) {
   if (volume.scale === 0) return false;
@@ -124,10 +85,10 @@ export function resolvedGloveObbContactsBoxingTarget(target, pose, songTimeMs, t
 /** Play's later visibility deadline extends only eligibility, never glove depth. */
 function boxingContactAtEligibleTime(target, pose, songTimeMs, timingWindowMs, volume, afterWindowMs) {
   if (songTimeMs < target.centerTimestampMs - timingWindowMs || songTimeMs > (afterWindowMs ?? target.centerTimestampMs + timingWindowMs)) return false;
-  const cylinder = resolveGloveCylinder(pose, volume);
+  const parts = resolveGloveColliderParts(pose, volume);
   const z = (songTimeMs - target.centerTimestampMs) * 0.006;
   if (!Number.isFinite(z)) throw new TypeError("boxing_target_geometry_nonfinite");
-  return cylinderContactsNoteRectangle(cylinder, target, z);
+  return parts.some((cylinder) => cylinderContactsNoteRectangle(cylinder, target, z));
 }
 
 /**
@@ -136,7 +97,7 @@ function boxingContactAtEligibleTime(target, pose, songTimeMs, timingWindowMs, v
  * perpendicular radius, so an axis-distance capsule cannot extend the caps.
  * The clipped axis projection, authored rectangle corners and edges supply
  * witnesses even when the cylinder is pitched or rolls in the note plane.
- * @param {Readonly<{start:{x:number,y:number,z:number},end:{x:number,y:number,z:number},radius:number}>} cylinder
+ * @param {import("@aerobeat/web-contracts").AeroEquipmentColliderPart} cylinder
  * @param {Readonly<{x:number,y:number}>} target
  * @param {number} z
  */
@@ -335,17 +296,12 @@ export function lerpResolvedEquipmentPose(start, target, progress) {
   });
 }
 
-/** @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box @param {unknown} pose @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume @param {number} timingWindowMs */
+/** @param {Readonly<{centerX:number,centerY:number,halfX:number,halfY:number}>} box @param {unknown} pose @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} volume @param {number} timingWindowMs */
 function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
-  const capsule = resolveFlowSaberReach(pose, volume);
+  const parts = resolveSaberColliderParts(pose, volume);
   if (volume.scale === 0) return false;
-  return segmentContactsRectangle(
-    Object.freeze({ x: capsule.start.x, y: capsule.start.y }),
-    Object.freeze({ x: capsule.end.x, y: capsule.end.y }),
-    bounds,
-    capsule.radius
-  );
+  return parts.some((capsule) => segmentContactsRectangle(capsule.start, capsule.end, bounds, capsule.radius));
 }
 
 /**
@@ -363,7 +319,7 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * @param {DataRecord} event
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} volume
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  */
@@ -392,8 +348,8 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   let firstNearMs = null;
   for (const t of overlapSampleTimes(history, nearStart, nearEnd, center)) {
     const pose = resolvePoseAt(history, t, reprojectEquipmentPose);
-    const capsule = resolveFlowSaberReach(pose, volume);
-    if (volume.scale !== 0 && saberNearCell(capsule, box, nearMargin)) { firstNearMs = t; break; }
+    const parts = resolveSaberColliderParts(pose, volume);
+    if (volume.scale !== 0 && parts.some((capsule) => saberNearCell(capsule, box, nearMargin))) { firstNearMs = t; break; }
   }
   if (firstNearMs !== null) return Object.freeze({ nearMiss: true, firstNearMs });
   return null;
@@ -418,7 +374,7 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
  * @param {DataRecord} event
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} volume
  * @param {Readonly<{firstContactMs:number,hitDepthHalf:HitDepthHalf}> | null} contact Exact swept hit (not near-miss).
  * @param {number | null} [afterWindowMs]
  * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
@@ -431,9 +387,9 @@ export function internalFlowFirstContactSliceT(event, history, timingWindowMs, v
   const center = Number(event.centerTimestampMs);
   if (t < center - timingWindowMs || t > (afterWindowMs ?? center + timingWindowMs)) return null;
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
-  const capsule = resolveFlowSaberReach(resolvePoseAt(history, t, reprojectEquipmentPose), volume);
+  const capsule = resolveSaberColliderParts(resolvePoseAt(history, t, reprojectEquipmentPose), volume).find((part) => segmentContactsRectangle(part.start, part.end, bounds, part.radius));
+  if (volume.scale === 0 || !capsule) return null;
   const start = capsule.start; const end = capsule.end;
-  if (volume.scale === 0 || !segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
   const direction = event.direction == null ? null : authoredDirectionCone(String(event.direction), 0)?.direction;
   if (!direction) return event.direction == null ? 0.5 : null;
   // Distance to an axis point is convex along the segment. Ternary search its
@@ -493,7 +449,7 @@ function saberNearCell(capsule, box, margin) {
  * @param {Readonly<{centerTimestampMs:number,x:number,y:number}>} target
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} timingWindowMs
- * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
+ * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} volume
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  */

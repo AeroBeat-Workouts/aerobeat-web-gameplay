@@ -15,7 +15,7 @@ const anchor = (name, measured, sx, sy) => ({ schema: "aerobeat/body_grid_anchor
 const evidence = (frameId, measured, left = [-0.5, 1], right = [3.5, 1]) => ({ schema: "aerobeat/gameplay_evidence_snapshot", version: 1, calibrationId: "cal-1", measuredSourceFrameId: frameId, measurementTimestampMs: measured, provenance: "measured", activeBoxingActions: [], anchors: [anchor("nose", measured, 3, 2), anchor("left_shoulder", measured, 0, 0), anchor("right_shoulder", measured, 3, 0), anchor("left_elbow", measured, 0, 0), anchor("right_elbow", measured, 3, 0), anchor("left_wrist", measured, ...left), anchor("right_wrist", measured, ...right)], entries: [] });
 const input = (sample) => ({ sourceIdentity: "camera-a", calibration: { calibrationId: "cal-1", readiness: "countdown" }, tracking: { gameplayPaused: false, freshCalibrationRequired: false }, countdownFrozen: false, latestEvidence: sample, straightQualifications: [] });
 const poses = (sample, identity = CONFIG_A) => ["left_wrist", "right_wrist"].map((role) => { const wrist = sample.anchors.find((entry) => entry.anchor === role); return { role, mode: "flow", anchor: { x: wrist.x * 4 - 0.5, y: 2.5 - wrist.y * 3, z: 0 }, scale: 1, orientation: { x: 0, y: 0, z: 0, w: 1 }, geometryIdentity: "aerobeat/saber_capsule_v1", configIdentity: { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: identity } }; });
-function ready() { const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "pose-boundary", countdownStepMs: 1 }); coordinator.configureContent(config); coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: { ...input(null), latestEvidence: null } }); assert.equal(coordinator.requestStart(0).accepted, true); coordinator.advance({ timestampMs: 1, clock: clock(0, false) }); coordinator.advance({ timestampMs: 2, clock: clock(0, false) }); coordinator.advance({ timestampMs: 3, clock: clock(0, false) }); return coordinator; }
+function ready(settings) { const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "pose-boundary", countdownStepMs: 1 }); coordinator.configureContent({ ...config, ...(settings ? { flowColliderSettings: settings } : {}) }); coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: { ...input(null), latestEvidence: null } }); assert.equal(coordinator.requestStart(0).accepted, true); coordinator.advance({ timestampMs: 1, clock: clock(0, false) }); coordinator.advance({ timestampMs: 2, clock: clock(0, false) }); coordinator.advance({ timestampMs: 3, clock: clock(0, false) }); return coordinator; }
 
 // Missing, extra, accessor, mode, role, identity, and anchor errors reject before any state mutation.
 for (const mutate of [
@@ -58,4 +58,15 @@ for (const mutate of [
   assert.equal(coordinator.getScorePartitions().length, 1);
 }
 
+// A split union must still commit/consume each note exactly once.
+for (const facing of [false, true]) {
+  const { defaultFlowColliderSettings } = await import("../src/flow-collider-collision.js");
+  const coordinator = ready({ ...defaultFlowColliderSettings, colliderDepthBackwardAthleteFacing: facing });
+  for (const t of [990, 1000, 1010]) {
+    const sample = evidence(`union-${facing}-${t}`, t, [1, 1], [3.5, 1]);
+    coordinator.advance({ timestampMs: t, clock: clock(t, true), input: input(sample), equipmentPoses: poses(sample) });
+  }
+  assert.deepEqual(coordinator.getJudgements().map((j) => [j.eventId, j.result]), [["pose-note", "hit"]]);
+  assert.equal(coordinator.getScorePartitions()[0].hits, 1, "two intersecting parts do not duplicate a scored hit");
+}
 console.log("Equipment pose frame boundary validation passed.");

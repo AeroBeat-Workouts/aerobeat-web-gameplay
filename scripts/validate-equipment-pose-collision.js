@@ -6,6 +6,19 @@ import { colliderDefaultDepthWu, colliderSettingsDefaults, equipmentEulerDegrees
 import { flowSolidBladeRadiusWu, saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 import { beatInsideColliderDepth, colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, internalFlowFirstContactSliceT, sweptSaberContactsFlowTarget, equipmentPoseAnchorEpsilonWu, equipmentPoseContractsCommit, resolvedGloveObbContactsBoxingTarget, sweptGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget } from "../src/equipment-pose-collision.js";
 
+import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity } from "../src/flow-collider-collision.js";
+import { createBoxingColliderSettings, defaultBoxingColliderSettings, boxingColliderSettingsIdentity } from "../src/boxing-collider-collision.js";
+
+for (const [create, defaults, identity, modeDefault] of [[createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, false], [createBoxingColliderSettings, defaultBoxingColliderSettings, boxingColliderSettingsIdentity, true]]) {
+  const { colliderDepthBackwardAthleteFacing: omitted, ...legacy } = defaults;
+  assert.equal(create(legacy).colliderDepthBackwardAthleteFacing, modeDefault);
+  assert.equal(identity(legacy), identity(defaults), "default toggle preserves historical score identity");
+  assert.notEqual(identity({ ...defaults, colliderDepthBackwardAthleteFacing: !modeDefault }), identity(defaults));
+  assert.equal(identity({ ...defaults, colliderVisible: true }), identity(defaults), "visibility never scores");
+  for (const invalid of [undefined, null, 0, 1, "true"]) assert.throws(() => create({ ...defaults, colliderDepthBackwardAthleteFacing: invalid }), TypeError);
+  for (const facing of [false, true]) assert.equal(create({ ...defaults, colliderDepthBackwardAthleteFacing: facing }).colliderDepthBackwardAthleteFacing, facing);
+}
+
 const HASH = "c".repeat(64);
 const identity = { schema: "aerobeat/equipment_config_identity", version: 1, algorithm: "sha256", value: HASH };
 const orientation = (x = 0, y = 0, z = 0) => equipmentEulerDegreesToQuaternion({ x, y, z });
@@ -15,8 +28,42 @@ const boxingTarget = { centerTimestampMs: 1000, x: 1, y: 1 };
 const flowContact = (entry, songTimeMs = 1000) => resolvedSaberCapsuleContactsFlowTarget(flowEvent, entry, songTimeMs, 180);
 const boxingContact = (entry, songTimeMs = 1000) => resolvedGloveObbContactsBoxingTarget(boxingTarget, entry, songTimeMs, 180);
 
-assert.equal(equipmentPoseContractsCommit, "9544415ee5e42deaa4de99967c961d158d6720d7", "pose semantics stay pinned to latest contracts main");
+assert.equal(equipmentPoseContractsCommit, "a1c1fbc2a51bdc2eb0c63dc3a2b46ae2dd4f2296", "pose semantics stay pinned to latest contracts main");
 assert.equal(equipmentPoseAnchorEpsilonWu, 1e-6, "the strict measured-anchor epsilon is documented and stable");
+
+// Rear-direction toggle reaches both point and reconstructed sweep paths.
+for (const facing of [false, true]) {
+  const saber = pose("left_wrist", "flow", { x: 2, y: 1, z: 0 });
+  const volume = { depthForward: 1, depthBackward: 1, depthBackwardAthleteFacing: facing };
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, saber, 1000, 180, volume), !facing, "Flow local rear reaches the cell; world +Z rear projects to hilt only");
+  const sweep = sweptSaberContactsFlowTarget(flowEvent, [{ t: 990, pose: saber }, { t: 1010, pose: saber }], 180, volume);
+  assert.equal(sweep != null && "firstContactMs" in sweep, !facing);
+  const front = pose("left_wrist", "flow", { x: 0, y: 1, z: 0 }, { orientation: orientation(0, 0, 20) });
+  assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, front, 1000, 180, volume), true, "rotated Flow front invariant across toggle");
+  const frontHistory = [{ t: 1000, pose: front }];
+  const frontContact = sweptSaberContactsFlowTarget(flowEvent, frontHistory, 180, volume);
+  assert.equal(internalFlowFirstContactSliceT(flowEvent, frontHistory, 180, volume, frontContact), .5, "slice selects an actual contacting union part");
+  const boxer = pose("left_wrist", "boxing", { x: 2.5, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
+  const gloveVolume = { depthForward: 1, depthBackward: 3, depthBackwardAthleteFacing: facing };
+  const t = 1065; // existing rear attachment world Z=.39
+  assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, boxer, t, 180, gloveVolume), !facing);
+  assert.equal(sweptGloveObbContactsBoxingTarget(boxingTarget, [{ t, pose: boxer }], 180, gloveVolume) !== null, !facing);
+  const straight = pose("left_wrist", "boxing", { x: 1, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
+  assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, straight, 1000, 180, gloveVolume), true, "Boxer front remains world-Z at either toggle");
+}
+const nearSaber = pose("left_wrist", "flow", { x: 1.7, y: 1, z: 0 });
+const nearHistory = [{ t: 1000, pose: nearSaber }];
+for (const facing of [false, true]) {
+  const volume = { depthForward: 1, depthBackward: 1, depthBackwardAthleteFacing: facing };
+  const result = sweptSaberContactsFlowTarget(flowEvent, nearHistory, 180, volume);
+  assert.ok(result);
+  assert.equal("nearMiss" in result, facing, "near diagnostics follow the same rear parts as scoring");
+  if ("firstContactMs" in result) assert.equal(internalFlowFirstContactSliceT(flowEvent, nearHistory, 180, volume, result), .5, "split geometry slice uses a contacting part");
+}
+const bentBoxer = pose("left_wrist", "boxing", { x: 3, y: 1, z: 0 }, { orientation: orientation(0, -90, 0) });
+const bentVolume = { scale: .1, depthForward: 3, depthBackward: 6, depthBackwardAthleteFacing: false };
+assert.equal(resolvedGloveObbContactsBoxingTarget(boxingTarget, bentBoxer, 1000 - .65 / .006, 180, bentVolume), false, "space between bent cylinder arms is not hittable");
+assert.equal(sweptGloveObbContactsBoxingTarget(boxingTarget, [{ t: 1000 - .65 / .006, pose: bentBoxer }], 180, bentVolume), null);
 
 // Flow uses the exact transformed capsule projection for both roles and canonical scales.
 for (const role of ["left_wrist", "right_wrist"]) {
@@ -183,11 +230,11 @@ for (const value of [0, .00001, 9999999]) {
   assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { scale: value, depthForward: value, depthBackward: value }), value !== 0, `finite Scale/Depth ${value} changes real scored saber contact`);
 }
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(flowEvent, edgeBlade, 1000, 180, { scale: 9999999, depthForward: 0, depthBackward: 0 }), true, "huge finite radius can score off-center without widening target");
-assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { depthForward: Number.MAX_VALUE, depthBackward: Number.MAX_VALUE }), /flow_saber_geometry_nonfinite/u, "derived saber length overflow rejects instead of scoring corrupt geometry");
-assert.throws(() => sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: pointBlade }], 180, { depthForward: Number.MAX_VALUE, depthBackward: Number.MAX_VALUE }), /flow_saber_geometry_nonfinite/u, "swept overflow rejects too");
-assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { scale: 100 }), 1000, 180, { scale: Number.MAX_VALUE }), /flow_saber_geometry_nonfinite/u, "derived scored radius overflow rejects");
+assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { depthForward: Number.MAX_VALUE, depthBackward: Number.MAX_VALUE }), /(?:saber_collider|collider_part)_geometry_nonfinite/u, "derived saber length overflow rejects instead of scoring corrupt geometry");
+assert.throws(() => sweptSaberContactsFlowTarget(flowEvent, [{ t: 1000, pose: pointBlade }], 180, { depthForward: Number.MAX_VALUE, depthBackward: Number.MAX_VALUE }), /(?:saber_collider|collider_part)_geometry_nonfinite/u, "swept overflow rejects too");
+assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pose("left_wrist", "flow", { x: 1, y: 1, z: 0 }, { scale: 100 }), 1000, 180, { scale: Number.MAX_VALUE }), /(?:saber_collider|collider_part)_geometry_nonfinite/u, "derived scored radius overflow rejects");
 for (const key of ["scale", "depthForward", "depthBackward"]) for (const bad of [-1, NaN, Infinity]) {
-  assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { [key]: bad }), /flow_saber_reach_invalid/u, `invalid ${key} fails before scoring`);
+  assert.throws(() => resolvedSaberCapsuleContactsFlowTarget(flowEvent, pointBlade, 1000, 180, { [key]: bad }), /saber_collider_settings_invalid/u, `invalid ${key} fails before scoring`);
 }
 // Reach factors change the pose-axis capsule, not the Flow note timing slab.
 const temporalBlade = pose("left_wrist", "flow", { x: 1, y: 1, z: 0 });

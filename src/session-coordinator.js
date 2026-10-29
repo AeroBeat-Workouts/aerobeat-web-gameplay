@@ -1533,7 +1533,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   /** @param {DataRecord} settings */
-  function colliderVolumeSettings(settings) { return { scale: Number(settings.colliderScale), depthForward: Number(settings.colliderDepthForward), depthBackward: Number(settings.colliderDepthBackward) }; }
+  function colliderVolumeSettings(settings) { return { scale: Number(settings.colliderScale), depthForward: Number(settings.colliderDepthForward), depthBackward: Number(settings.colliderDepthBackward), depthBackwardAthleteFacing: settings.colliderDepthBackwardAthleteFacing }; }
 
   /**
    * Push the current frame's full resolved pose into the bounded per-role

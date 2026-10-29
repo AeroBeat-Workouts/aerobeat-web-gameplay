@@ -61,6 +61,15 @@ function send(c, songMs, left, right, nose, frameId, options = {}) {
 }
 const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [...j.diagnostics]]);
 
+// Both union directions preserve the existing single-judgement path.
+for (const facing of [false, true]) {
+  const c = ready([beat(`union-${facing}`, 1000, "straight_left", { placement: 5 })], settings({ colliderDepthBackwardAthleteFacing: facing }));
+  for (const t of [990, 1000, 1010]) send(c, t, [1, 1], [3, 1], [3, 2], `union-${facing}-${t}`);
+  assert.equal(c.getJudgements().length, 1);
+  assert.equal(c.getJudgements()[0].result, "hit");
+  assert.equal(c.getScorePartitions()[0].hits, 1);
+}
+
 // Already-active Boxer targets take the live shoulder-relative height on the
 // next frame, without moving authored cells or rewriting scored truth.
 {
@@ -139,7 +148,7 @@ const judgementsAt = (c) => c.getJudgements().map((j) => [j.eventId, j.result, [
 // --- Settings contract -------------------------------------------------------
 {
   const exact = createBoxingColliderSettings(settings());
-  assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderDepthBackward", "colliderDepthForward", "colliderRadius", "colliderScale", "colliderVisible", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
+  assert.deepEqual(Object.keys(exact).sort(), ["algorithm", "bottomRowReachWU", "colliderDepthBackward", "colliderDepthBackwardAthleteFacing", "colliderDepthForward", "colliderRadius", "colliderScale", "colliderVisible", "directionToleranceDegrees", "enforceAuthoredDirection", "guardCountMode", "schema", "topRowReachWU", "timingWindowMs", "version"].sort());
   // 0.0.53: the authored-direction toggle is enforced by default (both flow and
   // boxing mirrors); directionToleranceDegrees stays at 45.
   assert.equal(defaultBoxingColliderSettings.enforceAuthoredDirection, true, "boxing default enforces authored direction");

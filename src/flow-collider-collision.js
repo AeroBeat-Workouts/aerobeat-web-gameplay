@@ -45,7 +45,8 @@ export const defaultFlowColliderSettings = Object.freeze({
   colliderVisible: false,
   colliderScale: 1,
   colliderDepthForward: 1,
-  colliderDepthBackward: 1
+  colliderDepthBackward: 1,
+  colliderDepthBackwardAthleteFacing: false
 });
 
 const LEGACY_SETTING_KEYS = Object.freeze(["schema", "version", "algorithm", "colliderRadius", "enforceAuthoredDirection", "directionToleranceDegrees", "timingWindowMs"]);
@@ -61,7 +62,9 @@ const SETTING_KEYS = Object.freeze([...VISIBLE_SETTING_KEYS, "wristBombColliderS
 export function createFlowColliderSettings(value = defaultFlowColliderSettings) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new TypeError("Flow Collider settings must be a plain record");
   const keys = Reflect.ownKeys(value);
-  const exactKeys = keys.includes("wristBombColliderScale") ? SETTING_KEYS : keys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : keys.length === PRE_VISIBILITY_SETTING_KEYS.length ? PRE_VISIBILITY_SETTING_KEYS : VISIBLE_SETTING_KEYS;
+  const baseKeys = keys.filter((key) => key !== "colliderDepthBackwardAthleteFacing");
+  const oldKeys = baseKeys.includes("wristBombColliderScale") ? SETTING_KEYS : baseKeys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : baseKeys.length === PRE_VISIBILITY_SETTING_KEYS.length ? PRE_VISIBILITY_SETTING_KEYS : VISIBLE_SETTING_KEYS;
+  const exactKeys = keys.includes("colliderDepthBackwardAthleteFacing") ? [...oldKeys, "colliderDepthBackwardAthleteFacing"] : oldKeys;
   if (keys.length !== exactKeys.length || keys.some((key) => typeof key !== "string" || !exactKeys.includes(key))) throw new TypeError("Flow Collider settings require every exact field and no extras");
   /** @type {Record<string, unknown>} */ const record = {};
   for (const key of exactKeys) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Flow Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
@@ -70,12 +73,14 @@ export function createFlowColliderSettings(value = defaultFlowColliderSettings) 
   const directionToleranceDegrees = boundedSetting(record.directionToleranceDegrees, flowColliderSettingsBounds.directionToleranceDegrees, "direction tolerance");
   const timingWindowMs = boundedSetting(record.timingWindowMs, flowColliderSettingsBounds.timingWindowMs, "timing window");
   if (record.colliderVisible !== undefined && typeof record.colliderVisible !== "boolean") throw new TypeError("Flow Collider visibility must be boolean");
-  const colliderVisible = record.colliderVisible ?? false;
+  const colliderVisible = record.colliderVisible === true;
+  if (keys.includes("colliderDepthBackwardAthleteFacing") && typeof record.colliderDepthBackwardAthleteFacing !== "boolean") throw new TypeError("Flow Collider rear direction must be boolean");
+  const colliderDepthBackwardAthleteFacing = record.colliderDepthBackwardAthleteFacing === true;
   const colliderScale = boundedSetting(record.colliderScale ?? 1, flowColliderSettingsBounds.colliderScale, "collider scale");
   const wristBombColliderScale = boundedSetting(record.wristBombColliderScale ?? 1, flowColliderSettingsBounds.wristBombColliderScale, "wrist bomb collider scale");
   const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, flowColliderSettingsBounds.colliderDepthForward, "forward depth");
   const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, flowColliderSettingsBounds.colliderDepthBackward, "backward depth");
-  const normalized = Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }) });
+  const normalized = Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, colliderDepthBackwardAthleteFacing, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }) });
   return normalized;
 }
 
@@ -83,7 +88,7 @@ export function createFlowColliderSettings(value = defaultFlowColliderSettings) 
 function boundedSetting(value, bounds, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < bounds.minimum || value > bounds.maximum) throw new RangeError(`Flow Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
 
 /** @param {unknown} settings */
-export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; const keys = legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS; return `sha256:${new Sha256().update(JSON.stringify((Number(exact.wristBombColliderScale ?? 1) === 1 ? keys : [...keys, "wristBombColliderScale"]).map((key) => exact[key]))).digestHex()}`; }
+export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; const baseKeys = legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS; const keys = exact.colliderDepthBackwardAthleteFacing === false ? baseKeys : [...baseKeys, "colliderDepthBackwardAthleteFacing"]; return `sha256:${new Sha256().update(JSON.stringify((Number(exact.wristBombColliderScale ?? 1) === 1 ? keys : [...keys, "wristBombColliderScale"]).map((key) => exact[key]))).digestHex()}`; }
 
 /**
  * Minimum judge-space displacement over the smoothing window before the
