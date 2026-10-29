@@ -1708,10 +1708,9 @@ for (const [label, wristX, timeMs] of [
     assert.equal(c.getJudgements().length, 0, "held position before the window opens does not score");
     sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
     assert.equal(c.getSnapshot().session.state, "playing", "session stays playing during the freeze");
-    // The independent base window opens at 820ms, but the moving note first
-    // enters the cylinder's flat rear cap in the 24-step overlap interpolation
-    // at 838.75ms, then commits at the frozen publication (850ms).
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -161.25]], "frozen on-target fist scores a hit at the current song position");
+    // F4 scores only the current held point at 850ms. Synthetic held samples
+    // cannot backdate this contact or become permanent spline control points.
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-hit", "hit", 850, -150]], "frozen on-target fist scores a hit at the current song position");
     sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
     sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
     assert.equal(c.getSnapshot().session.state, "playing", "session stays playing across later frozen ticks");
@@ -1751,11 +1750,10 @@ for (const [label, wristX, timeMs] of [
     sendFrozen(c, 850, 600, [0, 0], [0, 1], 1);
     sendFrozen(c, 900, 600, [0, 0], [0, 1], 2);
     sendMeasured(c, 950, [0, 0], [2, 1], "fr-resume-f2");
-    // The measured resume frame (950ms) sweeps in from the held (0,1) pose: the
-    // causal spline starts slower after the stationary predecessor and first
-    // crosses into the target column at 931.25ms. The timing offset is that
-    // sampled contact minus the 1000ms center; grading rules are unchanged.
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-resume", "hit", 950, -68.75]], "measured frame after the freeze hits normally via the measured path");
+    // Recovery reconstructs from the real 600ms measurement, not a synthetic
+    // 900ms frozen node. The 24-step overlap probes [820,950] first contact
+    // at 841.67ms; frozen publications cannot flatten the measured bracket.
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-resume", "hit", 950, -158.33333333333337]], "measured frame after the freeze hits normally via the measured path");
     sendMeasured(c, 1200, [0, 0], [2, 1], "fr-resume-f3");
     assert.equal(c.getJudgements().length, 1, "resume hit is not re-scored by later measured frames");
     assert.equal(c.getSnapshot().session.state, "playing");
@@ -1770,9 +1768,9 @@ for (const [label, wristX, timeMs] of [
     assert.equal(c.getJudgements().length, 0);
     sendFrozen(c, 850, 600, [0, 0], [2, 1], 1);
     assert.equal(c.getSnapshot().session.state, "playing", "flow session stays playing during the freeze");
-    // The overlap sampler explicitly probes the inclusive 820ms window start,
-    // rather than the old whole-gap lattice's first interior step at 829.17ms.
-    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-flow", "hit", 850, -180]], "frozen on-target wrist scores the flow note at the current song position");
+    // Flow frozen scoring also uses only the held point at current 850ms,
+    // never an earlier synthetic sweep contact at the 820ms window start.
+    assert.deepEqual(c.getJudgements().map((j) => [j.eventId, j.result, j.committedTimelinePositionMs, j.timingOffsetMs]), [["fr-flow", "hit", 850, -150]], "frozen on-target wrist scores the flow note at the current song position");
     sendFrozen(c, 900, 600, [0, 0], [2, 1], 2);
     sendFrozen(c, 950, 600, [0, 0], [2, 1], 3);
     assert.equal(c.getJudgements().length, 1, "flow note never hits twice across frozen ticks");

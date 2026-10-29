@@ -199,7 +199,7 @@ for (const withPredecessor of [false, true]) {
 // idle publications, not freshly measured or frozen observations. The original
 // measurement bracket must survive both age expiry and temporary null evidence.
 for (const mode of ["flow", "boxing"]) {
-  for (const gap of ["held", "no_frame"]) {
+  for (const gap of ["held", "no_frame", "frozen"]) {
     const coordinator = playing(mode, {}, { resolvedEvents: [note(mode, 1200)] });
     const sample = evidence("slow-first", 700, [3, 1], [3, 2], [3, 2]);
     const makePoses = (value) => posesForEvidence(value, mode).map((pose) => mode === "flow" ? { ...pose, orientation: { x: 0, y: 0, z: Math.SQRT1_2, w: Math.SQRT1_2 } } : pose);
@@ -210,8 +210,8 @@ for (const mode of ["flow", "boxing"]) {
     const changed = evidence("slow-first", 700, [2, 1], [3, 2], [3, 2]);
     for (let wall = 800; wall < 1700; wall += 100) {
       if (wall === 1500) assert.throws(() => coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: inputSnapshot(changed), equipmentPoses: makePoses(changed) }), (error) => error.code === "equipment_poses_invalid", "changed stale data cannot impersonate an accepted repeat");
-      const heldInput = inputSnapshot(gap === "no_frame" && wall >= 1100 ? null : sample);
-      const renderPoses = wall === 1500 ? firstPoses.map((pose) => ({ ...pose, scale: 5, orientation: { x: 0, y: 0, z: 0, w: 1 } })) : firstPoses;
+      const heldInput = inputSnapshot(gap === "frozen" ? wall === 1500 ? null : { ...sample, provenance: "frozen", frozenTickId: wall / 100 } : gap === "no_frame" && wall >= 1100 ? null : sample);
+      const renderPoses = wall === 1500 && gap !== "frozen" ? firstPoses.map((pose) => ({ ...pose, scale: 5, orientation: { x: 0, y: 0, z: 0, w: 1 } })) : firstPoses;
       assert.doesNotThrow(() => coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: heldInput, equipmentPoses: gap === "no_frame" && wall >= 1100 ? undefined : renderPoses }), `${mode} ${gap}: held render tick must not throw or clear a measured bracket`);
       assert.equal(coordinator.getJudgements().length, 0, "idle ticks do not score held equipment");
       assert.equal(coordinator.getSnapshot().session.timelinePositionMs, wall, "idle ticks keep the authoritative clock live");
@@ -248,6 +248,19 @@ for (const mode of ["flow", "boxing"]) {
   assert.equal(changedSource.getJudgements().length, 0, "a source switch cannot reconstruct across the old bracket");
   const staleChangedSource = { ...inputSnapshot(first), sourceIdentity: "camera-b" };
   assert.throws(() => changedSource.advance({ timestampMs: 1800, clock: clock(1800, true), input: staleChangedSource, equipmentPoses: posesForEvidence(first, mode) }), (error) => error.code === "equipment_poses_invalid", "the old publication cache is cleared with the source boundary");
+}
+
+// A source change first seen on a frozen publication is still a real reset.
+// It must not leave an older source's measured control point for recovery.
+for (const mode of ["flow", "boxing"]) {
+  const coordinator = playing(mode, {}, { resolvedEvents: [note(mode, 1200)] });
+  const first = evidence("frozen-source-before", 700, [3, 1], [3, 2], [3, 2]);
+  const makePoses = (sample) => posesForEvidence(sample, mode).map((pose) => mode === "flow" ? { ...pose, orientation: { x: 0, y: 0, z: Math.SQRT1_2, w: Math.SQRT1_2 } } : pose);
+  coordinator.advance({ timestampMs: 700, clock: clock(700, true), input: inputSnapshot(first), equipmentPoses: makePoses(first) });
+  for (const wall of [900, 1300, 1600]) coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: { ...inputSnapshot({ ...first, provenance: "frozen", frozenTickId: wall }), sourceIdentity: "camera-b" }, equipmentPoses: makePoses(first) });
+  const endpoint = evidence("frozen-source-after", 1700, [0, 1], [3, 2], [3, 2]);
+  coordinator.advance({ timestampMs: 1700, clock: clock(1700, true), input: { ...inputSnapshot(endpoint), sourceIdentity: "camera-b" }, equipmentPoses: makePoses(endpoint) });
+  assert.equal(coordinator.getJudgements().length, 0, `${mode}: frozen source switch prevents old-to-new measured reconstruction`);
 }
 
 console.log("Latency-tolerant collider scoring validation passed.");

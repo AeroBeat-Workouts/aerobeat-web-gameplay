@@ -908,7 +908,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function rememberColliderPublication() {
-    lastColliderPublication = latestEvidence?.provenance === "measured" && lastInput ? Object.freeze({ sourceIdentity: String(lastInput.sourceIdentity), calibrationId: latestEvidence.calibrationId, evidenceJson: JSON.stringify(latestEvidence), poses: new Map(frameEquipmentPoses) }) : null;
+    if (latestEvidence?.provenance === "measured" && lastInput) lastColliderPublication = Object.freeze({ sourceIdentity: String(lastInput.sourceIdentity), calibrationId: latestEvidence.calibrationId, evidenceJson: JSON.stringify(latestEvidence), poses: new Map(frameEquipmentPoses) });
   }
 
   /** @param {ReadonlyMap<string, AeroResolvedEquipmentPose>} poses */
@@ -1432,7 +1432,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       clearColliderSamples(); finalizeColliderEvents(); return;
     }
     if (frozenTickId !== null) {
-      if (lastColliderFrame !== null && lastColliderFrame.frozenTickId !== null && frozenTickId < lastColliderFrame.frozenTickId) {
+      if (lastColliderFrame !== null && (frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId || lastColliderFrame.frozenTickId !== null && frozenTickId < lastColliderFrame.frozenTickId)) {
         clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeColliderEvents(); return;
       }
     } else if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
@@ -1452,6 +1452,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     pushPoseHistoryForRole("left_wrist", left, 300 * 4 + sweptPoseHistoryMarginMs);
     pushPoseHistoryForRole("right_wrist", right, 300 * 4 + sweptPoseHistoryMarginMs);
     rememberColliderPublication();
+    const evaluationLeftPoseHistory = evaluationPoseHistoryForRole("left_wrist", left);
+    const evaluationRightPoseHistory = evaluationPoseHistoryForRole("right_wrist", right);
     /** @type {{event:DataRecord,contact:Readonly<{firstContactMs:number,hitDepthHalf:"front"|"back"}>,poseHistory:ReadonlyArray<Readonly<{t:number,pose:AeroResolvedEquipmentPose}>>,windowMs:number,volume:{scale:number,depthForward:number,depthBackward:number},afterWindowMs:number|null,hand:"left"|"right"}[]} */ const candidates = [];
     /** @type {string[]} */ const nearMisses = [];
     for (const event of events) {
@@ -1469,7 +1471,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       // renderer/GLB bounds or fixed fallback apply.
       const volume = colliderVolumeSettings(eventSettings);
       const windowMs = Number(eventSettings.timingWindowMs);
-      const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
+      const poseHistory = hand === "right" ? evaluationRightPoseHistory : evaluationLeftPoseHistory;
       const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
       const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
       if (swept === null) continue;
@@ -1551,10 +1553,27 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * @param {number} trimMs
    */
   function pushPoseHistoryForRole(role, sample, trimMs) {
+    // Frozen publications can score their held point now, but are not new
+    // measurements and must not flatten the next measured-to-measured spline.
+    if (latestEvidence?.provenance === "frozen") return;
     const pose = frameEquipmentPoses.get(role) ?? null;
     const entryTimeMs = sample === null ? Number.NaN : sample.songTimeMs;
     if (role === "left_wrist") leftPoseHistory = pushPoseHistory(leftPoseHistory, pose === null || !Number.isFinite(entryTimeMs) ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), entryTimeMs, trimMs);
     else rightPoseHistory = pushPoseHistory(rightPoseHistory, pose === null || !Number.isFinite(entryTimeMs) ? null : /** @type {AeroResolvedEquipmentPose} */ (pose), entryTimeMs, trimMs);
+  }
+
+  /**
+   * F4 uses only the current held point for evaluation; persistent control
+   * points remain measured-only. This also keeps guard/slice diagnostics on
+   * exactly the same transient geometry as their successful contact.
+   * @param {"left_wrist" | "right_wrist"} role
+   * @param {ColliderSample | null} sample
+   * @returns {ReadonlyArray<Readonly<{t:number,pose:AeroResolvedEquipmentPose}>>}
+   */
+  function evaluationPoseHistoryForRole(role, sample) {
+    if (latestEvidence?.provenance !== "frozen") return role === "left_wrist" ? leftPoseHistory : rightPoseHistory;
+    const pose = frameEquipmentPoses.get(role);
+    return pose && sample ? Object.freeze([Object.freeze({ t: sample.songTimeMs, pose })]) : Object.freeze([]);
   }
 
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
@@ -1660,7 +1679,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       clearColliderSamples(); finalizeBoxingColliderEvents(); return;
     }
     if (frozenTickId !== null) {
-      if (lastColliderFrame !== null && lastColliderFrame.frozenTickId !== null && frozenTickId < lastColliderFrame.frozenTickId) {
+      if (lastColliderFrame !== null && (frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId || lastColliderFrame.frozenTickId !== null && frozenTickId < lastColliderFrame.frozenTickId)) {
         clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeBoxingColliderEvents(); return;
       }
     } else if (lastColliderFrame && (frame.measurementTimestampMs <= lastColliderFrame.measurementTimestampMs || frame.sourceIdentity !== lastColliderFrame.sourceIdentity || frame.calibrationId !== lastColliderFrame.calibrationId)) {
@@ -1676,6 +1695,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     pushPoseHistoryForRole("left_wrist", left, 300 * 4 + sweptPoseHistoryMarginMs);
     pushPoseHistoryForRole("right_wrist", right, 300 * 4 + sweptPoseHistoryMarginMs);
     rememberColliderPublication();
+    const evaluationLeftPoseHistory = evaluationPoseHistoryForRole("left_wrist", left);
+    const evaluationRightPoseHistory = evaluationPoseHistoryForRole("right_wrist", right);
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean,hitDepthHalf:"front"|"back"}[]} */ const guardCandidates = [];
     for (const event of events) {
@@ -1693,7 +1714,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         // cylinder length only; the timing window is independent.
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
         const volume = colliderVolumeSettings(boxingColliderSettings);
-        const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
+        const poseHistory = hand === "right" ? evaluationRightPoseHistory : evaluationLeftPoseHistory;
         const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
         const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
 
@@ -1710,8 +1731,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const volume = colliderVolumeSettings(boxingColliderSettings);
         // Guard poses use each role's exact resolved glove hull, swept across
         // the window (time-based, same semantics as the punch branch).
-        const leftSwept = left !== null && !seedLeftOnly ? sweptGloveObbContactsBoxingTarget(leftTarget, leftPoseHistory, windowMs, volume, null, reprojectEquipmentPose) : null;
-        const rightSwept = right !== null && !seedRightOnly ? sweptGloveObbContactsBoxingTarget(rightTarget, rightPoseHistory, windowMs, volume, null, reprojectEquipmentPose) : null;
+        const leftSwept = left !== null && !seedLeftOnly ? sweptGloveObbContactsBoxingTarget(leftTarget, evaluationLeftPoseHistory, windowMs, volume, null, reprojectEquipmentPose) : null;
+        const rightSwept = right !== null && !seedRightOnly ? sweptGloveObbContactsBoxingTarget(rightTarget, evaluationRightPoseHistory, windowMs, volume, null, reprojectEquipmentPose) : null;
         if (leftSwept === null || rightSwept === null) continue;
         guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(leftSwept.firstContactMs, rightSwept.firstContactMs), leftContact: true, rightContact: true, hitDepthHalf: leftSwept.hitDepthHalf === "front" && rightSwept.hitDepthHalf === "front" ? "front" : "back" });
       }
