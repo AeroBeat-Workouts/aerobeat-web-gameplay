@@ -1,6 +1,6 @@
 # Continuous spline collider reprojection — next public release
 
-Status: approved by Derrick; inspection in progress.
+Status: approved by Derrick; gameplay implementation pushed, assembly integration and acceptance in progress.
 Owner: Pico. Gameplay owns judgement; assembly owns projection integration, Test simulation and release. UI changes only as needed for the approved Test webcam-FPS variable.
 Bead: aerobeat-web-assembly-3xji (assembly ledger).
 Release target: 0.0.150, subject to checking current version before cutting.
@@ -8,7 +8,7 @@ Goal: goal-ba61dc6f-9a19-4ca0-8daa-2be43cf38205. Round cap: Maximum safe integer
 
 ## Current decision and next check
 
-Extend the existing equipment projection and collision evaluation rather than create another scorer. Inspect measured-pose history, swept interpolation, rotation projection and Test input generation first. The next acceptance check is a focused production-coordinator regression in which sparse pose updates miss a traversed beat today and reconstructed equipment samples score it using the unchanged evaluator.
+Gameplay spline/reprojection and focused production-coordinator regressions are pushed. Assembly owns projection integration, Test cadence control and built acceptance. The next gameplay acceptance check is an exact held-measured publication advancing past 750ms without discarding its original spline bracket, followed by a fresh endpoint; new evidence must retain the current age bound. Then exercise the assembled Flow/Boxing Test FPS control with rendering independent of sampling.
 
 Derrick approved execution and the next public release. No new approval is needed for bounded implementation choices. His phone Play test remains the final human usability check after release.
 
@@ -30,8 +30,8 @@ Keep current package/provenance, lifecycle and public release gates. Add focused
 
 ## Tasks
 
-1. In progress: inspect and diagnose current scoring/projection; record exact path and bounded implementation choice. Read repo READMEs and protect unrelated dirty work.
-2. Pending: repair installed Beads CLI/database compatibility, verify reads/writes and claim the feature. Avoid treating schema-skew bypass as a permanent repair.
+1. Completed: inspected and diagnosed current scoring/projection; recorded exact path and bounded implementation choice. Read repo READMEs and protected unrelated dirty work.
+2. Completed: repaired installed Beads CLI/database compatibility, verified reads/writes and claimed the feature. Explicit `/home/derrick/.local/share/beads/1.3.2/bin/bd` supports schema 66 without an override (parent verified).
 3. Pending: implement continuous timestamped spline samples and equipment reprojection through current scoring. Choose curve/sampling bounds from existing code and measured runtime cost.
 4. Pending: add Test simulated webcam-FPS input with normal rendering independent of pose sampling.
 5. Pending: test sparse updates, tracking gaps, equal endpoints, timing boundaries, existing consumed beats and reset/seek behavior. Run relevant existing gates and exercise the affected build. One focused independent review is appropriate for this cross-mode scoring change.
@@ -76,4 +76,10 @@ Focused normal-unit regressions cover nonlinear spline positions and derivatives
 
 Finalization inspected: notes/punches commit Miss on strict playhead > max(center+window, center+1000ms), while guards use their existing windows. An endpoint arriving after an earlier tick already finalized the event cannot recover that Miss. Existing Play sweep eligibility is left untouched, including its optional later deadline; no timing expansion was introduced. Arbitrarily brief spatial contacts may still fall between the bounded probes. Actual phone cadence/fit and assembled Play/Test remain parent-owned acceptance checks.
 
-Validation: full `npm test` passed (checks, complete unit gate including new spline suite, public integration). Existing `npm run test:browser` passed. Gameplay source/browser smoke is not assembled-product or physical-phone acceptance. Commit/push follows this result.
+Validation: full `npm test` passed (checks, complete unit gate including new spline suite, public integration). Existing `npm run test:browser` passed. Gameplay source/browser smoke is not assembled-product or physical-phone acceptance. Gameplay implementation committed and pushed as `f87266aeaca78422059b2379990513fa15de397e` on main.
+
+### Parent integration checkpoint
+
+Verified gameplay coder child: `eb19a375-fdfe-4fa0-ac31-a09da47fb992` (parent-provided verified identity). Parent reports assembly now supplies the constructor callback: Flow uses the existing `squareRadialSaberTarget`, base configuration and shoulder pivot (Test center); Boxing retains interpolated resolved orientation because its scored cylinder ignores art rotation. The Test control accepts 0 for native cadence or 1..60 FPS and sample-and-holds strict input plus preview while wall-clock advancement and rendering remain live. These are parent-reported implementation results; assembled acceptance is not yet claimed here.
+
+Integration follow-up found by gameplay inspection: ordinary held measured publications older than 750ms fail active equipment-pose validation before duplicate recognition. Exact already-accepted duplicates should be handled as idle ticks before age admission, preserving history without pushing poses or scoring held geometry; clock advancement and existing finalization must continue. New evidence must retain the existing judgement-age bound. Do not relabel ordinary sparse holds as incrementing frozen ticks, which retime held positions and flatten the measurement gap. This follow-up remains unimplemented in the gameplay commit above.
