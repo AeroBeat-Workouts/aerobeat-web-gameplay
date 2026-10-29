@@ -17,7 +17,7 @@
  *  - an out-of-order frame being absorbed without throwing.
  */
 import assert from "node:assert/strict";
-import { createAeroGameplaySessionCoordinator, maximumColliderJudgementAgeMs } from "../src/index.js";
+import { createAeroGameplaySessionCoordinator, maximumColliderJudgementAgeMs, defaultBoxingColliderSettings } from "../src/index.js";
 import { measuredColliderSample } from "../src/flow-collider-collision.js";
 
 const HASH = "a".repeat(64);
@@ -35,9 +35,9 @@ const clock = (ms, playing) => ({ contextTimeSeconds: ms / 1000, positionSeconds
 const note = (mode, centerTimestampMs) => ({ schema: "aerobeat/resolved_content_event", version: 3, eventId: `${mode}-note`, variantId: `${mode}-v`, chartId: `${mode}-c`, centerTimestampMs, sourceEventIds: [`source-${mode}`], type: mode === "flow" ? "note" : "straight_left", ...(mode === "flow" ? { hand: "left", placement: 5 } : { spatialTarget: { targetCell: 5, acceptedSubcells: [], sourceCell: -1 } }) });
 
 let runSeq = 0;
-function playing(mode) {
-  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `latency-${mode}-${++runSeq}`, countdownStepMs: 1 });
-  coordinator.configureContent({ packageId: "package", selectedVariant: variant(mode), resolvedEvents: [note(mode, 1000)], profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false } });
+function playing(mode, options = {}, configuration = {}) {
+  const coordinator = createAeroGameplaySessionCoordinator({ sessionId: `latency-${mode}-${++runSeq}`, countdownStepMs: 1, ...options });
+  coordinator.configureContent({ packageId: "package", selectedVariant: variant(mode), resolvedEvents: [note(mode, 1000)], ...configuration, profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: HASH, class: "between_run_ruleset", regenerationRequired: false } });
   coordinator.advance({ timestampMs: 0, clock: clock(0, false), input: inputSnapshot(null) });
   assert.equal(coordinator.requestStart(0).accepted, true);
   for (const timestampMs of [1, 2, 3]) coordinator.advance({ timestampMs, clock: clock(0, false) });
@@ -150,6 +150,49 @@ for (const mode of /** @type {const} */ (["boxing", "flow"])) {
   const judgements = coordinator.getJudgements();
   assert.equal(judgements.length, 1, "the note is judged exactly once after a reordered frame");
   assert.equal(judgements[0].result, "hit", "a correct in-order swing still scores after a reordered frame");
+}
+
+// Production coordinator: position-based Flow reprojection changes a sparse
+// swing verdict; endpoint slerp does not. The same callback receives each
+// reconstructed sample used by collision and the private slice diagnostic.
+for (const projected of [false, true]) {
+  let calls = 0;
+  const coordinator = playing("flow", projected ? { reprojectEquipmentPose: (pose, context) => {
+    calls++;
+    assert.ok(Number.isFinite(context.timestampMs) && Number.isFinite(context.tangent.y));
+    return { ...pose, orientation: Math.abs(pose.anchor.y - 1) < .1 ? { x: 0, y: 0, z: 0, w: 1 } : pose.orientation };
+  } } : {});
+  for (const [time, y] of [[800, .8], [1200, 1.2], [1300, 1.2]]) {
+    const sample = evidence(`project-${time}`, time, [2, y], [3, 2], [3, 2]);
+    const poses = posesForEvidence(sample, "flow").map((pose) => ({ ...pose, orientation: { x: 0, y: 0, z: Math.SQRT1_2, w: Math.SQRT1_2 } }));
+    coordinator.advance({ timestampMs: time, clock: clock(time, true), input: inputSnapshot(sample), equipmentPoses: poses });
+  }
+  assert.equal(coordinator.getJudgements().length, projected ? 1 : 0, "only intermediate reprojection reaches the note");
+  if (projected) {
+    assert.equal(coordinator.getJudgements()[0].result, "hit");
+    assert.ok(calls > 0);
+    coordinator.seekTo(500);
+    assert.equal(coordinator.getJudgements().length, 0, "seek clears judged ids");
+    const before = calls;
+    deliver(coordinator, "flow", 1400, 1400, [3, 2]);
+    assert.equal(calls, before, "seek removes the previous spline bracket");
+    assert.equal(coordinator.getJudgements().length, 0, "seek cannot replay an old interpolated contact");
+  }
+}
+
+// Boxing ignores art rotation by contract, but uses the same spline anchors.
+// The fast preceding secant bends the [800,1200] segment into the cell while
+// its moving Z is eligible. Without that older point, linear anchors miss.
+for (const withPredecessor of [false, true]) {
+  let calls = 0;
+  const coordinator = playing("boxing", { reprojectEquipmentPose: (pose) => { calls++; return pose; } }, { boxingColliderSettings: { ...defaultBoxingColliderSettings, colliderDepthForward: 1, colliderDepthBackward: 0 } });
+  if (withPredecessor) deliver(coordinator, "boxing", 790, 790, [3.4, 1]);
+  deliver(coordinator, "boxing", 800, 800, [2.8, 1]);
+  deliver(coordinator, "boxing", 1200, 1200, [1.5, 1]);
+  deliver(coordinator, "boxing", 1300, 1300, [1.5, 1]);
+  assert.equal(coordinator.getJudgements().length, withPredecessor ? 1 : 0, "Boxing spline passes the note when linear motion does not");
+  assert.ok(calls > 0, "Boxing forwards its projector");
+  if (withPredecessor) assert.equal(coordinator.getJudgements()[0].result, "hit", "same beat scores exactly once across later updates");
 }
 
 console.log("Latency-tolerant collider scoring validation passed.");

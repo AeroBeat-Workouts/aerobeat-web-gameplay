@@ -66,6 +66,7 @@ const SUPPORTED_MODIFIERS = Object.freeze(["any_punch", "cross_body", "no_obstac
  * @property {string} [instanceId]
  * @property {number} [countdownStepMs]
  * @property {(error: unknown) => void} [onListenerError]
+ * @property {import("./equipment-pose-collision.js").ReprojectEquipmentPose} [reprojectEquipmentPose] Trusted projection owner for reconstructed interior poses.
  */
 
 /**
@@ -93,6 +94,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const sessionId = normalizedOptions.sessionId;
   const instanceId = normalizedOptions.instanceId;
   const countdownStepMs = normalizedOptions.countdownStepMs;
+  const reprojectEquipmentPose = normalizedOptions.reprojectEquipmentPose;
   const listeners = new Set();
   let destroyed = false;
   let generation = 0;
@@ -1430,7 +1432,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const windowMs = Number(eventSettings.timingWindowMs);
       const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
       const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
-      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs);
+      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
       if (swept === null) continue;
       // A qualified near is only a private candidate: real capsule contact
       // anywhere in the eligible window still takes precedence.
@@ -1453,7 +1455,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     }
     accepted.sort((a, b) => Number(a.event.centerTimestampMs) - Number(b.event.centerTimestampMs) || compareCodePoints(String(a.event.eventId), String(b.event.eventId)));
     for (const candidate of accepted) {
-      const sliceT = internalFlowFirstContactSliceT(candidate.event, candidate.poseHistory, candidate.windowMs, candidate.volume, candidate.contact, candidate.afterWindowMs);
+      const sliceT = internalFlowFirstContactSliceT(candidate.event, candidate.poseHistory, candidate.windowMs, candidate.volume, candidate.contact, candidate.afterWindowMs, reprojectEquipmentPose);
       recordJudgementAt(candidate.event, "hit", Object.freeze([]), /** @type {AeroGameplayEvidenceSnapshot} */ (latestEvidence), false, candidate.contact.firstContactMs, candidate.contact.hitDepthHalf);
       if (sliceT !== null && Number.isFinite(sliceT) && sliceT >= 0.15 && sliceT <= 0.85) flowSliceByEventId.set(String(candidate.event.eventId), sliceT);
     }
@@ -1652,7 +1654,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const volume = colliderVolumeSettings(boxingColliderSettings);
         const poseHistory = hand === "right" ? rightPoseHistory : leftPoseHistory;
         const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
-        const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs);
+        const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
 
         if (swept === null) continue;
         if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
@@ -1667,8 +1669,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const volume = colliderVolumeSettings(boxingColliderSettings);
         // Guard poses use each role's exact resolved glove hull, swept across
         // the window (time-based, same semantics as the punch branch).
-        const leftSwept = left !== null && !seedLeftOnly ? sweptGloveObbContactsBoxingTarget(leftTarget, leftPoseHistory, windowMs, volume) : null;
-        const rightSwept = right !== null && !seedRightOnly ? sweptGloveObbContactsBoxingTarget(rightTarget, rightPoseHistory, windowMs, volume) : null;
+        const leftSwept = left !== null && !seedLeftOnly ? sweptGloveObbContactsBoxingTarget(leftTarget, leftPoseHistory, windowMs, volume, null, reprojectEquipmentPose) : null;
+        const rightSwept = right !== null && !seedRightOnly ? sweptGloveObbContactsBoxingTarget(rightTarget, rightPoseHistory, windowMs, volume, null, reprojectEquipmentPose) : null;
         if (leftSwept === null || rightSwept === null) continue;
         guardCandidates.push({ event, evidence: validSample, contactMs: Math.max(leftSwept.firstContactMs, rightSwept.firstContactMs), leftContact: true, rightContact: true, hitDepthHalf: leftSwept.hitDepthHalf === "front" && rightSwept.hitDepthHalf === "front" ? "front" : "back" });
       }
@@ -2038,7 +2040,7 @@ function makeEventTruth(contentPackageId, generation, sourceVariant, sourceProfi
 function normalizeOptions(options) {
   if (!isPlainRecord(options)) throw gameplayError("gameplay_options_invalid", "Gameplay options must be a plain record");
   const keys = Reflect.ownKeys(options);
-  if (keys.some((key) => typeof key !== "string" || !["sessionId", "instanceId", "countdownStepMs", "onListenerError"].includes(key))) throw gameplayError("gameplay_options_invalid", "Gameplay options contain unknown or symbolic fields");
+  if (keys.some((key) => typeof key !== "string" || !["sessionId", "instanceId", "countdownStepMs", "onListenerError", "reprojectEquipmentPose"].includes(key))) throw gameplayError("gameplay_options_invalid", "Gameplay options contain unknown or symbolic fields");
   /** @type {Record<string, unknown>} */
   const values = {};
   for (const keyValue of keys) {
@@ -2047,9 +2049,11 @@ function normalizeOptions(options) {
     if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw gameplayError("gameplay_options_invalid", "Gameplay options cannot contain accessors or hidden fields");
     values[key] = descriptor.value;
   }
+  const projector = values.reprojectEquipmentPose;
+  if (projector !== undefined && typeof projector !== "function") throw gameplayError("gameplay_options_invalid", "Equipment pose projector must be a function");
   const callback = values.onListenerError;
   if (callback !== undefined && typeof callback !== "function") throw gameplayError("gameplay_options_invalid", "Listener error hook must be a function");
-  return Object.freeze({ sessionId: values.sessionId === undefined ? `session-${randomToken()}` : requireString(values.sessionId, "session_id_invalid"), instanceId: values.instanceId === undefined ? null : requireString(values.instanceId, "instance_id_invalid"), countdownStepMs: values.countdownStepMs === undefined ? 1000 : positiveNumber(values.countdownStepMs, "countdown_step_invalid"), onListenerError: /** @type {((error: unknown) => void) | undefined} */ (callback) });
+  return Object.freeze({ sessionId: values.sessionId === undefined ? `session-${randomToken()}` : requireString(values.sessionId, "session_id_invalid"), instanceId: values.instanceId === undefined ? null : requireString(values.instanceId, "instance_id_invalid"), countdownStepMs: values.countdownStepMs === undefined ? 1000 : positiveNumber(values.countdownStepMs, "countdown_step_invalid"), onListenerError: /** @type {((error: unknown) => void) | undefined} */ (callback), reprojectEquipmentPose: /** @type {import("./equipment-pose-collision.js").ReprojectEquipmentPose | undefined} */ (projector) });
 }
 
 /** @param {unknown} value @returns {VisualTestInteraction} */

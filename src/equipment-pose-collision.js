@@ -8,6 +8,7 @@ import { authoredDirectionCone, flowNoteCellBox } from "./flow-collider-collisio
 /** @typedef {Readonly<{x:number,y:number}>} Point2 */
 /** @typedef {import("@aerobeat/web-contracts").AeroResolvedEquipmentPose} ResolvedPose */
 /** @typedef {"front" | "back"} HitDepthHalf */
+/** @typedef {(pose: ResolvedPose, context: Readonly<{timestampMs:number,tangent:Readonly<{x:number,y:number,z:number}>}>) => ResolvedPose} ReprojectEquipmentPose */
 
 /** Settled contracts revision whose resolved-pose semantics this judge consumes. */
 export const equipmentPoseContractsCommit = "9544415ee5e42deaa4de99967c961d158d6720d7";
@@ -259,7 +260,8 @@ function segmentsContact(a, b, c, d) {
 /**
  * Frame-rate-independent margin kept beyond the deepest possible window
  * (300 ms max window × 4 max depth factor) so a bounded pose history always
- * covers the swept range of any legal beat.
+ * covers recent swept ranges. A retained predecessor brackets sparse gaps;
+ * unbounded depth settings do not imply unlimited retained history.
  */
 export const sweptPoseHistoryMarginMs = 200;
 
@@ -293,9 +295,10 @@ export function pushPoseHistory(history, pose, timestampMs, trimMs) {
   }
   if (!inserted) kept.push(entry());
   const cutoff = kept[kept.length - 1].t - trimMs;
-  const trimmed = [];
-  for (const candidate of kept) if (candidate.t > cutoff) trimmed.push(candidate);
-  return Object.freeze(trimmed);
+  // Keep one predecessor at/before the cutoff to bracket sparse segments.
+  // Null/reset boundaries still clear the entire history, including this point.
+  const firstInside = kept.findIndex((candidate) => candidate.t > cutoff);
+  return Object.freeze(kept.slice(Math.max(0, (firstInside < 0 ? kept.length : firstInside) - 1)));
 }
 
 /** @param {Readonly<{minX:number,maxX:number,minY:number,maxY:number}>} rectangle @param {number} radius */
@@ -350,8 +353,8 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * history (`{t, pose}` entries, measurement timestamps in ms).
  *
  * Samples the equipment at every stored pose inside the beat's timing
- * window AND linearly interpolates between consecutive stored poses (anchor
- * + extents via the resolved volume), so sparse low-FPS histories catch a
+ * window AND reconstructs bounded spline anchors with optional equipment
+ * reprojection between consecutive stored poses, so sparse histories catch a
  * crossing that the old single-snapshot test tunnels through. Returns the
  * EARLIEST contact time and its diagnostic temporal half — `front` for
  * `t < center`, `back` for `t >= center` — or `null` when never contacted.
@@ -362,40 +365,17 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * @param {number} timingWindowMs
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
+ * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  */
-export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null) {
+export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose) {
   if (history.length === 0) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
   const windowStart = center - timingWindowMs;
   const windowEnd = afterWindowMs ?? center + timingWindowMs;
-  const contacts = [];
-  /** @type {number[]} */ const sampleTimes = [];
-  for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
-  const probe = (t) => {
-    if (t < windowStart || t > windowEnd) return;
-    const pose = resolvePoseAt(history, t);
-    if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) contacts.push(t);
-  };
-  for (const t of sampleTimes) probe(t);
-  // Interpolate across every stored-pose gap that overlaps the window.
-  for (let index = 0; index < history.length - 1; index += 1) {
-    const from = history[index]; const to = history[index + 1];
-    const spanStart = Math.max(windowStart, from.t);
-    const spanEnd = Math.min(windowEnd, to.t);
-    if (spanStart > spanEnd || to.t <= from.t) continue;
-    const steps = 24;
-    for (let step = 1; step < steps; step += 1) {
-      const t = from.t + (to.t - from.t) * (step / steps);
-      if (t < windowStart || t > windowEnd) continue;
-      const pose = resolvePoseAt(history, t);
-      if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) { contacts.push(t); break; }
-    }
-  }
-  if (contacts.length > 0) {
-    contacts.sort((a, b) => a - b);
-    const first = contacts[0];
-    return Object.freeze({ firstContactMs: first, hitDepthHalf: /** @type {HitDepthHalf} */ (first < center ? "front" : "back") });
+  for (const t of overlapSampleTimes(history, windowStart, windowEnd, center)) {
+    const pose = resolvePoseAt(history, t, reprojectEquipmentPose);
+    if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
   }
   // No contact: check for a near-miss. The saber must have been within a
   // tight margin of the cell box at some time inside the 1/4-beat sub-window
@@ -410,31 +390,10 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   const nearEnd = center + quarterWindow;
   const nearMargin = 0.25;
   let firstNearMs = null;
-  const nearProbe = (t) => {
-    if (t < nearStart || t > nearEnd) return;
-    const pose = resolvePoseAt(history, t);
+  for (const t of overlapSampleTimes(history, nearStart, nearEnd, center)) {
+    const pose = resolvePoseAt(history, t, reprojectEquipmentPose);
     const capsule = resolveFlowSaberReach(pose, volume);
-    if (volume.scale !== 0 && saberNearCell(capsule, box, nearMargin)) {
-      if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
-    }
-  };
-  for (const t of sampleTimes) nearProbe(t);
-  for (let index = 0; index < history.length - 1; index += 1) {
-    const from = history[index]; const to = history[index + 1];
-    const spanStart = Math.max(nearStart, from.t);
-    const spanEnd = Math.min(nearEnd, to.t);
-    if (spanStart > spanEnd || to.t <= from.t) continue;
-    const steps = 24;
-    for (let step = 1; step < steps; step += 1) {
-      const t = from.t + (to.t - from.t) * (step / steps);
-      if (t < nearStart || t > nearEnd) continue;
-      const pose = resolvePoseAt(history, t);
-      const capsule = resolveFlowSaberReach(pose, volume);
-      if (volume.scale !== 0 && saberNearCell(capsule, box, nearMargin)) {
-        if (firstNearMs === null || t < firstNearMs) firstNearMs = t;
-        break;
-      }
-    }
+    if (volume.scale !== 0 && saberNearCell(capsule, box, nearMargin)) { firstNearMs = t; break; }
   }
   if (firstNearMs !== null) return Object.freeze({ nearMiss: true, firstNearMs });
   return null;
@@ -462,16 +421,17 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  * @param {Readonly<{firstContactMs:number,hitDepthHalf:HitDepthHalf}> | null} contact Exact swept hit (not near-miss).
  * @param {number | null} [afterWindowMs]
+ * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  * @returns {number | null}
  */
-export function internalFlowFirstContactSliceT(event, history, timingWindowMs, volume, contact, afterWindowMs = null) {
+export function internalFlowFirstContactSliceT(event, history, timingWindowMs, volume, contact, afterWindowMs = null, reprojectEquipmentPose) {
   const t = contact?.firstContactMs;
   if (!Number.isFinite(t) || !history.length || contact?.hitDepthHalf !== (t < Number(event.centerTimestampMs) ? "front" : "back")) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
   if (t < center - timingWindowMs || t > (afterWindowMs ?? center + timingWindowMs)) return null;
   const bounds = resolveTargetColliderBounds("flow", { x: box.centerX, y: box.centerY }, { x: box.halfX, y: box.halfY }, timingWindowMs);
-  const capsule = resolveFlowSaberReach(resolvePoseAt(history, t), volume);
+  const capsule = resolveFlowSaberReach(resolvePoseAt(history, t, reprojectEquipmentPose), volume);
   const start = capsule.start; const end = capsule.end;
   if (volume.scale === 0 || !segmentContactsRectangle(start, end, bounds, capsule.radius)) return null;
   const direction = event.direction == null ? null : authoredDirectionCone(String(event.direction), 0)?.direction;
@@ -535,42 +495,18 @@ function saberNearCell(capsule, box, margin) {
  * @param {number} timingWindowMs
  * @param {{scale?:number,depthForward?:number,depthBackward?:number}} volume
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
+ * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  */
-export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}, afterWindowMs = null) {
+export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose) {
   if (volume.scale === 0 || history.length === 0) return null;
   const center = Number(target.centerTimestampMs);
   const windowStart = center - timingWindowMs;
   const windowEnd = afterWindowMs ?? center + timingWindowMs;
-  const contacts = [];
-  /** @type {number[]} */ const sampleTimes = [];
-  for (const entry of history) if (entry.t >= windowStart && entry.t <= windowEnd) sampleTimes.push(entry.t);
-  const probe = (t) => {
-    if (t < windowStart || t > windowEnd) return;
-    const pose = resolvePoseAt(history, t);
-    if (boxingContactAtEligibleTime(target, pose, t, timingWindowMs, volume, afterWindowMs)) contacts.push(t);
-  };
-  for (const t of sampleTimes) probe(t);
-  // Moving Z can intersect the flat caps between measured frames even when
-  // the pose is stationary. Probe the center and eligible timing boundaries.
-  const firstTime = history[0].t; const lastTime = history[history.length - 1].t;
-  for (const boundary of [windowStart, center, windowEnd]) if (boundary >= firstTime && boundary <= lastTime) probe(boundary);
-  for (let index = 0; index < history.length - 1; index += 1) {
-    const from = history[index]; const to = history[index + 1];
-    const spanStart = Math.max(windowStart, from.t);
-    const spanEnd = Math.min(windowEnd, to.t);
-    if (spanStart > spanEnd || to.t <= from.t) continue;
-    const steps = 24;
-    for (let step = 1; step < steps; step += 1) {
-      const t = from.t + (to.t - from.t) * (step / steps);
-      if (t < windowStart || t > windowEnd) continue;
-      const pose = resolvePoseAt(history, t);
-      if (boxingContactAtEligibleTime(target, pose, t, timingWindowMs, volume, afterWindowMs)) { contacts.push(t); break; }
-    }
+  for (const t of overlapSampleTimes(history, windowStart, windowEnd, center)) {
+    const pose = resolvePoseAt(history, t, reprojectEquipmentPose);
+    if (boxingContactAtEligibleTime(target, pose, t, timingWindowMs, volume, afterWindowMs)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
   }
-  if (contacts.length === 0) return null;
-  contacts.sort((a, b) => a - b);
-  const first = contacts[0];
-  return Object.freeze({ firstContactMs: first, hitDepthHalf: /** @type {HitDepthHalf} */ (first < center ? "front" : "back") });
+  return null;
 }
 
 /**
@@ -579,16 +515,61 @@ export function sweptGloveObbContactsBoxingTarget(target, history, timingWindowM
  *
  * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
  * @param {number} t
+ * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  * @returns {ResolvedPose}
  */
-function resolvePoseAt(history, t) {
+export function resolvePoseAt(history, t, reprojectEquipmentPose) {
   if (t <= history[0].t) return history[0].pose;
   for (let index = 0; index < history.length - 1; index += 1) {
     const from = history[index]; const to = history[index + 1];
     if (t <= to.t) {
-      if (to.t <= from.t) return to.pose;
-      return lerpResolvedEquipmentPose(from.pose, to.pose, (t - from.t) / (to.t - from.t));
+      if (t === to.t || to.t <= from.t) return to.pose;
+      const duration = to.t - from.t;
+      const p = (t - from.t) / duration;
+      const previous = history[index - 1];
+      const anchor = { x: 0, y: 0, z: 0 }; const tangent = { x: 0, y: 0, z: 0 };
+      for (const axis of /** @type {const} */ (["x", "y", "z"])) {
+        const delta = to.pose.anchor[axis] - from.pose.anchor[axis];
+        const secant = delta / duration;
+        const prior = previous && previous.t < from.t ? (from.pose.anchor[axis] - previous.pose.anchor[axis]) / (from.t - previous.t) : secant;
+        // Causal Hermite: the previous/current secants estimate the starting
+        // velocity; the ending velocity is the current secant. Per-axis slopes
+        // are sign-preserving and capped at 3x the current secant. Together
+        // with end slope 1x this keeps each coordinate between its endpoints.
+        // Equal endpoints stay fixed, even after movement. No future pose is
+        // used, and a two-point history is exactly linear.
+        const startSlope = secant === 0 ? 0 : Math.max(0, Math.min(3, (prior / secant + 1) / 2));
+        const m0 = delta * startSlope; const m1 = delta;
+        anchor[axis] = (2*p*p*p - 3*p*p + 1) * from.pose.anchor[axis] + (p*p*p - 2*p*p + p) * m0 + (-2*p*p*p + 3*p*p) * to.pose.anchor[axis] + (p*p*p - p*p) * m1;
+        tangent[axis] = ((6*p*p - 6*p) * from.pose.anchor[axis] + (3*p*p - 4*p + 1) * m0 + (-6*p*p + 6*p) * to.pose.anchor[axis] + (3*p*p - 2*p) * m1) / duration;
+      }
+      const interpolated = lerpResolvedEquipmentPose(from.pose, to.pose, p);
+      const reconstructed = createResolvedEquipmentPose({ ...interpolated, anchor });
+      return reprojectEquipmentPose ? createResolvedEquipmentPose(reprojectEquipmentPose(reconstructed, Object.freeze({ timestampMs: t, tangent: Object.freeze(tangent) }))) : reconstructed;
     }
   }
   return history[history.length - 1].pose;
+}
+
+/**
+ * Sample each segment's overlap, not its full-gap lattice. Endpoints and beat
+ * center are explicit probes, so even a very narrow eligible slab is tested.
+ * At most 24 subdivisions per overlapping segment; no extrapolation beyond
+ * measured history. This is bounded approximation, not an analytic guarantee
+ * for arbitrarily thin contacts or arbitrary projector functions.
+ * @param {ReadonlyArray<Readonly<{t:number,pose:ResolvedPose}>>} history
+ * @param {number} start
+ * @param {number} end
+ * @param {number} center
+ */
+function overlapSampleTimes(history, start, end, center) {
+  const times = new Set();
+  for (const entry of history) if (entry.t >= start && entry.t <= end) times.add(entry.t);
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const low = Math.max(start, history[index].t); const high = Math.min(end, history[index + 1].t);
+    if (low > high || history[index + 1].t <= history[index].t) continue;
+    for (let step = 0; step <= 24; step += 1) times.add(low + (high - low) * step / 24);
+    if (center >= low && center <= high) times.add(center);
+  }
+  return [...times].sort((a, b) => a - b);
 }
