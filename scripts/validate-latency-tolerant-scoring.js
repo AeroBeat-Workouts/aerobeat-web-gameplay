@@ -263,4 +263,39 @@ for (const mode of ["flow", "boxing"]) {
   assert.equal(coordinator.getJudgements().length, 0, `${mode}: frozen source switch prevents old-to-new measured reconstruction`);
 }
 
+// Default authored direction must inspect reconstructed motion at contact,
+// not reject the original >150ms webcam pair. Keep the default enforcement.
+for (const mode of ["flow", "boxing"]) {
+  for (const cadence of [540, 1100]) {
+    for (const reverse of [false, true]) {
+      const center = reverse ? 5750 + cadence / 2 : 6000;
+      const directed = { ...note(mode, center), ...(mode === "flow" ? { direction: "right" } : { type: "hook_left" }) };
+      const control = { ...note(mode, center), eventId: `${mode}-direction-control`, sourceEventIds: [`${mode}-direction-control-source`], ...(mode === "flow" ? { direction: "left" } : {}) };
+      const coordinator = playing(mode, {}, { resolvedEvents: reverse ? [directed, control] : [directed] });
+      const makePoses = (value) => posesForEvidence(value, mode).map((pose) => mode === "flow" ? { ...pose, orientation: { x: 0, y: 0, z: Math.SQRT1_2, w: Math.SQRT1_2 } } : pose);
+      const first = evidence("direction-first", 5750, [reverse ? 3.42 : -.42, 1], [3, 2], [3, 2]);
+      coordinator.advance({ timestampMs: 5750, clock: clock(5750, true), input: inputSnapshot(first), equipmentPoses: makePoses(first) });
+      for (let wall = 5850; wall < 5750 + cadence; wall += 100) coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: inputSnapshot(first), equipmentPoses: makePoses(first) });
+      assert.equal(coordinator.getJudgements().length, 0, "held off-target frames never score");
+      const endpointTime = 5750 + cadence;
+      const endpoint = evidence("direction-second", endpointTime, [reverse ? -.42 : 3.42, 1], [3, 2], [3, 2]);
+      coordinator.advance({ timestampMs: endpointTime, clock: clock(endpointTime, true), input: inputSnapshot(endpoint), equipmentPoses: makePoses(endpoint) });
+      const judged = coordinator.getJudgements();
+      assert.equal(judged.length, 1, `${mode} ${cadence}ms ${reverse ? "reverse control" : "rightward direction"}: reconstructed default-rule contact scores`);
+      assert.equal(judged[0].eventId, reverse ? control.eventId : directed.eventId, "wrong-direction candidate cannot consume the valid same-frame candidate");
+      assert.equal(judged[0].result, "hit");
+      assert.ok(Math.abs(judged[0].timingOffsetMs) <= 180, `${mode} ${cadence}ms reverse=${reverse}: contact offset ${judged[0].timingOffsetMs}`);
+      coordinator.advance({ timestampMs: endpointTime + 20, clock: clock(endpointTime + 20, true), input: inputSnapshot(endpoint), equipmentPoses: makePoses(endpoint) });
+      assert.equal(coordinator.getJudgements().length, 1, "duplicate publications cannot score the same beat twice");
+      if (reverse) {
+        coordinator.advance({ timestampMs: center + 1001, clock: clock(center + 1001, true), input: inputSnapshot(null) });
+        const wrong = coordinator.getJudgements().find((judgement) => judgement.eventId === directed.eventId);
+        assert.equal(wrong?.result, "miss", "reverse motion never hits the authored rightward note");
+        assert.deepEqual([...wrong.diagnostics], ["wrong_direction"]);
+        assert.equal(coordinator.getScorePartitions()[0].hits, 1, "reverse rejection leaves score/consumption unchanged");
+      }
+    }
+  }
+}
+
 console.log("Latency-tolerant collider scoring validation passed.");

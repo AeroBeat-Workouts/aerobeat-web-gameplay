@@ -15,10 +15,10 @@ import {
 } from "@aerobeat/web-contracts";
 import { isObstacleGameplayGeometry, isObstacleGridMask, isObstacleSourceGeometry, maximumObstaclesPerChart } from "@aerobeat/web-contracts/obstacle-contracts";
 import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, pointContactsObstacle, maximumObstacleSampleGapMs } from "./flow-obstacle-collision.js";
-import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderJudgementAgeMs, maximumColliderSampleFreshnessMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
+import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderJudgementAgeMs, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
 import { createKneeColliderSettings, defaultKneeColliderSettings, kneeColliderSettingsIdentity, kneePadContactsBoxingTarget, measuredKneeSample } from "./knee-collider-collision.js";
-import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory, resolvePoseAt } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -1460,7 +1460,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (!productionEventEligible(event) || judgedIds.has(String(event.eventId)) || event.type !== "note") continue;
       const eventSettings = flowColliderSettingsForEvent(event);
       const hand = event.hand === "right" ? "right" : "left";
-      const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
+      const current = hand === "right" ? right : left;
       if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
       // Time-based (swept) hit test: the resolved rotating saber reach
       // is the sole Flow hit volume, swept across the independent note
@@ -1475,16 +1475,17 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
       const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
       if (swept === null) continue;
+      const directionSamples = directionSamplesAtContact(poseHistory, "nearMiss" in swept ? swept.firstNearMs : swept.firstContactMs, current);
       // A qualified near is only a private candidate: real capsule contact
       // anywhere in the eligible window still takes precedence.
       if ("nearMiss" in swept) {
         const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
-        if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
+        if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, directionSamples.first, directionSamples.second, Number(eventSettings.directionToleranceDegrees))) continue;
         nearMisses.push(String(event.eventId));
         continue;
       }
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
-      if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, prior, current, Number(eventSettings.directionToleranceDegrees))) continue;
+      if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, directionSamples.first, directionSamples.second, Number(eventSettings.directionToleranceDegrees))) continue;
       candidates.push({ event, contact: swept, poseHistory, windowMs, volume, afterWindowMs, hand });
     }
     /** @type {typeof candidates} */ const accepted = [];
@@ -1574,6 +1575,28 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (latestEvidence?.provenance !== "frozen") return role === "left_wrist" ? leftPoseHistory : rightPoseHistory;
     const pose = frameEquipmentPoses.get(role);
     return pose && sample ? Object.freeze([Object.freeze({ t: sample.songTimeMs, pose })]) : Object.freeze([]);
+  }
+
+  /**
+   * Use the collision spline's nearby motion, not the webcam's whole sparse
+   * gap, for the existing authored-direction predicate. These private samples
+   * never enter evidence/history or action consumption. A frozen/single-point
+   * history supplies no invented motion. No extrapolation beyond measurements.
+   * @param {ReadonlyArray<Readonly<{t:number,pose:AeroResolvedEquipmentPose}>>} history
+   * @param {number} contactMs
+   * @param {ColliderSample} current
+   * @returns {Readonly<{first:ColliderSample|null,second:ColliderSample}>}
+   */
+  function directionSamplesAtContact(history, contactMs, current) {
+    if (history.length < 2) return Object.freeze({ first: null, second: current });
+    const from = Math.max(history[0].t, contactMs - maximumColliderSampleGapMs / 2);
+    const to = Math.min(history[history.length - 1].t, contactMs + maximumColliderSampleGapMs / 2);
+    if (from >= to) return Object.freeze({ first: null, second: current });
+    const sampleAt = (t, suffix) => {
+      const pose = resolvePoseAt(history, t);
+      return Object.freeze({ ...current, songTimeMs: t, measurementTimestampMs: current.measurementTimestampMs + (t - current.songTimeMs), sourceFrameId: `spline-direction-${suffix}`, sx: pose.anchor.x, sy: pose.anchor.y });
+    };
+    return Object.freeze({ first: sampleAt(from, "from"), second: sampleAt(to, "to") });
   }
 
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right @param {ColliderSample | null} priorLeft @param {ColliderSample | null} priorRight @param {boolean} evaluateLeft @param {boolean} evaluateRight */
@@ -1686,7 +1709,6 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       clearColliderSamples(); lastColliderFrame = frame; previousLeftWristSample = left; previousRightWristSample = right; satisfyWristRecoveryBaselines(left, right); finalizeBoxingColliderEvents(); return;
     }
     const seedLeftOnly = left !== null && leftWristBaselineRequired; const seedRightOnly = right !== null && rightWristBaselineRequired;
-    const priorLeft = left === null || seedLeftOnly ? null : previousLeftWristSample; const priorRight = right === null || seedRightOnly ? null : previousRightWristSample;
     const reach = Object.freeze({ topRowReachWU: Number(boxingColliderSettings.topRowReachWU), bottomRowReachWU: Number(boxingColliderSettings.bottomRowReachWU) });
     // Append the CURRENT frame's full resolved poses to the swept history
     // BEFORE the candidate loop (same ordering invariant as the Flow
@@ -1705,7 +1727,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       if (!obstaclesEnabled && (action === "squat" || action === "weave_left" || action === "weave_right")) continue;
       if (PUNCH_ACTIONS.includes(action)) {
         const hand = action.endsWith("_right") ? "right" : "left";
-        const current = hand === "right" ? right : left; const prior = hand === "right" ? priorRight : priorLeft;
+        const current = hand === "right" ? right : left;
         if (current === null || (hand === "left" ? seedLeftOnly : seedRightOnly)) continue;
         const placement = Number(event.spatialTarget.targetCell);
         const target = Object.freeze({ centerTimestampMs: Number(event.centerTimestampMs), ...boxingTargetCenter(placement, /** @type {"straight"|"hook"|"uppercut"} */ (action.slice(0, action.indexOf("_"))), reach) });
@@ -1719,7 +1741,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
 
         if (swept === null) continue;
-        if (!matchesBoxingAuthoredDirection(action, prior, current, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
+        const directionSamples = directionSamplesAtContact(poseHistory, swept.firstContactMs, current);
+        if (!matchesBoxingAuthoredDirection(action, directionSamples.first, directionSamples.second, boxingColliderSettings.enforceAuthoredDirection === true, Number(boxingColliderSettings.directionToleranceDegrees))) continue;
         candidates.push({ event, evidence: current, contactMs: swept.firstContactMs, hand, hitDepthHalf: swept.hitDepthHalf });
       } else if (action === "guard") {
         const target = /** @type {DataRecord | undefined} */ (event.guardTarget);
