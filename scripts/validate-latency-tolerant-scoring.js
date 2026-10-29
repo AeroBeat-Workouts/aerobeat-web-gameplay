@@ -195,4 +195,59 @@ for (const withPredecessor of [false, true]) {
   if (withPredecessor) assert.equal(coordinator.getJudgements()[0].result, "hit", "same beat scores exactly once across later updates");
 }
 
+// One-FPS capture with a live render/audio clock. Held measured frames are
+// idle publications, not freshly measured or frozen observations. The original
+// measurement bracket must survive both age expiry and temporary null evidence.
+for (const mode of ["flow", "boxing"]) {
+  for (const gap of ["held", "no_frame"]) {
+    const coordinator = playing(mode, {}, { resolvedEvents: [note(mode, 1200)] });
+    const sample = evidence("slow-first", 700, [3, 1], [3, 2], [3, 2]);
+    const makePoses = (value) => posesForEvidence(value, mode).map((pose) => mode === "flow" ? { ...pose, orientation: { x: 0, y: 0, z: Math.SQRT1_2, w: Math.SQRT1_2 } } : pose);
+    const firstPoses = makePoses(sample);
+    coordinator.advance({ timestampMs: 700, clock: clock(700, true), input: inputSnapshot(sample), equipmentPoses: firstPoses });
+    // A same-id changed payload is not an exact idle publication. Once stale,
+    // it must still fail ordinary admission transactionally.
+    const changed = evidence("slow-first", 700, [2, 1], [3, 2], [3, 2]);
+    for (let wall = 800; wall < 1700; wall += 100) {
+      if (wall === 1500) assert.throws(() => coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: inputSnapshot(changed), equipmentPoses: makePoses(changed) }), (error) => error.code === "equipment_poses_invalid", "changed stale data cannot impersonate an accepted repeat");
+      const heldInput = inputSnapshot(gap === "no_frame" && wall >= 1100 ? null : sample);
+      const renderPoses = wall === 1500 ? firstPoses.map((pose) => ({ ...pose, scale: 5, orientation: { x: 0, y: 0, z: 0, w: 1 } })) : firstPoses;
+      assert.doesNotThrow(() => coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: heldInput, equipmentPoses: gap === "no_frame" && wall >= 1100 ? undefined : renderPoses }), `${mode} ${gap}: held render tick must not throw or clear a measured bracket`);
+      assert.equal(coordinator.getJudgements().length, 0, "idle ticks do not score held equipment");
+      assert.equal(coordinator.getSnapshot().session.timelinePositionMs, wall, "idle ticks keep the authoritative clock live");
+    }
+    const endpoint = evidence("slow-second", 1700, [0, 1], [3, 2], [3, 2]);
+    const lastPoses = makePoses(endpoint);
+    coordinator.advance({ timestampMs: 1700, clock: clock(1700, true), input: inputSnapshot(endpoint), equipmentPoses: lastPoses });
+    assert.equal(coordinator.getJudgements()[0]?.result, "hit", `${mode} ${gap}: a fresh endpoint reconstructs the one-second gap`);
+    assert.ok(Math.abs(coordinator.getJudgements()[0].timingOffsetMs) <= 180, "historical contact stays inside the unchanged window");
+    coordinator.advance({ timestampMs: 1800, clock: clock(1800, true), input: inputSnapshot(endpoint), equipmentPoses: lastPoses });
+    assert.equal(coordinator.getJudgements().length, 1, "gap reconstruction is exactly once");
+  }
+}
+
+for (const mode of ["flow", "boxing"]) {
+  const coordinator = playing(mode, {}, { resolvedEvents: [note(mode, 1200), { ...note(mode, 5000), eventId: `${mode}-future`, sourceEventIds: [`${mode}-future-source`] }] });
+  const sample = evidence("held-on-target", 700, [1, 1], [3, 2], [3, 2]);
+  const poses = posesForEvidence(sample, mode);
+  coordinator.advance({ timestampMs: 700, clock: clock(700, true), input: inputSnapshot(sample), equipmentPoses: poses });
+  for (let wall = 800; wall <= 2200; wall += 100) coordinator.advance({ timestampMs: wall, clock: clock(wall, true), input: inputSnapshot(sample), equipmentPoses: poses });
+  assert.equal(coordinator.getJudgements().length, 0, `${mode}: held observations do not score an approaching note or finalize at the inclusive deadline`);
+  coordinator.advance({ timestampMs: 2201, clock: clock(2201, true), input: inputSnapshot(null) });
+  assert.equal(coordinator.getJudgements()[0]?.result, "miss", "idle/no-frame ticks retain the exact strict Miss deadline");
+  assert.equal(coordinator.getJudgements()[0]?.committedTimelinePositionMs, 2201);
+  deliver(coordinator, mode, 2300, 2300, [1, 1]);
+  assert.equal(coordinator.getJudgements().length, 1);
+  assert.equal(coordinator.getJudgements()[0].result, "miss", "a later endpoint cannot recover already-finalized truth");
+
+  const changedSource = playing(mode, {}, { resolvedEvents: [note(mode, 1200)] });
+  const first = evidence("source-before", 700, [3, 1], [3, 2], [3, 2]);
+  changedSource.advance({ timestampMs: 700, clock: clock(700, true), input: inputSnapshot(first), equipmentPoses: posesForEvidence(first, mode) });
+  const next = evidence("source-after", 1700, [0, 1], [3, 2], [3, 2]);
+  changedSource.advance({ timestampMs: 1700, clock: clock(1700, true), input: { ...inputSnapshot(next), sourceIdentity: "camera-b" }, equipmentPoses: posesForEvidence(next, mode) });
+  assert.equal(changedSource.getJudgements().length, 0, "a source switch cannot reconstruct across the old bracket");
+  const staleChangedSource = { ...inputSnapshot(first), sourceIdentity: "camera-b" };
+  assert.throws(() => changedSource.advance({ timestampMs: 1800, clock: clock(1800, true), input: staleChangedSource, equipmentPoses: posesForEvidence(first, mode) }), (error) => error.code === "equipment_poses_invalid", "the old publication cache is cleared with the source boundary");
+}
+
 console.log("Latency-tolerant collider scoring validation passed.");

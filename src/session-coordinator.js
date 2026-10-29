@@ -205,6 +205,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let seekExcludedThroughMs = -1;
   let equipmentConfigIdentityValue = /** @type {string | null} */ (null);
   let frameEquipmentPoses = /** @type {ReadonlyMap<string, AeroResolvedEquipmentPose>} */ (new Map());
+  /** An accepted publication may repeat on render ticks without becoming new evidence. */
+  let lastColliderPublication = /** @type {Readonly<{sourceIdentity:string,calibrationId:string,evidenceJson:string,poses:ReadonlyMap<string,AeroResolvedEquipmentPose>}> | null} */ (null);
+  let colliderIdleFrame = false;
   let snapshot = makeSnapshot(null);
 
   const service = Object.freeze({
@@ -439,7 +442,9 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const previousTimelinePositionMs = timelinePositionMs;
     const interactionTransition = validateVisualTestInteractionFrame(nextInteraction, nextInput, clock, enteredState);
     const nextEquipmentPoses = validateEquipmentPoseFrame(safeFrame.equipmentPoses, nextInput, clock, nextTimestampMs, enteredState, nextInteraction, nextLease);
+    const nextColliderIdleFrame = isIdleColliderPublication(nextInput, nextEquipmentPoses);
     timestampMs = nextTimestampMs;
+    colliderIdleFrame = nextColliderIdleFrame;
     frameEquipmentPoses = new Map();
     if (nextLease !== null) leaseSnapshot = nextLease;
     if (nextInput !== null && (sessionPurpose === "play" || nextInteraction !== null)) commitInput(nextInput);
@@ -839,6 +844,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const playSafetyPauseFrame = sessionPurpose === "play" && normalizedInput !== null && (normalizedInput.trackingPaused === true || normalizedInput.upstreamFreshRequired === true || normalizedInput.nextCalibrationId === null || (normalizedInput.readiness !== "ready" && normalizedInput.readiness !== "countdown"));
     const activelyEvaluating = enteredState === "playing" && clock.playing && clock.positionMs >= timelinePositionMs && (sessionPurpose === "play" || interaction !== null) && !playSafetyPauseFrame && hasRequiredLeaseSnapshot(nextLease ?? leaseSnapshot);
     if (value === undefined) {
+      if (isIdleColliderPublication(normalizedInput, new Map())) return new Map();
       if (activelyEvaluating) throw gameplayError("equipment_poses_invalid", "Active collider evaluation requires exact equipment poses");
       return new Map();
     }
@@ -852,7 +858,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       poses.set(pose.role, pose);
     }
     if (!poses.has("left_wrist") || !poses.has("right_wrist")) throw gameplayError("equipment_poses_invalid", "Equipment poses require both wrist roles");
-    if (!activelyEvaluating) return poses;
+    if (!activelyEvaluating || isIdleColliderPublication(normalizedInput, poses)) return poses;
     if (normalizedInput === null || normalizedInput.candidate === null) throw gameplayError("equipment_poses_invalid", "Active collider equipment poses require current measured evidence");
     const expectedMode = variant?.mode;
     const inputRecord = /** @type {DataRecord} */ (normalizedInput.input);
@@ -875,8 +881,39 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return poses;
   }
 
+  /**
+   * Exact accepted repeats and temporary no-frame publications are idle clock
+   * ticks, not stale observations to readmit or held geometry to score. Compare
+   * validated cloned data, never raw caller fields. Changed payloads cannot use
+   * this path; source/calibration and all lifecycle resets invalidate the cache.
+   * @param {DataRecord | null} normalizedInput
+   * @param {ReadonlyMap<string,AeroResolvedEquipmentPose>} poses
+   */
+  function isIdleColliderPublication(normalizedInput, poses) {
+    const prior = lastColliderPublication;
+    if (!prior || !normalizedInput || normalizedInput.trackingPaused === true || normalizedInput.upstreamFreshRequired === true || normalizedInput.nextCalibrationId !== prior.calibrationId || normalizedInput.nextCalibrationId !== calibrationId) return false;
+    const input = /** @type {DataRecord} */ (normalizedInput.input);
+    if (input.sourceIdentity !== prior.sourceIdentity) return false;
+    const candidate = /** @type {DataRecord | null} */ (normalizedInput.candidate);
+    if (candidate !== null && (candidate.provenance !== "measured" || JSON.stringify(candidate) !== prior.evidenceJson)) return false;
+    // An explicitly absent measurement needs no equipment observation. Held
+    // poses still need the accepted anchor/mode/config. Their valid rotation or
+    // scale may evolve on render ticks, but cannot add evidence or score here.
+    if (candidate === null && poses.size === 0) return true;
+    return poses.size === 2 && [...poses].every(([role, pose]) => {
+      const accepted = prior.poses.get(role);
+      const sample = role === "left_wrist" ? previousLeftWristSample : previousRightWristSample;
+      return accepted !== undefined && sample !== null && pose.mode === accepted.mode && pose.geometryIdentity === accepted.geometryIdentity && pose.configIdentity.value === accepted.configIdentity.value && Math.abs(pose.anchor.x - sample.sx) <= equipmentPoseAnchorEpsilonWu && Math.abs(pose.anchor.y - sample.sy) <= equipmentPoseAnchorEpsilonWu && Math.abs(pose.anchor.z) <= equipmentPoseAnchorEpsilonWu;
+    });
+  }
+
+  function rememberColliderPublication() {
+    lastColliderPublication = latestEvidence?.provenance === "measured" && lastInput ? Object.freeze({ sourceIdentity: String(lastInput.sourceIdentity), calibrationId: latestEvidence.calibrationId, evidenceJson: JSON.stringify(latestEvidence), poses: new Map(frameEquipmentPoses) }) : null;
+  }
+
   /** @param {ReadonlyMap<string, AeroResolvedEquipmentPose>} poses */
   function activateEquipmentPoses(poses) {
+    if (colliderIdleFrame) return;
     if (variant?.rulesetId !== FLOW_COLLIDER_RULESET && !isBoxingColliderRuleset(variant?.rulesetId)) { frameEquipmentPoses = new Map(); return; }
     if (poses.size !== 2) throw gameplayError("equipment_poses_invalid", "Collider evaluation requires exact equipment poses");
     frameEquipmentPoses = poses;
@@ -1372,6 +1409,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function evaluateFlowColliderNotesAndBombs() {
+    if (colliderIdleFrame) { finalizeColliderEvents(); return; }
     if (!variant || variant.rulesetId !== FLOW_COLLIDER_RULESET || !latestEvidence || !lastInput) { finalizeColliderEvents(); return; }
     const left = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "left_wrist", timelinePositionMs, timestampMs);
     const right = measuredColliderSample(/** @type {DataRecord} */ (latestEvidence), lastInput, "right_wrist", timelinePositionMs, timestampMs);
@@ -1413,6 +1451,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // history covering the deepest legal window plus margin.
     pushPoseHistoryForRole("left_wrist", left, 300 * 4 + sweptPoseHistoryMarginMs);
     pushPoseHistoryForRole("right_wrist", right, 300 * 4 + sweptPoseHistoryMarginMs);
+    rememberColliderPublication();
     /** @type {{event:DataRecord,contact:Readonly<{firstContactMs:number,hitDepthHalf:"front"|"back"}>,poseHistory:ReadonlyArray<Readonly<{t:number,pose:AeroResolvedEquipmentPose}>>,windowMs:number,volume:{scale:number,depthForward:number,depthBackward:number},afterWindowMs:number|null,hand:"left"|"right"}[]} */ const candidates = [];
     /** @type {string[]} */ const nearMisses = [];
     for (const event of events) {
@@ -1572,7 +1611,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
   }
 
-  function clearColliderSamples() { previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
+  function clearColliderSamples() { lastColliderPublication = null; colliderIdleFrame = false; previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
     pendingFlowNearIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
@@ -1596,6 +1635,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
    * the nose guard; straight 100ms hold semantics do not apply.
    */
   function evaluateBoxingColliderNotes() {
+    if (colliderIdleFrame) { finalizeBoxingColliderEvents(); return; }
     if (!variant || !isBoxingColliderRuleset(variant.rulesetId) || !latestEvidence || !lastInput) { finalizeBoxingColliderEvents(); return; }
     // Gesture mode evaluates pure normalized landmarks on every fresh
     // evidence frame; the collider-sample/recovery plumbing below is
@@ -1635,6 +1675,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     // window it sweeps).
     pushPoseHistoryForRole("left_wrist", left, 300 * 4 + sweptPoseHistoryMarginMs);
     pushPoseHistoryForRole("right_wrist", right, 300 * 4 + sweptPoseHistoryMarginMs);
+    rememberColliderPublication();
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,hand:"left"|"right",hitDepthHalf:"front"|"back"}[]} */ const candidates = [];
     /** @type {{event:DataRecord,evidence:ColliderSample,contactMs:number,leftContact:boolean,rightContact:boolean,hitDepthHalf:"front"|"back"}[]} */ const guardCandidates = [];
     for (const event of events) {
