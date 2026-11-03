@@ -3,7 +3,23 @@
 Status: approved-scope local fix under Derrick's active goal to diagnose and fix confirmed pre/post-spline differences. Do not deploy or replace public A/B snapshots during this source work.
 Owner: Pico; delegated coder implementation complete, pending parent integration review. Integration Bead: aerobeat-web-assembly-nrrv (assembly owns the ledger; gameplay has no Beads database).
 
-Current decision: keep the source-only fix local and unpushed for parent review. Next acceptance check: parent repins/builds the affected Assembly locally and runs a genuinely scored reversal plus negative controls and runtime-cost comparison. No deployment is authorized.
+Current decision: parent reviewed/pushed 011c860 and verified corrected signed Assembly behavior, but observed a contact-heavy CPU regression. Continue this same approved source slice with a small mitigation; do not push the new commit before parent review. Next acceptance check: exact anchor parity, focused scoring/call-order tests and `npm test`, then parent's signed rebuild and same stress comparison. No deployment is authorized.
+
+## Observed performance defect: diagnosis and mitigation
+
+Parent reports signed Assembly ed68ea6 (stamp 475b…) passes genuine calibrated raw-landmark Play reversal/negative controls, full Assembly tests and Flow/Boxing 1/2 FPS cache OFF/ON matrix; QA qhrv GO. Human-phone acceptance remains pending.
+
+- Exact observed failure: Assembly `.tmp/direction-stress-original.json` records maximum `advanceElapsedMs` 2.5; `.tmp/direction-stress-fixed.json` records 102.5. Both use twelve up notes 100 ms apart at placement 9 and fresh 50 ms down-then-held samples, all misses. Read-back confirms the supplied measurements.
+- Expected behavior: retain identical scoring while avoiding full equipment reconstruction for direction-only XY reads and already direction-disqualified samples.
+- Execution path: each pending Flow event rescans its existing lattice; each wrong-way geometric contact invokes direction sampling, which currently resolves two complete validated poses including quaternion interpolation just to read their anchors. Later samples still construct/project/collide complete equipment even after near fallback is permanently suppressed by first geometry.
+- Most likely cause: necessary additional contact search from 011c860 repeats these expensive operations. The observed workload triggers precisely the retained wrong-way path. This is source-supported diagnosis, not an isolated profiler attribution; parent owns the same signed workload recheck.
+- Alternatives: GC/JIT/scheduler noise can affect maximum time but does not justify repeated pose construction. Assembly projection overhead can also contribute; skipping projection only when direction is already false targets that path without changing its authority. No evidence of a scoring failure in the signed fixture.
+- Previous approach: 011c860 correctly repaired selection but did not mitigate repeated expensive work; no optimization attempt has yet failed in this lane.
+- Minimal reproduction: parent's existing `validate-flow-direction-reversal-browser.js` with `STRESS_NOTE_COUNT=12`, unchanged reverse-only fixture. No old-tree rerun is needed.
+- Verification: exact anchor-vs-full-pose equality across interiors, endpoints, clamps, slope bounds and reversals; unchanged reversal/negative controls; test skipped projection after rejected real contact and continued geometry requirement for any qualified hit; existing full suite. Runtime improvement remains unclaimed until parent's signed comparison.
+- Recommended fix: extract the same causal anchor/tangent arithmetic into one shared helper, use anchor-only resolution for local direction, and after the first real contact evaluate the pure time qualifier before later geometry. Keep the lattice and all scoring gates unchanged; no cache or public tuning.
+
+Debugging record: Problem: contact-heavy CPU regression. Symptom: max advance 2.5→102.5 ms in parent's signed fixture. Root cause: repeated full equipment work on direction-only/rejected samples. Evidence: supplied timings and call path. Failed approaches: none. Corrective action: shared anchor interpolation plus safe direction-first short circuit after real contact. Verification: exact parity/scoring/call-order tests and parent's same signed workload. Components: equipment reconstruction and direction sampling. Remaining uncertainty: signed-build cost after mitigation.
 
 ## Observed defect and next passing test
 
@@ -38,7 +54,7 @@ Fresh real runs share all 830 event IDs/times and matching Flow scale/depth/timi
 
 The separate assembly orientation-cache candidate 309b5a6 improves measured workload cost without changing scoring, but does not fix this contact-selection bug. It remains local and must not be confused with either live A/B artifact.
 
-## Source implementation results
+## Initial source implementation results (011c860; subsequently pushed by parent)
 
 - Completed: focused coordinator regression, minimal Flow-only selection fix, normal test wiring, README update, source validation. Parent's originally untracked plan is intentionally included with these coherent changes.
 - Red: `node scripts/validate-flow-direction-qualified-contact.js` exited 1 before the production edit: `earlier wrong-way contact must not mask later valid upward contact`, actual `miss`, expected `hit`. Reverse-only, no-contact and direction-opt-out assertions preceding it passed.
@@ -48,6 +64,17 @@ The separate assembly orientation-cache candidate 309b5a6 improves measured work
 - Geometry, timing gates, endpoints, lattice and direction predicate are unchanged. Only geometric contacts invoke the optional qualifier. Wrong-way contacts can now require scanning more existing samples and reconstructing two local direction anchors per contact. No cache/infrastructure was introduced; bounded but potentially higher work remains for parent's built-Assembly cost check.
 - Limits: source coordinator/public-boundary tests only. No browser/physical acceptance, public artifact update, deployment or service restart. No claim that all human misses or playability are fixed. Boxing still uses its existing first-geometry-then-direction path; no separate Boxing defect was reproduced in this lane.
 - Resume: parent reviews gameplay diff/commit, then owns Assembly repin/build/QA, push decision and Bead closure. Gameplay commit is intentionally not pushed.
+
+## Performance mitigation results (same nrrv slice)
+
+- Factored the existing causal anchor/tangent arithmetic into `interpolatePoseAnchor`. Full pose reconstruction uses the same operation order, orientation interpolation, validation and endpoint returns as before. `resolvePoseAnchorAt` shares that arithmetic but returns only the anchor; measured endpoint/clamp anchor identity is preserved.
+- Local direction sampling now uses the anchor-only resolver. This shared read path also serves existing Boxing direction samples without changing Boxing contact selection or its predicate.
+- Flow retains the original sample lattice. Before first real contact it performs geometry first, preserving initial noncontact/near behavior. Once real contact has suppressed near fallback, a failed pure time qualifier skips later full reconstruction/projection/collision. A passing qualifier still requires actual geometry. Existing geometry-only direct callers are unchanged. Qualifier call order is documented in source and README; no callback cache, hashes, public settings or arbitrary memoization were added.
+- Extended the already-normal `validate-spline-reprojection.js`: exact three-coordinate anchor-vs-full-pose equality over fractional interiors, slope clamps, reversals, stationary components, single/two-point histories, endpoints and out-of-range clamps; exact endpoint identity; projection-call trace proving no later projection after wrong-way rejection; later qualifying noncontact cannot hit; later endpoint contact can hit; genuine no-contact near result remains unchanged and does not call the hit qualifier.
+- Focused command `node scripts/validate-spline-reprojection.js && node scripts/validate-flow-direction-qualified-contact.js` exited 0. Reversal retains Great committed at 1050 ms with exact +35.41666666666674 ms offset; reverse-only/no-contact/direction opt-out/exactly-once controls pass. Initial scoring red/green was already established and was not repeated in an old tree.
+- `npm test` exited 0: four static checks, all 16 unit scripts, public integration. No source scoring/gate regressions observed. `git diff --check` is the final whitespace gate before commit.
+- Performance evidence is structural/source-only in this lane: skipped reconstruction is asserted, but no replacement signed Assembly was built here. Parent owns unchanged signed stress rerun and comparison against the recorded 102.5 ms maximum, plus reversal/negative controls before phone acceptance. This is a bounded CPU mitigation, not a claim of solved phone performance or human playability.
+- New coherent source/docs/test commit remains unpushed pending parent review. No Assembly files, fixtures, services, deployed/public artifacts or tuning changed.
 
 ## Documentation and gates
 

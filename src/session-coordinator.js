@@ -18,7 +18,7 @@ import { addInterval, clipNoseSegment, coversInterval, measuredNoseSample, point
 import { createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity, isContinuousColliderSegment, maximumColliderJudgementAgeMs, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs, matchesAuthoredDirection, measuredColliderSample, wristBombSphereContactsFlowTarget } from "./flow-collider-collision.js";
 import { boxingColliderSettingsIdentity, createBoxingColliderSettings, defaultBoxingColliderSettings, guardGestureFromEvidence, matchesBoxingAuthoredDirection, boxingColliderTargetCenter } from "./boxing-collider-collision.js";
 import { createKneeColliderSettings, defaultKneeColliderSettings, kneeColliderSettingsIdentity, kneePadContactsBoxingTarget, measuredKneeSample } from "./knee-collider-collision.js";
-import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory, resolvePoseAt } from "./equipment-pose-collision.js";
+import { colliderBackFaceTimestampMs, effectivePlayNoteAfterWindowMs, equipmentPoseAnchorEpsilonWu, resolvedGloveObbContactsBoxingTarget, resolvedSaberCapsuleContactsFlowTarget, sweptGloveObbContactsBoxingTarget, sweptSaberContactsFlowTarget, internalFlowFirstContactSliceT, sweptPoseHistoryMarginMs, pushPoseHistory, resolvePoseAnchorAt } from "./equipment-pose-collision.js";
 import {
   cloneGameplayData,
   compareCodePoints,
@@ -1596,8 +1596,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     const to = Math.min(history[history.length - 1].t, contactMs + maximumColliderSampleGapMs / 2);
     if (from >= to) return Object.freeze({ first: null, second: current });
     const sampleAt = (t, suffix) => {
-      const pose = resolvePoseAt(history, t);
-      return Object.freeze({ ...current, songTimeMs: t, measurementTimestampMs: current.measurementTimestampMs + (t - current.songTimeMs), sourceFrameId: `spline-direction-${suffix}`, sx: pose.anchor.x, sy: pose.anchor.y });
+      const anchor = resolvePoseAnchorAt(history, t);
+      return Object.freeze({ ...current, songTimeMs: t, measurementTimestampMs: current.measurementTimestampMs + (t - current.songTimeMs), sourceFrameId: `spline-direction-${suffix}`, sx: anchor.x, sy: anchor.y });
     };
     return Object.freeze({ first: sampleAt(from, "from"), second: sampleAt(to, "to") });
   }

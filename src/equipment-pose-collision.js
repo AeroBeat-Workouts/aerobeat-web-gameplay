@@ -322,7 +322,7 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} volume
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
- * @param {(contactMs:number) => boolean} [qualifiesHit] Optional direction qualification at geometric contacts; omitted preserves geometry-only selection. Rejected real contacts still suppress near fallback.
+ * @param {(contactMs:number) => boolean} [qualifiesHit] Optional pure time predicate for direction. Initially called only at real contacts; after the first rejected contact, called BEFORE geometry at later samples, including noncontacts. False then skips pose reconstruction/projection. Rejected real contacts still suppress near fallback. Omitted preserves geometry-only selection.
  */
 export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose, qualifiesHit) {
   if (history.length === 0) return null;
@@ -332,10 +332,14 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
   const windowEnd = afterWindowMs ?? center + timingWindowMs;
   let hadContact = false;
   for (const t of overlapSampleTimes(history, windowStart, windowEnd, center)) {
+    // Once real geometry suppresses near fallback, direction alone can reject
+    // later samples. A direction pass still requires the exact real geometry.
+    const qualified = hadContact && qualifiesHit ? qualifiesHit(t) : undefined;
+    if (qualified === false) continue;
     const pose = resolvePoseAt(history, t, reprojectEquipmentPose);
     if (!flowSweptContactAtPose(box, pose, volume, timingWindowMs)) continue;
     hadContact = true;
-    if (!qualifiesHit || qualifiesHit(t)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
+    if (qualified === true || !qualifiesHit || qualifiesHit(t)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
   }
   // Wrong-way real contact must not be reclassified as a spatial near.
   if (hadContact) return null;
@@ -488,29 +492,62 @@ export function resolvePoseAt(history, t, reprojectEquipmentPose) {
       if (t === to.t || to.t <= from.t) return to.pose;
       const duration = to.t - from.t;
       const p = (t - from.t) / duration;
-      const previous = history[index - 1];
-      const anchor = { x: 0, y: 0, z: 0 }; const tangent = { x: 0, y: 0, z: 0 };
-      for (const axis of /** @type {const} */ (["x", "y", "z"])) {
-        const delta = to.pose.anchor[axis] - from.pose.anchor[axis];
-        const secant = delta / duration;
-        const prior = previous && previous.t < from.t ? (from.pose.anchor[axis] - previous.pose.anchor[axis]) / (from.t - previous.t) : secant;
-        // Causal Hermite: the previous/current secants estimate the starting
-        // velocity; the ending velocity is the current secant. Per-axis slopes
-        // are sign-preserving and capped at 3x the current secant. Together
-        // with end slope 1x this keeps each coordinate between its endpoints.
-        // Equal endpoints stay fixed, even after movement. No future pose is
-        // used, and a two-point history is exactly linear.
-        const startSlope = secant === 0 ? 0 : Math.max(0, Math.min(3, (prior / secant + 1) / 2));
-        const m0 = delta * startSlope; const m1 = delta;
-        anchor[axis] = (2*p*p*p - 3*p*p + 1) * from.pose.anchor[axis] + (p*p*p - 2*p*p + p) * m0 + (-2*p*p*p + 3*p*p) * to.pose.anchor[axis] + (p*p*p - p*p) * m1;
-        tangent[axis] = ((6*p*p - 6*p) * from.pose.anchor[axis] + (3*p*p - 4*p + 1) * m0 + (-6*p*p + 6*p) * to.pose.anchor[axis] + (3*p*p - 2*p) * m1) / duration;
-      }
+      const { anchor, tangent } = interpolatePoseAnchor(from, to, history[index - 1], p, duration);
       const interpolated = lerpResolvedEquipmentPose(from.pose, to.pose, p);
       const reconstructed = createResolvedEquipmentPose({ ...interpolated, anchor });
       return reprojectEquipmentPose ? createResolvedEquipmentPose(reprojectEquipmentPose(reconstructed, Object.freeze({ timestampMs: t, tangent: Object.freeze(tangent) }))) : reconstructed;
     }
   }
   return history[history.length - 1].pose;
+}
+
+/**
+ * Resolve only the causal anchor, without quaternion interpolation, pose
+ * validation or equipment reprojection. Uses exactly the full pose's anchor
+ * arithmetic and measured endpoint/clamp identity. History must be nonempty.
+ * @param {ReadonlyArray<Readonly<{t:number, pose: ResolvedPose}>>} history
+ * @param {number} t
+ * @returns {Readonly<{x:number,y:number,z:number}>}
+ */
+export function resolvePoseAnchorAt(history, t) {
+  if (t <= history[0].t) return history[0].pose.anchor;
+  for (let index = 0; index < history.length - 1; index += 1) {
+    const from = history[index]; const to = history[index + 1];
+    if (t <= to.t) {
+      if (t === to.t || to.t <= from.t) return to.pose.anchor;
+      const duration = to.t - from.t;
+      const p = (t - from.t) / duration;
+      return Object.freeze(interpolatePoseAnchor(from, to, history[index - 1], p, duration).anchor);
+    }
+  }
+  return history[history.length - 1].pose.anchor;
+}
+
+/**
+ * Shared causal Hermite arithmetic; keep its operation order identical for
+ * equipment reconstruction and direction-only anchor reads.
+ * @param {Readonly<{t:number,pose:ResolvedPose}>} from
+ * @param {Readonly<{t:number,pose:ResolvedPose}>} to
+ * @param {Readonly<{t:number,pose:ResolvedPose}> | undefined} previous
+ * @param {number} p
+ * @param {number} duration
+ */
+function interpolatePoseAnchor(from, to, previous, p, duration) {
+  const anchor = { x: 0, y: 0, z: 0 }; const tangent = { x: 0, y: 0, z: 0 };
+  for (const axis of /** @type {const} */ (["x", "y", "z"])) {
+    const delta = to.pose.anchor[axis] - from.pose.anchor[axis];
+    const secant = delta / duration;
+    const prior = previous && previous.t < from.t ? (from.pose.anchor[axis] - previous.pose.anchor[axis]) / (from.t - previous.t) : secant;
+    // Previous/current secants estimate the starting velocity; the ending
+    // velocity is the current secant. Sign-preserving slopes capped at 3x,
+    // with end slope 1x, keep coordinates between measured endpoints.
+    // Equal endpoints stay fixed; two-point histories are exactly linear.
+    const startSlope = secant === 0 ? 0 : Math.max(0, Math.min(3, (prior / secant + 1) / 2));
+    const m0 = delta * startSlope; const m1 = delta;
+    anchor[axis] = (2*p*p*p - 3*p*p + 1) * from.pose.anchor[axis] + (p*p*p - 2*p*p + p) * m0 + (-2*p*p*p + 3*p*p) * to.pose.anchor[axis] + (p*p*p - p*p) * m1;
+    tangent[axis] = ((6*p*p - 6*p) * from.pose.anchor[axis] + (3*p*p - 4*p + 1) * m0 + (-6*p*p + 6*p) * to.pose.anchor[axis] + (3*p*p - 2*p) * m1) / duration;
+  }
+  return { anchor, tangent };
 }
 
 /**
