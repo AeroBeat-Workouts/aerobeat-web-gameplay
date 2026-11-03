@@ -1465,7 +1465,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       // Time-based (swept) hit test: the resolved rotating saber reach
       // is the sole Flow hit volume, swept across the independent note
       // timing window using the bounded per-role pose history. The earliest
-      // XY crossing registers the hit and carries which half it fell in
+      // XY crossing that also satisfies authored direction registers the hit
+      // and carries which half it fell in
       // (front = early, back = late). Projection into judge XY naturally
       // preserves local-axis roll and shortens under out-of-plane tilt; no
       // renderer/GLB bounds or fixed fallback apply.
@@ -1473,19 +1474,21 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const windowMs = Number(eventSettings.timingWindowMs);
       const poseHistory = hand === "right" ? evaluationRightPoseHistory : evaluationLeftPoseHistory;
       const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
-      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
+      const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
+      const qualifiesDirection = (contactMs) => {
+        const samples = directionSamplesAtContact(poseHistory, contactMs, current);
+        return matchesAuthoredDirection(direction, samples.first, samples.second, Number(eventSettings.directionToleranceDegrees));
+      };
+      const requiresDirection = eventSettings.enforceAuthoredDirection === true && event.direction !== undefined;
+      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose, requiresDirection ? qualifiesDirection : undefined);
       if (swept === null) continue;
-      const directionSamples = directionSamplesAtContact(poseHistory, "nearMiss" in swept ? swept.firstNearMs : swept.firstContactMs, current);
       // A qualified near is only a private candidate: real capsule contact
       // anywhere in the eligible window still takes precedence.
       if ("nearMiss" in swept) {
-        const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
-        if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, directionSamples.first, directionSamples.second, Number(eventSettings.directionToleranceDegrees))) continue;
+        if (requiresDirection && !qualifiesDirection(swept.firstNearMs)) continue;
         nearMisses.push(String(event.eventId));
         continue;
       }
-      const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
-      if (eventSettings.enforceAuthoredDirection === true && event.direction !== undefined && !matchesAuthoredDirection(direction, directionSamples.first, directionSamples.second, Number(eventSettings.directionToleranceDegrees))) continue;
       candidates.push({ event, contact: swept, poseHistory, windowMs, volume, afterWindowMs, hand });
     }
     /** @type {typeof candidates} */ const accepted = [];

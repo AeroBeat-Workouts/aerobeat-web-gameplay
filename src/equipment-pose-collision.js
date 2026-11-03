@@ -312,7 +312,7 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * window AND reconstructs bounded spline anchors with optional equipment
  * reprojection between consecutive stored poses, so sparse histories catch a
  * crossing that the old single-snapshot test tunnels through. Returns the
- * EARLIEST contact time and its diagnostic temporal half — `front` for
+ * EARLIEST qualifying contact time and its diagnostic temporal half — `front` for
  * `t < center`, `back` for `t >= center` — or `null` when never contacted.
  * Flow scores either real contact as Great; Boxing grading is independent.
  *
@@ -322,17 +322,23 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * @param {{scale?:number,depthForward?:number,depthBackward?:number,depthBackwardAthleteFacing?:boolean}} volume
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
+ * @param {(contactMs:number) => boolean} [qualifiesHit] Optional direction qualification at geometric contacts; omitted preserves geometry-only selection. Rejected real contacts still suppress near fallback.
  */
-export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose) {
+export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose, qualifiesHit) {
   if (history.length === 0) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
   const windowStart = center - timingWindowMs;
   const windowEnd = afterWindowMs ?? center + timingWindowMs;
+  let hadContact = false;
   for (const t of overlapSampleTimes(history, windowStart, windowEnd, center)) {
     const pose = resolvePoseAt(history, t, reprojectEquipmentPose);
-    if (flowSweptContactAtPose(box, pose, volume, timingWindowMs)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
+    if (!flowSweptContactAtPose(box, pose, volume, timingWindowMs)) continue;
+    hadContact = true;
+    if (!qualifiesHit || qualifiesHit(t)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
   }
+  // Wrong-way real contact must not be reclassified as a spatial near.
+  if (hadContact) return null;
   // No contact: check for a near-miss. The saber must have been within a
   // tight margin of the cell box at some time inside the 1/4-beat sub-window
   // around the beat center. This captures "close but not quite" — the hand
