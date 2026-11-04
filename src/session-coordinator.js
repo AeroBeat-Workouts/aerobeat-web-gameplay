@@ -100,6 +100,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   let generation = 0;
   let state = /** @type {AeroGameplaySessionState} */ ("idle");
   let sessionPurpose = /** @type {AeroGameplaySessionPurpose} */ ("play");
+  // Configuration-only temporal rules for recorded Play, never input authority.
+  let recordedPlayReplay = false;
   let timestampMs = 0;
   let timelinePositionMs = 0;
   let packageId = null;
@@ -237,10 +239,16 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   });
   return service;
 
-  /** @param {GameplayContentConfiguration} configuration @param {unknown} [options] */
+  /**
+   * Exact purpose options optionally add recordedPlayReplay:true for visual_test
+   * temporal rules only. This is not input authority and cannot start as Play.
+   * @param {GameplayContentConfiguration} configuration
+   * @param {unknown} [options]
+   */
   function configureContent(configuration, options) {
     assertOpen();
-    const nextPurpose = normalizeContentConfigurationPurpose(options);
+    const nextOptions = normalizeContentConfigurationOptions(options);
+    const nextPurpose = nextOptions.purpose;
     const preserveVisualTest = nextPurpose === "visual_test" && sessionPurpose === "visual_test" && (state === "playing" || state === "paused_manual");
     const preservedVisualTestState = state;
     const preservedVisualTestPauseReason = pauseReason;
@@ -273,6 +281,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     shadowVariants = nextShadowVariants;
     clearRunTruth();
     sessionPurpose = nextPurpose;
+    recordedPlayReplay = nextOptions.recordedPlayReplay;
     if (nextPurpose === "visual_test") {
       state = preserveVisualTest ? preservedVisualTestState : "idle";
       pauseReason = preserveVisualTest ? preservedVisualTestPauseReason : null;
@@ -342,6 +351,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     assertConfigured();
     const explicit = request !== undefined;
     const nextPurpose = normalizeStartPurpose(request);
+    if (recordedPlayReplay && nextPurpose !== "visual_test") throw gameplayError("recorded_play_replay_start_invalid", "Recorded Play replay requires visual_test; reconfigure or reset before starting Play");
     if (!explicit && state !== "calibrating") throw gameplayError("session_state_invalid", "Initial start requires the calibrating state");
     advanceTimestamp(atTimestampMs);
     if (explicit) {
@@ -747,6 +757,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     generation += 1;
     clearRunTruth();
     sessionPurpose = "play";
+    recordedPlayReplay = false;
     state = packageId === null ? "idle" : "calibrating";
     pauseReason = packageId === null ? null : "calibration_required";
     calibrationId = null;
@@ -810,7 +821,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function activateVisualTestInteraction(interaction, transition) {
     if (!transition) return;
     clearContinuousCollisionHistory(true);
-    for (const event of events) if (Number(event.centerTimestampMs) <= interaction.activationTimelineMs) visualTestExcludedEventIds.add(String(event.eventId));
+    if (!recordedPlayReplay) for (const event of events) if (Number(event.centerTimestampMs) <= interaction.activationTimelineMs) visualTestExcludedEventIds.add(String(event.eventId));
     visualTestInteraction = interaction;
     lastVisualTestInteractionEpoch = interaction.epoch;
   }
@@ -823,7 +834,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
 
   function productionJudgementEnabled() { return sessionPurpose === "play" || (sessionPurpose === "visual_test" && visualTestInteraction !== null); }
   /** @param {DataRecord} event */
-  function productionEventEligible(event) { return !visualTestExcludedEventIds.has(String(event.eventId)) && (sessionPurpose === "play" || (visualTestInteraction !== null && Number(event.centerTimestampMs) > visualTestInteraction.activationTimelineMs)); }
+  function productionEventEligible(event) { return !visualTestExcludedEventIds.has(String(event.eventId)) && (sessionPurpose === "play" || (visualTestInteraction !== null && (recordedPlayReplay || Number(event.centerTimestampMs) > visualTestInteraction.activationTimelineMs))); }
 
   /**
    * @param {unknown} value
@@ -1473,7 +1484,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       const volume = colliderVolumeSettings(eventSettings);
       const windowMs = Number(eventSettings.timingWindowMs);
       const poseHistory = hand === "right" ? evaluationRightPoseHistory : evaluationLeftPoseHistory;
-      const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
+      const afterWindowMs = (sessionPurpose === "play" || recordedPlayReplay) ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
       const direction = event.direction === undefined ? undefined : flowDirectionName(event.direction) ?? undefined;
       const qualifiesDirection = (contactMs) => {
         const samples = directionSamplesAtContact(poseHistory, contactMs, current);
@@ -1740,7 +1751,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         const windowMs = Number(boxingColliderSettings.timingWindowMs);
         const volume = colliderVolumeSettings(boxingColliderSettings);
         const poseHistory = hand === "right" ? evaluationRightPoseHistory : evaluationLeftPoseHistory;
-        const afterWindowMs = sessionPurpose === "play" ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
+        const afterWindowMs = (sessionPurpose === "play" || recordedPlayReplay) ? effectivePlayNoteAfterWindowMs(Number(event.centerTimestampMs), windowMs) : null;
         const swept = sweptGloveObbContactsBoxingTarget(target, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose);
 
         if (swept === null) continue;
@@ -2095,12 +2106,14 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   function boxingColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).boxingColliderSettings ?? defaultBoxingColliderSettings); }
   /** @param {DataRecord} event */
   function kneeColliderSettingsForEvent(event) { return /** @type {DataRecord} */ (truthForEvent(event).kneeColliderSettings ?? defaultKneeColliderSettings); }
-  /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
-  function normalizeContentConfigurationPurpose(value) {
-    if (value === undefined) return "play";
-    const source = requireDataRecordFields(value, "content_configuration_options_invalid", ["purpose"]);
+  /** @param {unknown} value @returns {{purpose:AeroGameplaySessionPurpose,recordedPlayReplay:boolean}} */
+  function normalizeContentConfigurationOptions(value) {
+    if (value === undefined) return { purpose: "play", recordedPlayReplay: false };
+    const source = requireDataRecordFields(value, "content_configuration_options_invalid", ["purpose", "recordedPlayReplay"]);
     if (source.purpose !== "play" && source.purpose !== "visual_test") throw gameplayError("content_configuration_purpose_invalid", "Content configuration purpose is invalid");
-    return source.purpose;
+    const replay = Object.hasOwn(source, "recordedPlayReplay");
+    if (replay && (source.recordedPlayReplay !== true || source.purpose !== "visual_test")) throw gameplayError("content_configuration_options_invalid", "Recorded Play replay requires exact visual_test purpose and recordedPlayReplay: true");
+    return { purpose: source.purpose, recordedPlayReplay: replay };
   }
   /** @param {unknown} value @returns {AeroGameplaySessionPurpose} */
   function normalizeStartPurpose(value) {
