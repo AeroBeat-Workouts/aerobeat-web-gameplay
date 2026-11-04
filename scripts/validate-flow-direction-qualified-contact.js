@@ -27,6 +27,15 @@ assert.equal(directionAt(first.firstContactMs), false);
 assert.equal(resolvedSaberCapsuleContactsFlowTarget(event, resolvePoseAt(history, 1050), 1050, 180, volume), true);
 assert.equal(directionAt(1050), true, "later contact satisfies unchanged direction gate");
 
+const rejectedContacts = [];
+assert.equal(sweptSaberContactsFlowTarget(event, history, 180, volume, 2000, undefined, () => false, t => rejectedContacts.push(t)), null);
+assert.equal(rejectedContacts.length, 1, "qualifier-only skips must not fabricate further rejected contacts");
+assert.equal(resolvedSaberCapsuleContactsFlowTarget(event, resolvePoseAt(history, rejectedContacts[0]), rejectedContacts[0], 180, volume), true);
+const distantHistory = history.map(entry => ({ t: entry.t, pose: pose("left_wrist", 3.5, entry.pose.anchor.y) }));
+let distantRejections = 0;
+sweptSaberContactsFlowTarget(event, distantHistory, 180, volume, 2000, undefined, () => false, () => distantRejections++);
+assert.equal(distantRejections, 0, "no geometry means no direction-rejection evidence");
+
 function run(path, x = 1, enforceAuthoredDirection = true) {
   const coordinator = createAeroGameplaySessionCoordinator({ sessionId: "direction-regression", countdownStepMs: 1 });
   coordinator.configureContent({ packageId: "fixture", selectedVariant: variant, resolvedEvents: [event], profileIdentity: { schema: "aerobeat/prototype_tuning_identity", version: 1, profileId: "profile", profileVersion: "1", contentHash: hash, class: "between_run_ruleset", regenerationRequired: false }, flowColliderSettings: { ...defaultFlowColliderSettings, colliderScale: 1, colliderDepthForward: 1, colliderDepthBackward: 0, timingWindowMs: 180, enforceAuthoredDirection } });
@@ -42,8 +51,11 @@ function run(path, x = 1, enforceAuthoredDirection = true) {
   return judgements[0];
 }
 const reverseOnly = reversal.map(([t, y]) => [t, t > 1000 ? -.25 : y]);
-assert.equal(run(reverseOnly).tier, "miss", "wrong-way geometry must not become a hit or near");
-assert.equal(run(reversal, 3).tier, "miss", "valid up motion without contact cannot hit");
+const wrongWay = run(reverseOnly), noContact = run(reversal, 3);
+assert.equal(wrongWay.tier, "miss", "wrong-way geometry must not become a hit or near");
+assert.deepEqual(wrongWay.diagnostics, ["wrong_direction"], "actual rejected contact proves direction rejection");
+assert.equal(noContact.tier, "miss", "valid up motion without contact cannot hit");
+assert.deepEqual(noContact.diagnostics, ["wrong_collider"], "authored direction alone cannot explain a no-contact miss");
 assert.equal(run(reverseOnly, 1, false).result, "hit", "explicit overlap-only callers remain compatible");
 const hit = run(reversal);
 assert.equal(hit.result, "hit", "earlier wrong-way contact must not mask later valid upward contact");

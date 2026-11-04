@@ -323,8 +323,9 @@ function flowSweptContactAtPose(box, pose, volume, timingWindowMs) {
  * @param {number | null} [afterWindowMs] Play note deadline; null uses the base window.
  * @param {ReprojectEquipmentPose} [reprojectEquipmentPose]
  * @param {(contactMs:number) => boolean} [qualifiesHit] Optional pure time predicate for direction. Initially called only at real contacts; after the first rejected contact, called BEFORE geometry at later samples, including noncontacts. False then skips pose reconstruction/projection. Rejected real contacts still suppress near fallback. Omitted preserves geometry-only selection.
+ * @param {(contactMs:number) => void} [onRejectedContact] Observation only: called for a real geometric contact rejected by qualifiesHit, never for qualifier-only prechecks.
  */
-export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose, qualifiesHit) {
+export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, volume = {}, afterWindowMs = null, reprojectEquipmentPose, qualifiesHit, onRejectedContact) {
   if (history.length === 0) return null;
   const box = flowNoteCellBox(event);
   const center = Number(event.centerTimestampMs);
@@ -340,6 +341,7 @@ export function sweptSaberContactsFlowTarget(event, history, timingWindowMs, vol
     if (!flowSweptContactAtPose(box, pose, volume, timingWindowMs)) continue;
     hadContact = true;
     if (qualified === true || !qualifiesHit || qualifiesHit(t)) return Object.freeze({ firstContactMs: t, hitDepthHalf: /** @type {HitDepthHalf} */ (t < center ? "front" : "back") });
+    onRejectedContact?.(t);
   }
   // Wrong-way real contact must not be reclassified as a spatial near.
   if (hadContact) return null;

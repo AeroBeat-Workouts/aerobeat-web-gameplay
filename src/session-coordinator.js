@@ -141,6 +141,8 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   const judgedIds = new Set();
   /** Qualified noncontact Flow notes remain private until their existing Miss boundary. */
   const pendingFlowNearIds = new Set();
+  // Diagnostic evidence only; never changes contact selection or score.
+  const rejectedFlowDirectionIds = new Set();
   /** 0.0.61 (kpxg): flow_colliders_v1 wall ids finalized into `hazardOutcomes`
    * (kind "wall") EXACTLY ONCE. The flow wall exclusion filter checks this Set
    * (O(1)) instead of scanning `obstacleOutcomes` — the array flow walls never
@@ -700,7 +702,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     for (const eventId of flowSliceByEventId.keys()) if (!retainedJudgedIds.has(eventId)) flowSliceByEventId.delete(eventId);
     // A paused swap changes the remaining chart; its private near evidence is
     // never carried into another content generation, even for a retained ID.
-    pendingFlowNearIds.clear();
+    pendingFlowNearIds.clear(); rejectedFlowDirectionIds.clear();
     variant = nextVariant;
     contentGeneration = nextContentGeneration;
     eventTruth = nextEventTruth;
@@ -785,7 +787,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     cancelCountdown();
     latestEvidence = null;
     lastInput = null;
-    pendingFlowNearIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
+    pendingFlowNearIds.clear(); rejectedFlowDirectionIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; bombStates.clear();
     visualTestInteraction = null;
     frameEquipmentPoses = new Map();
     flowSliceByEventId.clear();
@@ -1491,7 +1493,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
         return matchesAuthoredDirection(direction, samples.first, samples.second, Number(eventSettings.directionToleranceDegrees));
       };
       const requiresDirection = eventSettings.enforceAuthoredDirection === true && event.direction !== undefined;
-      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose, requiresDirection ? qualifiesDirection : undefined);
+      const swept = sweptSaberContactsFlowTarget(event, poseHistory, windowMs, volume, afterWindowMs, reprojectEquipmentPose, requiresDirection ? qualifiesDirection : undefined, () => rejectedFlowDirectionIds.add(String(event.eventId)));
       if (swept === null) continue;
       // A qualified near is only a private candidate: real capsule contact
       // anywhere in the eligible window still takes precedence.
@@ -1664,13 +1666,13 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
     if (latestEvidence.calibrationId !== calibrationId) return Object.freeze(["calibration_mismatch"]);
     const age = timestampMs - latestEvidence.measurementTimestampMs;
     if (age < 0 || age > maximumColliderJudgementAgeMs) return Object.freeze(["stale_input"]);
-    return Object.freeze([flowColliderSettingsForEvent(event).enforceAuthoredDirection === true && event.direction !== undefined ? "wrong_direction" : "wrong_collider"]);
+    return Object.freeze([rejectedFlowDirectionIds.has(String(event.eventId)) ? "wrong_direction" : "wrong_collider"]);
   }
 
   function clearColliderSamples() { lastColliderPublication = null; colliderIdleFrame = false; previousLeftWristSample = null; previousRightWristSample = null; lastColliderFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); exposedLeftWristHistory = null; exposedRightWristHistory = null; }
   /** @param {boolean} [requireRecoveryBaselines] */
   function clearContinuousCollisionHistory(requireRecoveryBaselines = true) {
-    pendingFlowNearIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
+    pendingFlowNearIds.clear(); rejectedFlowDirectionIds.clear(); clearColliderSamples(); lastKneeFrame = null; previousNoseSample = null; lastObstacleSourceIdentity = null; occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null;
     if (requireRecoveryBaselines && (variant?.rulesetId === FLOW_COLLIDER_RULESET || isBoxingColliderRuleset(variant?.rulesetId))) { leftWristBaselineRequired = true; rightWristBaselineRequired = true; noseBaselineRequired = true; }
   }
   /** @param {ColliderSample | null} left @param {ColliderSample | null} right */
@@ -1987,6 +1989,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
       judgements.push(judgement);
       judgedIds.add(String(event.eventId));
       pendingFlowNearIds.delete(String(event.eventId));
+      rejectedFlowDirectionIds.delete(String(event.eventId));
       if (hitDepthHalf !== null) hitDepthHalfByEventId.set(String(event.eventId), hitDepthHalf);
       if (isBoxingColliderRuleset(eventVariant.rulesetId)) updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event));
       else updateScore(tier, eventVariant, eventProfile, scoringSettingsForEvent(event), flowColliderSettingsForEvent(event));
@@ -2084,7 +2087,7 @@ export function createAeroGameplaySessionCoordinator(options = {}) {
   }
 
   function clearRunTruth() {
-    judgedIds.clear(); pendingFlowNearIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); flowSliceByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); lastKneeFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
+    judgedIds.clear(); pendingFlowNearIds.clear(); rejectedFlowDirectionIds.clear(); activeIds.clear(); judgements.length = 0; shadowJudgements.length = 0; shadowConsumed.clear(); consumedActions.clear(); consumedGuardPunchWindows.clear(); hitDepthHalfByEventId.clear(); flowSliceByEventId.clear(); partitions.clear(); obstacleStates.clear(); obstacleOutcomes.length = 0; finalizedObstacleIds.clear(); occupiedObstacleIds.clear(); hazardContactSinceMs = null; hazardContactReleasedAtMs = null; previousNoseSample = null; lastObstacleSourceIdentity = null; obstacleEpisodeOrdinal = 0; bombStates.clear(); hazardOutcomes.length = 0; hazardOutcomesDirty = false; clearColliderSamples(); lastKneeFrame = null; leftWristHistory = Object.freeze([]); rightWristHistory = Object.freeze([]); leftPoseHistory = Object.freeze([]); rightPoseHistory = Object.freeze([]); leftWristBaselineRequired = false; rightWristBaselineRequired = false; noseBaselineRequired = false; pendingHazardBreak = false; pendingBombContacts = 0; pendingObstacleContacts = 0; visualTestInteraction = null; lastVisualTestInteractionEpoch = null; visualTestExcludedEventIds.clear(); seekExcludedThroughMs = -1; equipmentConfigIdentityValue = null; frameEquipmentPoses = new Map(); timelinePositionMs = 0; countdownTimelinePositionMs = 0; latestEvidence = null; lastEvidenceFrameId = null; lastEvidenceFrameFrozenTickId = null; lastInput = null; countdown = inactiveCountdown(timestampMs);
   }
 
   /** @param {DataRecord} event */

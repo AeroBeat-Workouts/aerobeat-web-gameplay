@@ -8,6 +8,14 @@ Deterministic browser gameplay-session and rules runtime for AeroBeat Web.
 
 It does **not** own camera/CV, calibration math, audio playback, content loading/conversion, renderer/UI state, iframe transport, or process-wide media arbitration. It never accepts raw frames, media tracks, ZIP/audio bytes, pixels, provider objects, or leaderboard writes.
 
+## Flow miss diagnostics
+
+`wrong_direction` now means the existing sweep actually found geometry that
+failed the authored-direction predicate. A fresh directional note with no
+observed contact reports the existing `wrong_collider` code instead. Input,
+calibration and freshness reasons retain precedence. This observation does not
+change hit selection, scoring, timing, collision sizes or direction rules.
+
 ## Public API
 
 ```js
