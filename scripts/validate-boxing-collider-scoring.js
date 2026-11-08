@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { isGameplayJudgement } from "@aerobeat/web-contracts";
 import {
   createAeroGameplaySessionCoordinator,
+  createFlowColliderSettings, defaultFlowColliderSettings, flowColliderSettingsIdentity,
   defaultBoxingColliderSettings,
   boxingColliderSettingsIdentity,
   createBoxingColliderSettings,
@@ -196,6 +197,31 @@ for (const facing of [false, true]) {
   assert.throws(() => createBoxingColliderSettings(hostile), /accessors or hidden fields/u);
   assert.equal(calls, 0);
 }
+
+// Optional bomb scale keeps every previously admitted shape and default identity.
+for(const [create,identity,defaults] of [[createFlowColliderSettings,flowColliderSettingsIdentity,defaultFlowColliderSettings],[createBoxingColliderSettings,boxingColliderSettingsIdentity,defaultBoxingColliderSettings]]) {
+  const visible={...defaults}; delete visible.colliderDepthBackwardAthleteFacing;
+  const preVisibility={...visible}; delete preVisibility.colliderVisible;
+  const legacy={...preVisibility}; for(const key of ["colliderScale","colliderDepthForward","colliderDepthBackward"]) delete legacy[key];
+  for(const old of [defaults,visible,preVisibility,legacy,{...visible,wristBombColliderScale:2}]) {
+    assert.deepEqual(create({...old,bombScale:1}),{...create(old),bombScale:1});
+    assert.equal(identity({...old,bombScale:1}),identity(old),"default bomb size preserves historical identity");
+    for(const bombScale of [.1,2]) {
+      assert.equal(create({...old,bombScale}).bombScale,bombScale);
+      assert.notEqual(identity({...old,bombScale}),identity(old));
+    }
+  }
+  assert.notEqual(identity({...defaults,bombScale:2}),identity({...defaults,wristBombColliderScale:2}),"different independent scales must never alias partitions");
+  for(const bombScale of [0,.0999,2.0001,Infinity,NaN,null,undefined,"1"]) assert.throws(()=>create({...defaults,bombScale}),/bomb scale/u);
+  for(const enumerable of [true,false]) {
+    const hostile={...defaults}; let calls=0;
+    Object.defineProperty(hostile,"bombScale",{enumerable,get(){calls++;return 1;}});
+    assert.throws(()=>create(hostile),/accessors or hidden fields/u); assert.equal(calls,0);
+  }
+  assert.throws(()=>create({...defaults,bombScale:1,extra:1}),/every exact field/u);
+}
+for(const bombScale of [.1,1,2]) assert.doesNotThrow(()=>ready([],settings({bombScale})),"Boxing coordinator accepts strict bomb scale settings");
+assert.throws(()=>ready([{schema:"aerobeat/resolved_content_event",version:3,eventId:"unsupported-bomb",variantId:"boxing-collider",chartId:"chart-boxing-collider",centerTimestampMs:1000,sourceEventIds:["unsupported-bomb"],type:"bomb",placement:5}]),/Boxing event type is unsupported/u,"Boxing has no native bomb dispatch; preserve admission");
 
 // --- Reach mapping: judge truth equals contracts row Y, including 1/1 legacy parity -------
 {

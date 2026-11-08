@@ -1,7 +1,7 @@
 // @ts-check
 import assert from "node:assert/strict";
 import { createAeroGameplaySessionCoordinator, createFlowColliderSettings, defaultFlowColliderSettings as publicDefaultFlowColliderSettings, flowColliderSettingsBounds, flowColliderSettingsIdentity, maximumColliderSampleFreshnessMs, maximumColliderSampleGapMs } from "../src/index.js";
-import { authoredDirectionCone, defaultFlowColliderSettings, flowNoteCellBox, gloveBoxContactsBoxingTarget, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, MINIMUM_SABER_DIRECTION_TRAVEL, saberCapsuleContactsFlowTarget, saberDirectionFromWristHistory, targetCenterForPlacement } from "../src/flow-collider-collision.js";
+import { authoredDirectionCone, defaultFlowColliderSettings, flowNoteCellBox, gloveBoxContactsBoxingTarget, isContinuousColliderSegment, matchesAuthoredDirection, measuredColliderSample, MINIMUM_SABER_DIRECTION_TRAVEL, saberCapsuleContactsFlowTarget, saberDirectionFromWristHistory, targetCenterForPlacement, wristBombSphereContactsFlowTarget } from "../src/flow-collider-collision.js";
 import { gloveGeometry, saberGeometry } from "@aerobeat/web-contracts/equipment-contracts";
 
 const HASH="a".repeat(64);
@@ -257,7 +257,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.deepEqual(equipmentOnly.getHazardOutcomes().map(o=>o.result),["contact"],"wrist sphere contacts the bomb");
   for(const scale of [0,1,2]){
     const run=ready([beat(`scaled-${scale}`,1000,"bomb",{placement:5})],settings({wristBombColliderScale:scale}));
-    send(run,1000,1000,[1,1.7],[3,2],[3,2]);
+    send(run,1000,1000,[1,1.4],[3,2],[3,2]);
     assert.equal(run.getHazardOutcomes().length,scale===2?1:0,`scale ${scale} controls wrist sphere reach`);
     send(run,1050,1050,[1,1],[3,2],[3,2]);
     assert.equal(run.getHazardOutcomes().length,scale===0?0:1,"zero disables even centered wrist contact");
@@ -278,6 +278,35 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
   assert.notEqual(flowColliderSettingsIdentity(settings({wristBombColliderScale:2})),base);
   assert.throws(()=>createFlowColliderSettings(settings({wristBombColliderScale:-.001})),/wrist bomb collider scale/u);
   assert.throws(()=>createFlowColliderSettings(settings({wristBombColliderScale:2.001})),/wrist bomb collider scale/u);
+}
+
+// Bomb core geometry and the actual measured coordinator boundary agree.
+{
+  const event={centerTimestampMs:1000,placement:5};
+  for(const bombScale of [.1,1,2]) for(const wristBombColliderScale of [0,1,2]) {
+    const supplied=settings({bombScale,wristBombColliderScale});
+    const radius=.22*bombScale+.12*wristBombColliderScale;
+    const cases=[[[1,1],wristBombColliderScale!==0,"center"],[[1+radius,1],wristBombColliderScale!==0,"tangent"],[[1+radius+1e-6,1],false,"outside"]];
+    for(const [point,expected,label] of cases){
+      const sample={songTimeMs:1000,sx:point[0],sy:point[1]};
+      assert.equal(wristBombSphereContactsFlowTarget(event,sample,supplied),expected,`pure ${label}: bomb ${bombScale}, wrist ${wristBombColliderScale}`);
+      const run=ready([beat("core",1000,"bomb",{placement:5})],supplied);
+      send(run,1000,1000,point,[3,2],[3,2]);
+      assert.equal(run.getHazardOutcomes().some(o=>o.result==="contact"),expected,`coordinator ${label}: bomb ${bombScale}, wrist ${wristBombColliderScale}`);
+      send(run,1050,1050,point,[3,2],[3,2]);
+      assert.equal(run.getHazardOutcomes().length,expected?1:0,"exactly once");
+    }
+  }
+  for(const point of [[1.49,1.49],[1.39,1]]){
+    assert.equal(wristBombSphereContactsFlowTarget(event,{songTimeMs:1000,sx:point[0],sy:point[1]},settings()),false,"old cell corner / spike-only is not core contact");
+    const run=ready([beat("no-core",1000,"bomb",{placement:5})],settings({colliderRadius:.5,colliderScale:999,colliderDepthForward:999,colliderDepthBackward:999}));
+    const sample=evidence("oriented",1000,point,[3,2],[3,2]);
+    const poses=equipmentPosesForEvidence(sample).map(p=>({...p,scale:10,orientation:{x:0,y:0,z:Math.SQRT1_2,w:Math.SQRT1_2}}));
+    run.advance({timestampMs:1000,clock:clock(1000,true),input:input(1000,sample),equipmentPoses:poses});
+    assert.equal(run.getHazardOutcomes().length,0,"large rotated note equipment cannot turn corner/spike overlap into core contact");
+  }
+  for(const time of [820,1180]) assert.equal(wristBombSphereContactsFlowTarget(event,{songTimeMs:time,sx:1,sy:1},settings()),true);
+  for(const time of [819.999,1180.001]) assert.equal(wristBombSphereContactsFlowTarget(event,{songTimeMs:time,sx:1,sy:1},settings({colliderDepthForward:999,colliderDepthBackward:999})),false);
 }
 
 // Simultaneous note plus overlapping nose-owned walls scores first and applies one deduplicated hazard break; wrists never own walls.
@@ -361,7 +390,7 @@ const lease=(owner,generation=1)=>({schema:"aerobeat/media_lease_snapshot",versi
 
 // Public settings constructor/defaults/bounds are strict, immutable, deterministic, and complete.
 {
-  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:0,maximum:Number.POSITIVE_INFINITY},wristBombColliderScale:{minimum:0,maximum:2},colliderDepthForward:{minimum:0,maximum:Number.POSITIVE_INFINITY},colliderDepthBackward:{minimum:0,maximum:Number.POSITIVE_INFINITY}});
+  assert.equal(maximumColliderSampleFreshnessMs,150);assert.equal(maximumColliderSampleGapMs,150);assert.deepEqual(flowColliderSettingsBounds,{colliderRadius:{minimum:0,maximum:.5},directionToleranceDegrees:{minimum:0,maximum:90},timingWindowMs:{minimum:50,maximum:300},colliderScale:{minimum:0,maximum:Number.POSITIVE_INFINITY},wristBombColliderScale:{minimum:0,maximum:2},bombScale:{minimum:.1,maximum:2},colliderDepthForward:{minimum:0,maximum:Number.POSITIVE_INFINITY},colliderDepthBackward:{minimum:0,maximum:Number.POSITIVE_INFINITY}});
   assert.deepEqual(createFlowColliderSettings(),publicDefaultFlowColliderSettings);assert.equal(publicDefaultFlowColliderSettings.colliderVisible,false);assert.equal(Object.isFrozen(createFlowColliderSettings()),true);assert.match(flowColliderSettingsIdentity(createFlowColliderSettings()),/^sha256:[a-f0-9]{64}$/u);
   assert.equal(createFlowColliderSettings(settings({colliderVisible:true})).colliderVisible,true,"assembly four-field volume accepted");
   for(const key of ["colliderScale","colliderDepthForward","colliderDepthBackward"]){for(const value of [0,.00001,9999999,Number.MAX_VALUE])assert.equal(createFlowColliderSettings(settings({[key]:value}))[key],value,`${key} accepts finite nonnegative ${value}`);for(const bad of [-1,NaN,Infinity,-Infinity])assert.throws(()=>createFlowColliderSettings(settings({[key]:bad})),/Flow Collider/u,`${key} rejects ${bad}`);}

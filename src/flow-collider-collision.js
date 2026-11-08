@@ -31,6 +31,7 @@ export const flowColliderSettingsBounds = Object.freeze({
   timingWindowMs: Object.freeze({ minimum: 50, maximum: 300 }),
   colliderScale: Object.freeze({ minimum: 0, maximum: Number.POSITIVE_INFINITY }),
   wristBombColliderScale: Object.freeze({ minimum: 0, maximum: 2 }),
+  bombScale: Object.freeze({ minimum: 0.1, maximum: 2 }),
   colliderDepthForward: Object.freeze({ minimum: 0, maximum: Number.POSITIVE_INFINITY }),
   colliderDepthBackward: Object.freeze({ minimum: 0, maximum: Number.POSITIVE_INFINITY })
 });
@@ -62,9 +63,9 @@ const SETTING_KEYS = Object.freeze([...VISIBLE_SETTING_KEYS, "wristBombColliderS
 export function createFlowColliderSettings(value = defaultFlowColliderSettings) {
   if (value === null || typeof value !== "object" || Array.isArray(value) || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new TypeError("Flow Collider settings must be a plain record");
   const keys = Reflect.ownKeys(value);
-  const baseKeys = keys.filter((key) => key !== "colliderDepthBackwardAthleteFacing");
+  const baseKeys = keys.filter((key) => key !== "colliderDepthBackwardAthleteFacing" && key !== "bombScale");
   const oldKeys = baseKeys.includes("wristBombColliderScale") ? SETTING_KEYS : baseKeys.length === LEGACY_SETTING_KEYS.length ? LEGACY_SETTING_KEYS : baseKeys.length === PRE_VISIBILITY_SETTING_KEYS.length ? PRE_VISIBILITY_SETTING_KEYS : VISIBLE_SETTING_KEYS;
-  const exactKeys = keys.includes("colliderDepthBackwardAthleteFacing") ? [...oldKeys, "colliderDepthBackwardAthleteFacing"] : oldKeys;
+  const exactKeys = [...oldKeys, ...(keys.includes("colliderDepthBackwardAthleteFacing") ? ["colliderDepthBackwardAthleteFacing"] : []), ...(keys.includes("bombScale") ? ["bombScale"] : [])];
   if (keys.length !== exactKeys.length || keys.some((key) => typeof key !== "string" || !exactKeys.includes(key))) throw new TypeError("Flow Collider settings require every exact field and no extras");
   /** @type {Record<string, unknown>} */ const record = {};
   for (const key of exactKeys) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) throw new TypeError("Flow Collider settings cannot contain accessors or hidden fields"); record[key] = descriptor.value; }
@@ -78,9 +79,10 @@ export function createFlowColliderSettings(value = defaultFlowColliderSettings) 
   const colliderDepthBackwardAthleteFacing = record.colliderDepthBackwardAthleteFacing === true;
   const colliderScale = boundedSetting(record.colliderScale ?? 1, flowColliderSettingsBounds.colliderScale, "collider scale");
   const wristBombColliderScale = boundedSetting(record.wristBombColliderScale ?? 1, flowColliderSettingsBounds.wristBombColliderScale, "wrist bomb collider scale");
+  const bombScale = boundedSetting(keys.includes("bombScale") ? record.bombScale : 1, flowColliderSettingsBounds.bombScale, "bomb scale");
   const colliderDepthForward = boundedSetting(record.colliderDepthForward ?? 1, flowColliderSettingsBounds.colliderDepthForward, "forward depth");
   const colliderDepthBackward = boundedSetting(record.colliderDepthBackward ?? 1, flowColliderSettingsBounds.colliderDepthBackward, "backward depth");
-  const normalized = Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, colliderDepthBackwardAthleteFacing, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }) });
+  const normalized = Object.freeze({ schema: record.schema, version: record.version, algorithm: record.algorithm, colliderRadius, enforceAuthoredDirection: record.enforceAuthoredDirection, directionToleranceDegrees, timingWindowMs, colliderVisible, colliderScale, colliderDepthForward, colliderDepthBackward, colliderDepthBackwardAthleteFacing, ...(record.wristBombColliderScale === undefined ? {} : { wristBombColliderScale }), ...(keys.includes("bombScale") ? { bombScale } : {}) });
   return normalized;
 }
 
@@ -88,7 +90,7 @@ export function createFlowColliderSettings(value = defaultFlowColliderSettings) 
 function boundedSetting(value, bounds, label) { if (typeof value !== "number" || !Number.isFinite(value) || value < bounds.minimum || value > bounds.maximum) throw new RangeError(`Flow Collider ${label} is outside its bounded range`); return Object.is(value, -0) ? 0 : value; }
 
 /** @param {unknown} settings */
-export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; const baseKeys = legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS; const keys = exact.colliderDepthBackwardAthleteFacing === false ? baseKeys : [...baseKeys, "colliderDepthBackwardAthleteFacing"]; return `sha256:${new Sha256().update(JSON.stringify((Number(exact.wristBombColliderScale ?? 1) === 1 ? keys : [...keys, "wristBombColliderScale"]).map((key) => exact[key]))).digestHex()}`; }
+export function flowColliderSettingsIdentity(settings) { const exact = createFlowColliderSettings(settings); const legacy = exact.colliderScale === 1 && exact.colliderDepthForward === 1 && exact.colliderDepthBackward === 1; const baseKeys = legacy ? LEGACY_SETTING_KEYS : PRE_VISIBILITY_SETTING_KEYS; const keys = exact.colliderDepthBackwardAthleteFacing === false ? baseKeys : [...baseKeys, "colliderDepthBackwardAthleteFacing"]; return `sha256:${new Sha256().update(JSON.stringify([...keys, ...(Number(exact.wristBombColliderScale ?? 1) === 1 ? [] : ["wristBombColliderScale"]), ...(Number(exact.bombScale ?? 1) === 1 ? [] : ["bombScale"])].map((key) => key === "bombScale" ? [key, exact[key]] : exact[key]))).digestHex()}`; }
 
 /**
  * Minimum judge-space displacement over the smoothing window before the
@@ -180,8 +182,9 @@ export function flowNoteCellBox(event) {
 
 /**
  * A bomb tests only a measured wrist-centered sphere, never a saber capsule,
- * glove, nose, or another body landmark. The target is its canonical 1x1
- * placement box; sphere/box contact is inclusive at the closest point.
+ * glove, nose, or another body landmark. The target is the circular central
+ * body (0.22 WU times actual bomb scale), excluding spikes and decorative ring.
+ * Circle/circle contact is inclusive at tangency.
  * The fixed 0.12 WU radius matches the renderer's 0.24 WU diameter at scale
  * one; neither equipment orientation/scale nor target equipment depth applies.
  * @param {DataRecord} event
@@ -193,11 +196,10 @@ export function wristBombSphereContactsFlowTarget(event, wrist, settings) {
   if (scale === 0) return false;
   const timingWindowMs = Number(settings.timingWindowMs);
   if (wrist.songTimeMs < Number(event.centerTimestampMs) - timingWindowMs || wrist.songTimeMs > Number(event.centerTimestampMs) + timingWindowMs) return false;
-  const cell = flowNoteCellBox(event);
-  const half = 0.5;
-  const dx = Math.max(Math.abs(wrist.sx - cell.centerX) - half, 0);
-  const dy = Math.max(Math.abs(wrist.sy - cell.centerY) - half, 0);
-  const radius = WRIST_BOMB_RADIUS_WU * scale;
+  const center = targetCenterForPlacement(Number(event.placement));
+  const dx = wrist.sx - center.x;
+  const dy = wrist.sy - center.y;
+  const radius = 0.22 * Number(settings.bombScale ?? 1) + WRIST_BOMB_RADIUS_WU * scale;
   return dx * dx + dy * dy <= radius * radius + Number.EPSILON;
 }
 
